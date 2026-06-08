@@ -160,6 +160,7 @@ A capability profile must include:
 | `quality_profile` | enum | Relative solution quality. Valid values (ordered ascending): `Baseline` \< `Competitive` \< `Near-Optimal`. No other values are valid. A capability profile declaring an unrecognized `quality_profile` value is malformed. |
 | `cost_profile` | positive number | Per-execution cost estimate. Dimensionless unit; units are defined relative to a common scale established by the backend registration contract (OQ-2). For `BudgetCapped` filtering (FR-5 Phase 2), the Scheduler reads `cost_profile` directly. |
 | `is_provisional` | bool | Whether this backend is under evaluation rather than in production use. Provisional backends (`is_provisional = true`) are excluded from selection under all objective modes except `Experimental` via the `ProvisionalBackendExcluded` condition in FR-5 Phase 2. |
+| `supported_contract_version` | uint32 | The SolverContract version this backend implements (SPEC-004 FR-14). The Worker reads this field before dispatch and validates that the version it intends to send matches the declared value. A pre-dispatch mismatch is a Worker configuration error; a post-dispatch mismatch detected by the backend produces `ContractVersionMismatch` (SPEC-004 FR-8). Current value: 1. |
 
 The mechanism by which capability profiles are registered with the Scheduler is an open question (OQ-2). The OQ-2 resolution is responsible for validating capability profile internal consistency at registration time.
 
