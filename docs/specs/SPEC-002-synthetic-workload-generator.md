@@ -6,7 +6,7 @@
 
 **Title:** Synthetic Workload Generator
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
