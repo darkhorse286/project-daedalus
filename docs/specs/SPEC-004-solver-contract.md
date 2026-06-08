@@ -6,13 +6,13 @@
 
 **Title:** Solver Contract
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
 **Created:** 2026-06-08
 
-**Last Updated:** 2026-06-08
+**Last Updated:** 2026-06-08 (Revision 1 — Engineering and Architecture Review)
 
 **Supersedes:** None
 
@@ -77,7 +77,7 @@ SPEC-004 defines the Solver Contract's scope and explicitly allocates responsibi
 
 **Acceptance Criteria:**
 - No component performs responsibilities allocated to another component at this boundary
-- Adding a new backend requires only: implementing the SolverContract, registering a capability profile (SPEC-003 FR-4), and documenting the execution_seed derivation per ADR-010 Decision 4
+- Adding a new backend requires only: implementing the SolverContract, registering a capability profile (SPEC-003 FR-4), and documenting its seed usage policy in its own specification (that it accepts and uses the Worker-provided `execution_seed` as its exclusive entropy source via PCG64, per ADR-010 Decision 1 and FR-11.3)
 - No changes to the Scheduler, Worker, or Core contract-handling logic are required to add a new backend
 
 ---
@@ -92,7 +92,7 @@ The SolverRequest is the complete input delivered by the Worker to a backend at 
 | `contract_version` | uint32 | Required | The contract version being used. Current value: 1. See FR-14 for versioning semantics. Backends receiving an unsupported value must return Failed with failure_code = ContractVersionMismatch. |
 | `routing_problem` | RoutingProblem | Required | The SPEC-001 C++ domain representation of the routing problem. Validated by Core before invocation (ADR-009). Contains all fields defined in SPEC-001 FR-14: coordinates, demands, vehicle fleet, capacity, time windows, service durations, and seed. |
 | `execution_timeout_ms` | uint32 | Required | Maximum execution budget in milliseconds. Must be a positive integer (> 0). The Worker enforces this externally. Solvers should self-terminate by this deadline. See FR-10. |
-| `execution_seed` | uint64 | Required | PRNG seed for this solver execution. Derived from the routing problem seed (SPEC-001 FR-6) using a deterministic derivation documented in the solver's specification (ADR-010 Decision 4). This is the exclusive permitted entropy source for all reproducibility-critical stochastic operations within the execution. See FR-11. |
+| `execution_seed` | uint64 | Required | PRNG seed for this solver execution. Derived from the routing problem seed (SPEC-001 FR-6) using a uniform derivation policy owned by the Worker (FR-11.3). Solver specifications document seed *usage* policy, not derivation. This is the exclusive permitted entropy source for all reproducibility-critical stochastic operations within the execution. See FR-11. |
 | `job_id` | UUID | Required | Job identifier. For trace correlation only. Does not affect solver execution. |
 | `decision_id` | UUID | Required | Scheduler decision record identifier (SPEC-003 FR-10). For trace correlation and evidence only. Does not affect solver execution. |
 | `backend_id` | string | Required | Identifier of the backend being invoked, matching the `backend_id` in the registered capability profile (SPEC-003 FR-4). For correlation only. Does not affect solver execution. |
@@ -161,6 +161,8 @@ A RoutePlan is the solution payload. It represents a complete assignment of all 
 - Route at index `i` corresponds to vehicle `i`.
 - Each route entry is an ordered sequence of stop IDs (non-negative integers matching SPEC-001 FR-4 stop identifiers).
 - An empty sequence at route index `i` is valid and means vehicle `i` is unused.
+
+**Depot exclusion:** Routes do not include the depot. All vehicles implicitly depart from and return to the depot (SPEC-001 FR-3). A route enumerates only the intermediate stops visited by that vehicle between depot departure and return. The depot has no stop_id in the SPEC-001 domain model (SPEC-001 FR-3) and is never represented in a RoutePlan route sequence. The completeness requirement in condition 4 below applies only to the stop_ids defined in the routing problem's stop list; the depot is not a stop and is not subject to that check.
 
 **Structural validity requirements (contract-level constraints):**
 The backend must verify all of the following before returning outcome = Succeeded. A solution present in a Timeout or Cancelled response must also satisfy these requirements.
@@ -237,7 +239,7 @@ SolverFailureDetail provides structured information for every non-Succeeded outc
 | `failure_code` | SolverFailureCode | Required | Structured code identifying the failure category. |
 | `failure_message` | string | Required | Human-readable description. Not for programmatic consumption. |
 
-**SolverFailureCode enumeration (closed set):**
+**SolverFailureCode enumeration (forward-extensible):** New values may be added as non-breaking changes (FR-14). Consumers must treat any unrecognized value as `InternalError`.
 
 | Code | Used With | Meaning |
 |---|---|---|
@@ -310,15 +312,15 @@ All solver executions must satisfy the following requirements, which bind ADR-01
 
 1. **Reproducibility invariant:** Given identical inputs — same `routing_problem`, same `execution_seed`, same `contract_version` — a backend must produce an identical `solution` on every invocation. `execution_duration_ms` is excluded from this invariant.
 
-2. **Seed authority:** `execution_seed` in the SolverRequest is the exclusive permitted entropy source for all reproducibility-critical stochastic operations within the execution. System time, process ID, OS random sources (`/dev/urandom`, `getrandom`, `std::random_device`), and hardware entropy are prohibited in reproducibility-critical paths (ADR-010 Decision 4).
+2. **Seed authority:** `execution_seed` in the SolverRequest is the exclusive permitted entropy source for all reproducibility-critical stochastic operations within the execution. System time, process ID, OS random sources (`/dev/urandom`, `getrandom`, `std::random_device`), and hardware entropy are prohibited in reproducibility-critical paths (ADR-010 Decision 4). Backends must not use `routing_problem.seed` (SPEC-001 FR-6) as a PRNG entropy source. The problem seed is a scenario reproducibility identifier; `execution_seed` is the solver execution entropy source. Backends have access to both fields in the SolverRequest and must use only `execution_seed`.
 
-3. **Seed derivation:** `execution_seed` is computed by the Worker from the routing problem seed (SPEC-001 FR-6) using a deterministic derivation strategy documented in the solver's own specification. The backend accepts and uses the provided `execution_seed`; it does not derive its own seed. The derivation strategy must follow ADR-010 Decision 4.
+3. **Seed derivation:** `execution_seed` is computed by the Worker from the routing problem seed (SPEC-001 FR-6) using a uniform derivation policy that applies identically to all backends regardless of `backend_id`. The derivation policy is owned by the Worker specification. The specific derivation formula is an implementation planning decision; at MVP scope all backends receive the same derivation. Each solver specification documents its seed *usage* policy — that it uses the Worker-provided `execution_seed` as its exclusive entropy source via PCG64 (ADR-010 Decision 1) — but does not define a custom derivation from the problem seed. The backend accepts and uses the provided `execution_seed`; it does not derive its own seed from the problem seed.
 
 4. **PRNG policy:** All stochastic computations within a solver execution must use PCG64 seeded from `execution_seed` (ADR-010 Decision 1). `std::uniform_int_distribution` and `std::normal_distribution` are prohibited in reproducibility-critical paths. The Box-Muller transform and bias-free integer sampling algorithms are the approved distribution methods (ADR-010 Decision 3).
 
 5. **Classical deterministic backends:** Backends with no stochastic operations (e.g., nearest-neighbor, greedy insertion) produce identical outputs for identical inputs regardless of `execution_seed` by construction. These backends must still accept the `execution_seed` field without error, for contract uniformity, but do not use it.
 
-6. **Outcome code reproducibility:** `Timeout` and `Cancelled` outcomes are by definition non-deterministic (they depend on timing and external signals). The reproducibility invariant applies only when `outcome = Succeeded`.
+6. **Outcome code reproducibility:** `Timeout` and `Cancelled` outcomes depend on timing and external signals and carry no reproducibility obligation. The reproducibility invariant applies only when **both** invocations produce `outcome = Succeeded`. A determinism test that compares a Succeeded response against a Timeout response does not constitute a reproducibility failure.
 
 **Acceptance Criteria:**
 - Two identical SolverRequests produce identical SolverResponse solutions when outcome = Succeeded on both
@@ -338,12 +340,12 @@ The Solver Contract enforces ADR-008 Backend Neutrality through the following st
 
 3. **No identity routing:** The Worker and Core must not branch on `backend_id` in contract handling logic. All SolverResponses are processed through the same contract handling path regardless of which backend produced them.
 
-4. **Additive backend registration:** Adding a new backend requires only: implementing SolverContract, registering a capability profile in the backend registry (SPEC-003 FR-4), and documenting the `execution_seed` derivation in the solver specification (ADR-010 Decision 4). No changes to the Scheduler, Worker, Core contract-handling logic, or any existing backend are required.
+4. **Additive backend registration:** Adding a new backend requires only: implementing SolverContract, registering a capability profile in the backend registry (SPEC-003 FR-4), and documenting the seed usage policy in the solver specification (ADR-010 Decision 1 — use Worker-provided `execution_seed` as exclusive entropy source via PCG64). No changes to the Scheduler, Worker, Core contract-handling logic, or any existing backend are required.
 
 5. **Extension metadata isolation:** `extension_metadata` does not affect normalized contract semantics. Core and Worker must not fail, reject, or alter behavior based on `extension_metadata` contents or absence.
 
 **Acceptance Criteria:**
-- A new backend passes contract conformance tests (FR-15 Testability) without any changes to Scheduler, Worker, or Core
+- A new backend passes all contract conformance tests defined in the Testability section without any changes to Scheduler, Worker, or Core
 - Confirmed by code review: no branch on `backend_id` exists in Worker or Core contract processing logic
 
 ---
@@ -366,6 +368,7 @@ The Solver Contract enforces ADR-008 Backend Neutrality through the following st
 - `extension_metadata` must not contain routing problem raw data (geographic coordinate arrays, full stop lists) — per SPEC-001 Security Considerations on log safety
 - `extension_metadata` must not replicate any normalized SolverResponse field (outcome, statistics, failure fields)
 - The set of recognized keys per backend is documented in each solver's specification; unrecognized keys must be silently ignored by generic consumers (Core, Worker)
+- Compliance with the raw-data prohibition is not enforceable at the contract level. It is enforced through code review and backend specification acceptance. Each backend specification must explicitly affirm that its `extension_metadata` schema excludes raw problem data. Automated enforcement is deferred beyond MVP scope.
 
 **Acceptance Criteria:**
 - Core and Worker produce identical behavior regardless of whether `extension_metadata` is present, absent, or contains unknown keys
@@ -415,7 +418,7 @@ The Solver Contract enforces ADR-008 Backend Neutrality through the following st
 The `solver.execute` OTel span (defined in architecture.md) is emitted by the Worker for every solver invocation. The Worker owns span emission; the backend does not produce OTel spans.
 
 **Span: `solver.execute`**
-- Scope: Begins immediately before the SolverRequest is dispatched to the backend; ends when the SolverResponse is received and structurally validated by the Worker.
+- Scope: Begins immediately before the SolverRequest is dispatched to the backend; ends when the SolverResponse is received and structurally validated by the Worker. When the Worker constructs a SolverResponse due to backend termination (Worker-enforced timeout) or process failure (unresponsive backend), the span ends when the Worker completes constructing the response. The `execution_duration_ms` span attribute is the Worker-measured elapsed time from dispatch to construction completion in these cases.
 - Required attributes:
 
 | Attribute | Description |
@@ -428,8 +431,11 @@ The `solver.execute` OTel span (defined in architecture.md) is emitted by the Wo
 | `execution_duration_ms` | From `statistics.execution_duration_ms` |
 | `stop_count` | Number of stops in the routing problem |
 
-- When `outcome ≠ Succeeded`, the span status is Error
-- When outcome = Timeout or Cancelled and a solution is present, the span status is Error (partial execution)
+- Span status rules:
+  - `outcome = Succeeded`: span status **OK**
+  - `outcome = Infeasible` or `outcome = Failed`: span status **Error**
+  - `outcome = Timeout` or `outcome = Cancelled` with no solution: span status **Error**
+  - `outcome = Timeout` or `outcome = Cancelled` with solution present: span status **Unset** — the solver produced a usable result within the execution boundary; this is not a system failure. The `outcome` attribute distinguishes these cases in queries without inflating error-rate metrics.
 - `extension_metadata` contents are not included as span attributes (cardinality control)
 - The span is correlatable with the Scheduler decision via `decision_id` and with the job via `job_id`
 
@@ -447,7 +453,7 @@ The `solver.execute` OTel span (defined in architecture.md) is emitted by the Wo
 - The Solver Contract does not define route quality evaluation or the normalized quality metric (Core Quality Evaluation Specification responsibility)
 - The Solver Contract does not define regret calculation (Core responsibility)
 - The Solver Contract does not define the Python adapter transport protocol (blocked on ADR-005 transport decision)
-- The Solver Contract does not define how `execution_seed` is derived from the problem seed for any specific backend (per-backend specification responsibility, constrained by ADR-010 Decision 4)
+- The Solver Contract does not define the specific formula by which the Worker derives `execution_seed` from the problem seed (Worker specification responsibility; the uniformity policy is defined in FR-11.3)
 - The Solver Contract does not define solver timeout response time obligations beyond "must respond to cancellation" (implementation planning concern)
 - The Solver Contract does not define QUBO problem formulation or annealing schedule (backend-internal concerns)
 - The Solver Contract does not define multi-vehicle route optimization strategy; route planning is solver-internal
@@ -462,7 +468,7 @@ The `solver.execute` OTel span (defined in architecture.md) is emitted by the Wo
 3. Solver backends can self-terminate within a bounded time when `execution_timeout_ms` expires. The specific response time bound is a solver implementation concern.
 4. The Python adapter process realizes the same logical SolverContract through a transport protocol. The logical contract schema applies uniformly; the transport is ADR-005's concern.
 5. MVP backends (nearest-neighbor, greedy insertion, QUBO simulated annealing) can all produce capacity-valid, complete route plans as their primary output type within reasonable time budgets.
-6. The QUBO simulated annealing backend can implement anytime behavior: maintaining a running best-complete-solution returnable at any point before deadline.
+6. The QUBO simulated annealing backend can implement anytime behavior: maintaining a running best-complete-solution that has been decoded from the QUBO binary assignment space and repair-processed into a capacity-valid RoutePlan satisfying FR-5 structural requirements, returnable at any point before deadline. This is an implementation risk: a partial annealing state may not decode into a complete, feasible route plan, in which case the backend returns Timeout or Cancelled with no solution. This risk must be validated and explicitly addressed during QUBO backend specification.
 
 ---
 
@@ -523,6 +529,7 @@ A SolverResponse is always produced — even on failure. The output is consumed 
 **Condition:** Backend does not self-terminate before `execution_timeout_ms` expires.
 **Behavior:** Worker terminates the backend and constructs a Timeout SolverResponse on its behalf with no `solution` field.
 **Fallback:** Any in-progress solution in the backend at termination time is not recoverable; the job records a Timeout with no route plan.
+**Worker-constructed response fields:** `contract_version` = the value sent in the SolverRequest; `outcome = Timeout`; `failure` present with `failure_code = ExecutionTimeout`; `solution` absent; `statistics.execution_duration_ms` = the Worker's measured wall-clock time from SolverRequest dispatch to backend termination.
 
 ---
 
@@ -540,6 +547,7 @@ A SolverResponse is always produced — even on failure. The output is consumed 
 **Behavior:** Worker detects unresponsiveness (via timeout or process exit signal), constructs a Failed SolverResponse on behalf of the backend.
 **Fallback:** Worker records the failure; job fails.
 **Note:** This fallback is Worker orchestration behavior. SPEC-004 defines only that a SolverResponse is always consumed by the Worker; the Worker handles backends that fail to produce one.
+**Worker-constructed response fields:** `contract_version` = the value sent in the SolverRequest; `outcome = Failed`; `failure` present with `failure_code = InternalError`; `solution` absent; `statistics.execution_duration_ms` = the Worker's measured wall-clock time from SolverRequest dispatch to the detected failure point.
 
 ---
 
@@ -634,10 +642,12 @@ Backend-specific questions (QUBO energy convergence, annealing acceptance rates)
 
 # Documentation Updates Required
 
-- **ADR-008**: The concrete solver contract interface promised by this ADR is now defined by SPEC-004. ADR-008 may be advanced to Accepted status following SPEC-004 acceptance.
+- **ADR-008**: The concrete solver contract interface promised by this ADR is now defined by SPEC-004. ADR-008 may be advanced to Accepted status following SPEC-004 acceptance. At that time, ADR-008 Decision 2 must be revised to read: "A solver returns a route plan, execution duration, and execution statistics. Quality metrics are computed by Core from the normalized route plan output. Execution cost at MVP scope is represented by the static `cost_profile` declared in the backend capability profile (SPEC-003 FR-4)." This revision aligns ADR-008 with the architectural model where Core owns quality evaluation via the normalized contract output.
 - **SPEC-001 FR-15**: The dependent constraint ("The concrete solver contract interface is a dependent output of this spec and will be defined during implementation planning") is now satisfied by SPEC-004.
+- **SPEC-001 FR-6**: Updated to reflect that the problem seed does not control solver execution directly; the Worker derives `execution_seed` from it (applied in this revision cycle).
+- **SPEC-003 FR-4**: The backend capability profile must be extended with a `supported_contract_version` field (uint32, required, current value: 1). The Worker reads this field before dispatch and validates that the version it intends to send matches the declared value. A pre-dispatch mismatch is a Worker configuration error. A post-dispatch mismatch detected by the backend produces `ContractVersionMismatch` per FR-14 (applied in this revision cycle).
 - **docs/architecture.md**: No changes required. SPEC-004 conforms to the architecture principles and required spans.
-- **Each solver specification** (nearest-neighbor, greedy insertion, QUBO simulated annealing): Must document `execution_seed` derivation strategy from the problem seed per ADR-010 Decision 4, and must identify which `SolverOutcome` values the backend supports.
+- **Each solver specification** (nearest-neighbor, greedy insertion, QUBO simulated annealing): Must document its seed *usage* policy — that it accepts and uses the Worker-provided `execution_seed` as its exclusive entropy source via PCG64 (ADR-010 Decision 1). Solver specifications do not define a custom derivation from the problem seed; the derivation is the Worker's responsibility. Must also identify which `SolverOutcome` values the backend supports.
 
 ---
 
@@ -659,7 +669,7 @@ Backend-specific questions (QUBO energy convergence, annealing acceptance rates)
 
 **Question:** Should solver backends report actual per-execution measured cost in the SolverResponse, or is the capability profile's declared `cost_profile` (SPEC-003 FR-4) sufficient for evidence purposes?
 
-**Why it matters:** ADR-008 states that "A solver returns a result that includes... execution cost." The current SPEC-004 definition treats `cost_profile` as a static per-execution estimate declared at capability registration time. If actual per-execution cost varies — for example, a cloud-based backend with usage-based pricing introduced in a future iteration — the static estimate diverges from actual cost, making regret analysis less accurate.
+**Why it matters:** ADR-008 Decision 2 originally stated that "A solver returns a result that includes... execution cost." That language will be revised when ADR-008 advances to Accepted (see Documentation Updates Required), replacing solver-reported cost with the static `cost_profile` at MVP scope. The open question is whether a future iteration with usage-based backends requires actual per-execution cost in the SolverResponse. If actual per-execution cost varies — for example, a cloud-based backend with usage-based pricing — the static `cost_profile` estimate diverges from actual cost, making regret analysis less accurate.
 
 **MVP position:** All MVP backends are local. `cost_profile` is a static proxy. No actual cost measurement mechanism is defined at MVP scope. The Scheduler uses `cost_profile` for BudgetCapped filtering (SPEC-003 FR-5 Phase 2); the decision record records `predicted_cost` (SPEC-003 FR-10). Both are satisfied by the static `cost_profile`.
 
@@ -691,15 +701,13 @@ Backend-specific questions (QUBO energy convergence, annealing acceptance rates)
 
 ### OQ-4: RoutePlan Structural Validation on Timeout and Cancelled Responses
 
-**Question:** Is the Worker required to validate FR-5 structural requirements for solutions present in Timeout and Cancelled responses, or only for Succeeded responses?
+**Status: CLOSED**
 
-**Why it matters:** The contract states that solutions in Timeout and Cancelled responses must satisfy FR-5 structural requirements. The Worker must decide whether to perform this validation — and what to do if the validation fails (treat the response as Failed? discard the solution and retain the Timeout outcome?). This is Worker orchestration behavior outside SPEC-004 scope, but it depends on the contract's stated requirements.
+**Resolution:** The SPEC-004 contract requirement is resolved: any solution present in a Timeout or Cancelled response must satisfy all FR-5 structural validity requirements. This is stated in FR-5 and is a SPEC-004 contract obligation, not an open question.
 
-**SPEC-004 position:** The contract requires structural validity for solutions in all outcome types. Worker validation of these cases and the Worker's response to violations is a Worker specification concern.
+The remaining question — what the Worker does upon detecting a structural violation in a Timeout or Cancelled solution (discard the solution and retain the Timeout outcome? treat the invocation as Failed?) — is Worker orchestration behavior outside SPEC-004's responsibility boundary per FR-1. It is deferred to the Worker specification.
 
-**Ownership:** Worker specification. SPEC-004 defines the requirement (solution must be valid if present). The Worker's validation behavior is the Worker specification's concern.
-
-**Blocking:** Not blocking SPEC-004 acceptance.
+**Ownership:** Worker specification.
 
 ---
 
@@ -731,7 +739,7 @@ Backend-specific questions (QUBO energy convergence, annealing acceptance rates)
 - [ ] OQ-1 resolved — Python adapter transport realization (blocking for Python adapter; non-blocking for SPEC-004 acceptance)
 - [ ] OQ-2 resolved — actual execution cost reporting (non-blocking for MVP)
 - [ ] OQ-3 resolved — partial route plan semantics (non-blocking for MVP)
-- [ ] OQ-4 resolved — Timeout/Cancelled solution validation responsibility (non-blocking for acceptance)
+- [x] OQ-4 closed — Contract requirement resolved in SPEC-004 (solutions in Timeout/Cancelled responses must satisfy FR-5 structural requirements). Worker handling behavior upon violation is a Worker specification concern.
 
 ---
 
