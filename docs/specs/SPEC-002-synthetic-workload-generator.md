@@ -16,7 +16,7 @@
 
 **Related ADRs:** ADR-001, ADR-004, ADR-006, ADR-009, ADR-010
 
-**Related Specs:** SPEC-001, SPEC-003 (pending)
+**Related Specs:** SPEC-001, SPEC-003
 
 ---
 
