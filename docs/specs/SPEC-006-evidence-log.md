@@ -1,7 +1,9 @@
 # SPEC-006 — Evidence Log
-
+## Metadata
+**Feature ID:** SPEC-006
+**Title:** Evidence Log
 **Status:** Proposed
-**Author:** Project Owner
+**Author:** Darkhorse286
 **Created:** 2026-06-08
 **Last Modified:** 2026-06-09
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005
