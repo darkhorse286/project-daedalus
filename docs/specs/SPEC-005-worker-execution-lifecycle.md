@@ -20,7 +20,7 @@
 
 **Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-004, (pending) Evidence Log Specification, (pending) Core Quality Evaluation Specification
+**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006 Evidence Log, (pending) Core Quality Evaluation Specification
 
 ---
 
@@ -642,6 +642,7 @@ The Worker is responsible for emitting the required OpenTelemetry spans for the 
 | `scheduler.score_solvers` | Scheduler (via Core) | Emitted by Core/Scheduler during FR-5; defined in SPEC-003 FR-15 |
 | `solver.execute` | Worker | Covers FR-9/FR-10: SolverRequest dispatch through SolverResponse receipt; defined in SPEC-004 FR-15 |
 | `result.evaluate` | Worker | Covers FR-15: Core quality evaluation handoff |
+| `worker.evidence.persist` | Worker | Covers FR-16: evidence artifact persistence to PostgreSQL; required by SPEC-006 FR-18 |
 | `report.generate` | Worker | Covers FR-17: report generation |
 | `job.complete` | Worker | Covers FR-18: terminal state transition and ACK |
 
@@ -688,7 +689,16 @@ The Worker is responsible for emitting the required OpenTelemetry spans for the 
 | `terminal_state` | `Completed` or `Failed` |
 | `solver_outcome` | As above |
 
+**`worker.evidence.persist`**:
+| Attribute | Description |
+|---|---|
+| `job_id` | Job identifier |
+| `artifact_types_written` | List of artifact types successfully written |
+| `outcome` | `Success` or `Failure` |
+
 **`solver.execute`** is defined in SPEC-004 FR-15. The Worker emits it per that definition.
+
+**`worker.evidence.persist`** observability requirements are declared in SPEC-006 FR-18. This specification is the authoritative definition of span attributes and status rules.
 
 **Span context propagation:**
 All Worker spans are children of `job.consume`. Core-emitted spans (`features.extract`, `scheduler.score_solvers`) must propagate the trace context received from the Worker so they appear as children of `job.consume` in the trace. The specific context propagation mechanism is an implementation planning concern.
@@ -700,6 +710,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 | `job.consume` | OK when `terminal_state = Completed`; Error when `terminal_state = Failed` | Error |
 | `problem.load` | OK | Error |
 | `result.evaluate` | OK | Error |
+| `worker.evidence.persist` | OK | Error |
 | `report.generate` | OK | Unset (report generation failure does not propagate to job failure) |
 | `job.complete` | OK when `terminal_state = Completed`; Error when `terminal_state = Failed` | Error |
 
@@ -961,7 +972,9 @@ The Worker emits the following structured log events at each lifecycle stage. Al
 | `worker.solver.response.received` | FR-11 | `job_id`, `decision_id`, `outcome`, `execution_duration_ms`, `response_source` | `response_source`: `backend` or `worker_constructed` |
 | `worker.quality.evaluation.skipped` | FR-15 | `job_id`, `decision_id`, `solver_outcome`, `reason` | Emitted when no RoutePlan is present; `reason` identifies the outcome class |
 | `worker.quality.evaluation.failed` | FR-15 (infrastructure failure) | `job_id`, `decision_id`, `error_type` | Quality fields will be null in persisted record |
-| `worker.evidence.persisted` | FR-16 | `job_id`, `decision_id`, `artifacts_persisted` | `artifacts_persisted`: list of artifact types written |
+| `worker.evidence.persisted` | FR-16 | `job_id`, `decision_id`, `artifacts_written`, `duration_ms` | `artifacts_written`: list of artifact types successfully written; `duration_ms`: persistence operation duration in milliseconds |
+| `worker.evidence.upsert.collision` | FR-16 | `job_id`, `artifact_type` | Emitted when a `job_id`-keyed upsert updates an existing record (re-execution detected) |
+| `worker.evidence.persistence.failed` | FR-16 | `job_id`, `artifact_type`, `failure_class` | Emitted when an artifact persistence operation fails; `failure_class` identifies the failure type per SPEC-005 FR-13 |
 | `worker.report.generation.failed` | FR-17 | `job_id`, `error_type` | Report generation failure; job still completes |
 | `worker.job.completed` | FR-18 | `job_id`, `terminal_state`, `solver_outcome` | `solver_outcome` absent when job reached `Failed` before solver invocation |
 

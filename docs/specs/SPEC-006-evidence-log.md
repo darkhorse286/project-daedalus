@@ -1,9 +1,9 @@
 # SPEC-006 — Evidence Log
 
-**Status:** Draft
+**Status:** Proposed
 **Author:** Project Owner
 **Created:** 2026-06-08
-**Last Modified:** 2026-06-08
+**Last Modified:** 2026-06-09
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005
 **Blocks:** Core Quality Evaluation Specification (pending), Report Generator Specification (pending)
 
@@ -70,19 +70,25 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 **3.2.1** Each job is identified by a `job_id`. The `job_id` is the root identifier for the complete evidence record set associated with that job.
 
-**3.2.2** A complete evidence record set for a successfully completed job consists of exactly:
-1. One job record.
+**3.2.2** A complete evidence record set for a job in `Completed` state consists of:
+1. One job record with `status = Completed`.
 2. One decision record.
 3. One solver run record.
-4. One quality evaluation record (may be absent if quality evaluation failed or was skipped — see FR-7).
-5. Zero or one failure records (present only for pre-solver or solver-invocation failures — see FR-8).
-6. Zero or one report metadata records (present only when a report has been generated — see FR-9).
+4. Zero or one quality evaluation records (present when quality evaluation was invoked; may be absent when quality evaluation failed or was skipped — see FR-7).
+5. Zero or one report metadata records (present only when a report has been generated — see FR-9).
+
+A `Completed` job does not have a failure record. Failure records are present only for `Failed` jobs (see FR-8.5 and FR-13.3).
+
+**3.2.2a** A complete evidence record set for a job in `Failed` state consists of:
+1. One job record with `status = Failed`.
+2. One failure record. SPEC-005 FR-13 guarantees that a failure record is persisted before the NACK is issued for all permanent failures that transition the job to `Failed` state.
+3. Zero or one decision records (present when the failure stage reached Scheduling (SPEC-005 FR-5) or later; absent when the failure stage was Load (SPEC-005 FR-4) or earlier).
 
 **3.2.3** A `job_id` uniquely identifies one evidence record set. No two jobs share a `job_id`.
 
 **3.2.4** The routing problem is referenced by `problem_id` in the solver run record and the decision record. The problem data is not stored in the Evidence Log.
 
-**3.2.5** The reproducibility tuple `(problem_id, execution_seed, backend_id, contract_version)` uniquely identifies the inputs to a solver execution. The solver run record must store all four values.
+**3.2.5** The reproducibility tuple `(problem_id, execution_seed, backend_id, contract_version)` fully characterizes the inputs to a solver execution, sufficient for reproduction. The solver run record must store all four values. The tuple identifies the execution configuration; `job_id` identifies the specific job instance. Two separate jobs with identical reproducibility tuples will produce identical solver outputs when both yield `Succeeded`, per SPEC-004 FR-11's reproducibility invariant.
 
 ---
 
@@ -90,16 +96,9 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 **3.3.1** A job record enters the Evidence Log when the API layer creates it in the `Pending` state.
 
-**3.3.2** A job record transitions through the following states:
+**3.3.2** The job lifecycle states — `Pending`, `Processing`, `Completed`, and `Failed` — are defined by SPEC-005 FR-2, which is the authoritative definition. The Evidence Log stores the current lifecycle state in the job record (FR-4). The Worker is the authoritative writer of lifecycle state after the API creates the job in `Pending` state.
 
-| State | Set By | Meaning |
-|---|---|---|
-| `Pending` | API | Job created; not yet consumed by Worker. |
-| `Processing` | Worker | Worker has consumed the job message and begun execution. |
-| `Completed` | Worker | Solver executed successfully; all artifacts persisted. |
-| `Failed` | Worker | Job reached a terminal failure state. |
-
-**3.3.3** State transitions are monotonic with the exception of the `Processing` → `Pending` transition that does not occur — a job that is re-delivered after a Worker crash may be re-processed without reverting to `Pending`. The job record is updated in-place via `job_id`-keyed upsert.
+**3.3.3** State transitions are monotonic. A job that enters `Processing` state does not revert to `Pending` on re-delivery; it is re-processed in `Processing` state via idempotent operations (SPEC-005 FR-14). Once a job reaches `Completed` or `Failed`, it does not transition again.
 
 **3.3.4** A job in `Completed` or `Failed` state is terminal. The Worker must not modify the job state after reaching a terminal state. On message re-delivery for a terminal-state job, the Worker discards the message and ACKs without modifying any evidence artifact (SPEC-005 FR-14).
 
@@ -139,12 +138,14 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 |---|---|
 | `decision_id` | SPEC-003 FR-10 |
 | `problem_id` | SPEC-003 FR-10 |
+| `objective_mode` | SPEC-003 FR-10 |
 | `workload_features_snapshot` | SPEC-003 FR-10 |
 | `selected_backend_id` | SPEC-003 FR-10 |
 | `candidate_scores` | SPEC-003 FR-10 |
 | `rejection_reasons` | SPEC-003 FR-10 |
-| `predicted_quality_score` | SPEC-003 FR-10 |
-| `predicted_execution_time_ms` | SPEC-003 FR-10 |
+| `predicted_latency` | SPEC-003 FR-10 |
+| `predicted_cost` | SPEC-003 FR-10 |
+| `predicted_quality` | SPEC-003 FR-10 |
 | `confidence_score` | SPEC-003 FR-10 |
 | `decision_status` | SPEC-003 FR-10 |
 | `timestamp` | SPEC-003 FR-10 |
@@ -171,14 +172,16 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 | `problem_id` | SolverRequest (SPEC-004 FR-2) | Part of reproducibility tuple |
 | `execution_seed` | Worker (SPEC-005 FR-7, ADR-010) | Part of reproducibility tuple; derived by Worker using exclusive seed authority |
 | `backend_id` | Worker / Scheduler decision | Part of reproducibility tuple |
-| `contract_version` | Worker (SPEC-005) | Part of reproducibility tuple; the solver contract version in effect |
+| `contract_version` | Worker (SPEC-005) | Part of reproducibility tuple; the `contract_version` value from the SolverRequest (the Worker's intended contract version at dispatch time — see FR-6.2a) |
 | `solver_outcome` | SolverResponse (SPEC-004 FR-3) | `SolverOutcome` enum value (SPEC-004 FR-4) |
-| `route_plan` | SolverResponse (SPEC-004 FR-3) | Null when `solver_outcome` is not `Optimal` or `Feasible` |
+| `route_plan` | SolverResponse (SPEC-004 FR-3) | Present when the SolverResponse included a solution: required when `solver_outcome = Succeeded`; optional when `solver_outcome = Timeout` or `Cancelled` (SPEC-004 FR-9, FR-10). Null when no solution was returned (`Infeasible`, `Failed`, or `Timeout`/`Cancelled` with no solution present). |
 | `execution_statistics` | SolverResponse (SPEC-004 FR-3) | `ExecutionStatistics` (SPEC-004 FR-6); null when absent |
-| `failure_detail` | SolverResponse (SPEC-004 FR-3) | `SolverFailureDetail` (SPEC-004 FR-8); null when outcome is successful |
+| `failure_detail` | SolverResponse (SPEC-004 FR-3) | `SolverFailureDetail` (SPEC-004 FR-8); null when outcome is `Succeeded` |
 | `extension_metadata` | SolverResponse (SPEC-004 FR-13) | Backend-specific metadata; null when absent |
-| `structural_validation_status` | Worker | Whether the RoutePlan passed the Worker's structural validation check (SPEC-005 FR-12) |
+| `structural_validation_status` | Worker | Whether the RoutePlan passed the Worker's structural validation check (SPEC-005 FR-11) |
 | `persisted_at` | Worker | Timestamp at which the Worker persisted this record; UTC |
+
+**3.6.2a** The `contract_version` stored in the solver run record is the value from the SolverRequest — the Worker's intended contract version at the time of dispatch. Under a `ContractVersionMismatch` failure (SPEC-004 FR-14), this is the version the Worker sent; the backend's declared version is diagnostic context available in the `failure_detail` field.
 
 **3.6.3** The reproducibility tuple `(problem_id, execution_seed, backend_id, contract_version)` must be complete in every solver run record. A solver run record missing any element of the reproducibility tuple is a persistence error.
 
@@ -204,7 +207,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 **3.7.4** When Core quality evaluation fails due to an infrastructure failure (SPEC-005 FR-15 failure handling), the quality evaluation record is persisted with `evaluation_status` set to `Failed` and all quality score fields null. The absence of a quality evaluation result must not prevent the job from reaching `Completed` state.
 
-**3.7.5** When quality evaluation succeeds, the `hindsight_quality` field in the decision record (FR-5.4) is updated with the quality score from the evaluation result.
+**3.7.5** When quality evaluation succeeds, the Worker updates the `hindsight_quality` field in the decision record via `job_id`-keyed upsert, using the quality score returned by Core quality evaluation (SPEC-005 FR-15).
 
 **3.7.6** The quality evaluation record must support `job_id`-keyed upsert.
 
@@ -222,6 +225,8 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 - Scheduler rejection (Core returns a rejection decision rather than a selected backend).
 - Solver invocation failure before any SolverResponse is received.
 
+When the failure stage is `Schedule` (NoEligibleSolver, InvalidConfiguration, or other Scheduler decision failures in SPEC-005 FR-5), both a decision record and a failure record are persisted. The decision record carries the full per-backend rejection detail (SPEC-003 FR-9, FR-10), which is the authoritative record of why no solver was selected. The failure record provides a uniform failure stage classification queryable across all failure types without joining to the decision record. Both records serve distinct query purposes and together constitute the complete failure evidence for Schedule-stage failures.
+
 **3.8.3** The failure record must store:
 
 | Field | Notes |
@@ -232,6 +237,8 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 | `failure_detail` | Human-readable description; must not include execution_seed |
 | `is_retryable` | Whether the failure is classified as transient (NACK+requeue) or permanent (dead-letter) |
 | `failed_at` | Timestamp; UTC |
+
+`is_retryable` records the failure classification per SPEC-005 FR-13 at the time the failure record is written. For jobs that reached `Failed` via transient-failure retry exhaustion, `is_retryable` reflects the original transient failure classification (the failure was retryable, but retries were exhausted by the broker). For immediately permanent failures, `is_retryable` is `false`. This field supports diagnostic queries distinguishing "immediately permanent" from "transient but retry-limit-exhausted" failure histories.
 
 **3.8.4** The failure record must support `job_id`-keyed upsert.
 
@@ -309,7 +316,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 **3.13.1** A job in `Completed` state must have the following artifacts present in the Evidence Log:
 - One job record with `status = Completed`.
-- One decision record with `actual_outcome` populated.
+- One decision record. The `actual_outcome` field is populated when Core quality evaluation succeeded; it is null when quality evaluation failed (SPEC-005 FR-15 failure handling) or was not invoked (no RoutePlan present, per SPEC-005 FR-15 invocation rules).
 - One solver run record with the complete reproducibility tuple.
 
 **3.13.2** Quality evaluation record and report metadata record are not required for `Completed` state. Their absence is permitted and must not prevent the `Completed` transition.
@@ -340,7 +347,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 ### FR-15: Retention Requirements
 
-**3.15.1** Evidence records must be retained for a minimum of 90 days after the job's terminal timestamp (`completed_at` or `failed_at`).
+**3.15.1** Evidence records must be retained for at least the configured minimum retention period after the job's terminal timestamp (`completed_at` or `failed_at`). The minimum retention period is configurable at deployment time. The default minimum retention period is 90 days; this default requires Project Owner confirmation before SPEC-006 advances to Accepted (see OQ-3).
 
 **3.15.2** Evidence records must not be automatically deleted before the minimum retention period expires.
 
@@ -348,11 +355,13 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 **3.15.4** The routing problem referenced by `problem_id` has independent retention semantics defined by SPEC-001. Evidence Log retention does not imply routing problem retention.
 
+**3.15.5** After evidence records are deleted following the retention period, the reproducibility guarantee of FR-16 can no longer be satisfied for those executions. The routing problem persists independently (SPEC-001), but the execution artifacts containing `execution_seed`, `backend_id`, and `contract_version` are gone. The reproducibility guarantee applies within the evidence retention period only. Operators requiring long-term reproducibility must configure a retention period sufficient for their archival needs, or archive solver run records independently before deletion.
+
 ---
 
 ### FR-16: Reproducibility Requirements
 
-**3.16.1** Given the reproducibility tuple `(problem_id, execution_seed, backend_id, contract_version)` retrieved from a solver run record, an operator must be able to reproduce the solver execution.
+**3.16.1** Given the reproducibility tuple `(problem_id, execution_seed, backend_id, contract_version)` retrieved from a solver run record, an operator must be able to reproduce the solver execution. This guarantee applies within the evidence retention period defined in FR-15; evidence records deleted after the retention period are no longer available for reproduction.
 
 **3.16.2** The Evidence Log must store all four elements of the reproducibility tuple in the solver run record (FR-6.3). No element of the reproducibility tuple may be absent from a completed solver run record.
 
@@ -375,7 +384,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 - Whether quality evaluation was performed and what it found.
 - Whether the job failed and at what stage.
 
-**3.17.2** The decision record (FR-5) provides the complete scheduler decision including `candidate_scores`, `rejection_reasons`, `predicted_quality_score`, `predicted_execution_time_ms`, and `confidence_score`. This satisfies the "why was this backend selected" audit requirement.
+**3.17.2** The decision record (FR-5) provides the complete scheduler decision including `objective_mode`, `candidate_scores`, `rejection_reasons`, `predicted_latency`, `predicted_cost`, `predicted_quality`, and `confidence_score`. This satisfies the "why was this backend selected" audit requirement.
 
 **3.17.3** The `actual_outcome` and `hindsight_quality` fields in the decision record (updated post-execution and post-evaluation respectively) provide the comparative record for scheduler effectiveness analysis.
 
@@ -387,22 +396,21 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 
 ### FR-18: Telemetry
 
-**3.18.1** The Worker must emit the following structured log events related to Evidence Log persistence:
+**3.18.1** Evidence Log persistence operations must be observable through the Worker's telemetry system. The following observability requirements must be satisfied:
 
-| Event name | Stage | Required fields |
-|---|---|---|
-| `worker.evidence.persisted` | Post-persistence | `job_id`, `artifacts_written` (list of artifact types successfully written), `duration_ms` |
-| `worker.evidence.upsert.collision` | Upsert | `job_id`, `artifact_type` — emitted when an upsert updates an existing record (re-execution detected) |
-| `worker.evidence.persistence.failed` | Persistence | `job_id`, `artifact_type`, `failure_class` — emitted when a persistence operation fails |
+1. **Evidence persistence event** — A structured log event must be emitted after each evidence persistence operation, capturing at minimum: the job identifier, the list of artifact types successfully written, and the duration of the persistence operation.
 
-**3.18.2** The `execution_seed` must not appear in any structured log event.
+2. **Upsert collision detection event** — A structured log event must be emitted when a `job_id`-keyed upsert updates an existing artifact record (re-execution detected). The event must identify the job identifier and the artifact type affected.
 
-**3.18.3** The Worker must emit the following OpenTelemetry span for Evidence Log persistence:
-- Span name: `worker.evidence.persist`
-- Required attributes: `job_id`, `artifact_types_written`
-- Status: `Ok` on success; `Error` on any artifact persistence failure.
+3. **Persistence failure event** — A structured log event must be emitted when any artifact persistence operation fails. The event must identify the job identifier, the artifact type that failed, and the failure classification.
 
-**3.18.4** Evidence Log persistence failures are classified as infrastructure failures (PostgreSQL unavailable). The Worker's transient/permanent failure taxonomy (SPEC-005) applies: PostgreSQL unavailability is a transient failure; the Worker NACKs with requeue.
+**3.18.2** The `execution_seed` must not appear in any structured log event, including evidence persistence events.
+
+**3.18.3** Evidence Log persistence must be represented by an OpenTelemetry span emitted by the Worker as a child of the `job.consume` root span (SPEC-005 FR-19). The span must capture the artifact types written and reflect the success or failure of the persistence operation in its span status.
+
+**3.18.4** The field schemas for all structured log events defined in FR-18.1 and the span definition for FR-18.3 are specified in SPEC-005 (FR-19 and Section 9), which is the authoritative owner of Worker lifecycle telemetry. SPEC-005 must define these telemetry artifacts consistently with the requirements stated in this section.
+
+**3.18.5** Evidence Log persistence failures are classified as infrastructure failures per SPEC-005's transient/permanent failure taxonomy (SPEC-005 FR-13). PostgreSQL unavailability during persistence is a transient failure; the Worker NACKs with requeue.
 
 ---
 
@@ -444,7 +452,7 @@ The following are explicitly out of scope for this specification:
 4. The routing problem identified by `problem_id` is immutable (SPEC-001). Evidence Log reproducibility depends on this guarantee.
 5. Quality evaluation is deterministic — given the same RoutePlan and routing problem, Core produces identical quality evaluation results on every invocation (SPEC-005 Assumption 9). This property must be established by the Core Quality Evaluation Specification.
 6. At-least-once delivery semantics for job messages are a system invariant. All Evidence Log persistence operations must be idempotent by design.
-7. A re-executed job may produce a different solver result than the prior attempt, due to timing differences, backend state, or PRNG state. The upsert model treats the most recent execution's artifacts as authoritative.
+7. A re-executed job may produce a different solver *outcome* than the prior attempt (e.g., `Timeout` instead of `Succeeded`) due to timing differences or external signal differences. When both executions produce `Succeeded`, SPEC-004 FR-11's reproducibility invariant guarantees identical solutions given identical inputs. The upsert model treats the most recent execution's artifacts as authoritative regardless of whether outcomes are identical.
 
 ---
 
@@ -498,13 +506,7 @@ The following are explicitly out of scope for this specification:
 
 ## 9. Observability Requirements
 
-### Structured Log Events
-
-The structured log events defined in FR-18 (`worker.evidence.persisted`, `worker.evidence.upsert.collision`, `worker.evidence.persistence.failed`) must be emitted by the Worker for all Evidence Log persistence operations.
-
-### OpenTelemetry Spans
-
-The `worker.evidence.persist` span defined in FR-18.3 must be a child span of the `worker.job` root span (SPEC-005). The span must include `artifact_types_written` to allow trace analysis of partial persistence failures.
+Evidence Log persistence must be observable through the Worker's telemetry system. The observability requirements are specified in FR-18. The concrete telemetry definitions — structured log event field schemas, OTel span attributes, and span status rules — are specified in SPEC-005 (FR-19 and Section 9), which is the authoritative owner of Worker lifecycle telemetry. SPEC-005 must be consistent with the requirements stated in FR-18.
 
 ---
 
@@ -514,6 +516,8 @@ The `worker.evidence.persist` span defined in FR-18.3 must be a child span of th
 
 **OQ-2 (Non-Blocking — SPEC-006 FR-9):** The Report Generator Specification has not been authored. The report metadata record schema extension beyond the minimum fields defined in FR-9.2 is deferred. SPEC-006 may advance to Accepted with OQ-2 open; FR-9 is marked as schema-incomplete.
 
+**OQ-3 (Blocking — SPEC-006 FR-15.1):** The default minimum evidence retention period is provisionally 90 days. This default requires Project Owner confirmation before SPEC-006 advances to Accepted. The selection should be justified against evidence analysis use cases (benchmarking, effectiveness analysis, experiment comparison) and any operational constraints. The behavioral requirement (records must not be deleted before the configured minimum period) is architecturally accepted; only the specific default value requires confirmation.
+
 ---
 
 ## 11. Documentation Updates Required
@@ -521,6 +525,8 @@ The `worker.evidence.persist` span defined in FR-18.3 must be a child span of th
 - **Core Quality Evaluation Specification (pending):** Must define the quality evaluation record schema (SPEC-006 FR-7), establish that quality evaluation is deterministic (SPEC-005 Assumption 9 / SPEC-006 Assumption 5), and define the `hindsight_quality` value format populated into the decision record.
 - **Report Generator Specification (pending):** Must extend the report metadata record schema defined in SPEC-006 FR-9.2. Must define the Worker-invocable report generation interface (SPEC-005 FR-17 dependency).
 - **SPEC-005 FR-16 (Accepted):** FR-16 establishes that the Evidence Log must specify `job_id`-keyed upsert semantics. This specification satisfies that dependency via FR-10 and FR-12.
+- **SPEC-005 (Proposed — additive extension required):** Must be extended with additive telemetry definitions for Evidence Log persistence: the `worker.evidence.persist` OTel span (FR-19 span table and span attributes), updated `worker.evidence.persisted` event fields (reconciled to include `artifacts_written` and `duration_ms`), and new `worker.evidence.upsert.collision` and `worker.evidence.persistence.failed` events (Section 9). This additive extension is a pre-condition for SPEC-006 advancing to Proposed. SPEC-006 FR-18 declares the observability requirements; SPEC-005 owns the telemetry definitions.
+- **SPEC-003 FR-10 (Accepted):** Any future revision to the SPEC-003 FR-10 decision record schema requires a corresponding update to SPEC-006 FR-5.2 (the traceability reproduction table). The field table in FR-5.2 must remain a verbatim copy of SPEC-003 FR-10's authoritative field list.
 - **ADR-010:** Must be revised when SPEC-005 advances to Accepted. ADR-010 Decision 4 conflicts with SPEC-005 FR-7 and SPEC-004 FR-11.3 regarding seed derivation ownership. That conflict is a SPEC-005 pre-condition for Accepted status; it is not a SPEC-006 concern.
 
 ---
@@ -532,6 +538,6 @@ The `worker.evidence.persist` span defined in FR-18.3 must be a child span of th
 | Routing Problem Model | SPEC-001 | Accepted | `problem_id` identity and immutability guarantee |
 | Scheduler Decision Record Schema | SPEC-003 FR-10 | Accepted | Decision record field definitions (FR-5.2) |
 | Solver Contract | SPEC-004 | Accepted | SolverResponse fields, SolverOutcome, ExecutionStatistics, SolverFailureDetail (FR-6.2) |
-| Worker Execution Lifecycle | SPEC-005 | Draft (Proposed-ready) | Artifact set definition, idempotency model, failure taxonomy |
+| Worker Execution Lifecycle | SPEC-005 | Proposed | Artifact set definition, idempotency model, failure taxonomy, telemetry definitions (additive extension required — see Section 11) |
 | Core Quality Evaluation Specification | Pending | Not authored | Quality evaluation record schema (FR-7) — blocking |
 | Report Generator Specification | Pending | Not authored | Report metadata record schema extension (FR-9) — non-blocking |
