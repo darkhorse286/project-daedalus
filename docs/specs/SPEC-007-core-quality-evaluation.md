@@ -6,7 +6,7 @@
 
 **Title:** Core Quality Evaluation
 
-**Status:** Draft
+**Status:** Proposed
 
 **Author:** Darkhorse286
 
@@ -108,22 +108,23 @@ SPEC-007 defines Core Quality Evaluation's responsibilities and explicitly alloc
 The Worker invokes Core quality evaluation under the conditions established in SPEC-005 FR-15. This section defines the complete invocation rules from Core's perspective.
 
 **Invocation conditions:**
-Core quality evaluation is invoked when the Worker has received a SolverResponse that passed post-receipt structural validation (SPEC-005 FR-11) and contains a solution.
+Core quality evaluation is invoked when the Worker has received a SolverResponse that passed post-receipt structural validation (SPEC-005 FR-11) and contains a route plan.
 
 | SolverOutcome | Route Plan Present? | Core Quality Evaluation Invoked? |
 |---|---|---|
-| `Succeeded` | Yes (required) | Yes |
-| `Timeout` | Yes (optional) | Yes |
-| `Cancelled` | Yes (optional) | Yes |
-| `Infeasible` | No | No |
-| `Failed` | No | No |
-| `Timeout` | No | No |
-| `Cancelled` | No | No |
+| `Succeeded` | Always Yes | Yes |
+| `Timeout` | Optionally Yes | Yes when route plan is present; No otherwise |
+| `Cancelled` | Optionally Yes | Yes when route plan is present; No otherwise |
+| `Infeasible` | Always No | No |
+| `Failed` | Always No | No |
 
 When evaluation is not invoked (no route plan present), the Worker persists null for all quality evaluation fields. This is not an evaluation failure.
 
 **Invocation boundary:**
 The Worker is the caller. Core quality evaluation is a synchronous call within the Worker process (Core is an in-process C++ library per SPEC-005 Assumption 3). The Worker passes inputs and receives a `QualityEvaluationResult` in return.
+
+**Scheduler decision precondition:**
+The Scheduler decision record is fully populated (`predicted_quality_tier`, `predicted_latency`, and `confidence_score` are non-null) at the time of Core QE invocation. This is guaranteed by SPEC-003 FR-10: these fields are required before a job enters the execution queue. Core QE is only ever invoked on jobs that reached solver execution, which requires a prior Selected Scheduler decision.
 
 **Acceptance Criteria:**
 - Core quality evaluation is invoked for every SolverResponse with a structurally valid route plan present, regardless of SolverOutcome (Succeeded, Timeout, or Cancelled with solution)
@@ -141,9 +142,9 @@ The Worker passes the following inputs to Core quality evaluation on every invoc
 |---|---|---|---|
 | `routing_problem` | RoutingProblem | C++ domain representation (SPEC-001 FR-14) | The validated routing problem, immutable, validated by Core before solver invocation (ADR-009) |
 | `route_plan` | RoutePlan | SolverResponse (SPEC-004 FR-5) | The structurally valid route plan from the solver; passed only when present per FR-2 |
-| `solver_response` | SolverResponse | SolverResponse (SPEC-004 FR-3) | The complete response including `outcome`, `statistics`, `failure_detail`, `extension_metadata`; used for actual outcome classification and regret analysis |
-| `scheduler_decision` | DecisionRecord | Scheduler decision record (SPEC-003 FR-10) | The decision record produced before execution; provides predicted values for regret analysis (`predicted_latency`, `predicted_cost`, `predicted_quality`, `confidence_score`) |
-| `travel_speed_kmh` | float64 | System configuration | The average vehicle speed used for route simulation (see OQ-1). Required for time window feasibility simulation. Must be a positive non-zero value. |
+| `solver_response` | SolverResponse | SolverResponse (SPEC-004 FR-3) | The complete response including `outcome`, `statistics`, `failure_detail`, `extension_metadata`; used for actual outcome classification and regret analysis. `statistics` is guaranteed non-null for all `Succeeded` responses (SPEC-004 FR-6); it may be null for `Timeout` and `Cancelled` responses. |
+| `scheduler_decision` | DecisionRecord | Scheduler decision record (SPEC-003 FR-10) | The decision record produced before execution; provides predicted values for regret analysis (`predicted_latency`, `predicted_quality`, `confidence_score`). Non-null precondition guaranteed by FR-2 invocation contract. |
+| `travel_speed_kmh` | float64 | Routing Problem — `RoutingProblem.average_vehicle_speed_kmh` (per Project Owner Decision ODR-1; formal field introduction pending SPEC-001 revision) | The average vehicle speed used for route simulation (FR-5). Required for time window feasibility simulation. Must be a positive non-zero value. |
 
 **Acceptance Criteria:**
 - Core quality evaluation rejects invocations with a null or absent `route_plan` (the Worker must not invoke evaluation in this case per FR-2)
@@ -163,9 +164,19 @@ Core quality evaluation classifies the actual execution outcome and populates th
 |---|---|---|---|
 | `solver_outcome` | SolverOutcome enum | Always | The SolverOutcome value from the SolverResponse (SPEC-004 FR-4): `Succeeded`, `Timeout`, `Cancelled` |
 | `solution_present` | bool | Always | True when a route plan was included in the SolverResponse |
-| `time_window_feasible` | bool | When `solution_present = true` | True when the simulated route plan has zero time window violations (FR-5). Null when `solution_present = false` |
-| `time_window_violation_count` | uint32 | When `solution_present = true` | Count of stops where simulated arrival time exceeds `time_window_close`. Null when `solution_present = false` |
 | `time_window_constrained` | bool | Always | True when the routing problem has at least one stop with time window fields. Derived from the routing problem. |
+| `time_window_feasible` | bool | When simulation was performed | True when the simulated route plan has zero time window violations (FR-5). Null when simulation was not performed (no route plan, or infrastructure failure). |
+| `time_window_violation_count` | uint32 | When simulation was performed | Count of stops where simulated arrival time exceeds `time_window_close`. Null when simulation was not performed. |
+
+**Population sequence:**
+The fields in `ActualOutcomeClassification` fall into two groups by when they become available:
+
+| Group | Fields | Availability | Source |
+|---|---|---|---|
+| Input-derived (always available) | `solver_outcome`, `solution_present`, `time_window_constrained` | Before simulation; derived directly from inputs | `SolverResponse.outcome`; `SolverResponse.route_plan != null`; `RoutingProblem.stops` inspection |
+| Simulation-derived | `time_window_feasible`, `time_window_violation_count` | After route simulation (FR-5) completes | Simulation output |
+
+`solver_outcome`, `solution_present`, and `time_window_constrained` are always non-null in any `QualityEvaluationResult` returned by Core, including results returned on infrastructure failure. Simulation-derived fields are null when simulation could not be performed (see FR-13).
 
 **Semantics:**
 - A route plan from a Succeeded response may be time-window infeasible. This is a solver quality defect, not a contract violation (SPEC-004 FR-7). `actual_outcome` records both that the solver Succeeded and whether the solution is time-window feasible.
@@ -174,7 +185,8 @@ Core quality evaluation classifies the actual execution outcome and populates th
 
 **Acceptance Criteria:**
 - `actual_outcome` is a structured `ActualOutcomeClassification`, not a bare SolverOutcome enum value
-- `time_window_feasible` is null when `solution_present = false`
+- `solver_outcome`, `solution_present`, and `time_window_constrained` are never null in any returned `QualityEvaluationResult`, including partial results on infrastructure failure
+- `time_window_feasible` is null when simulation was not performed
 - `time_window_feasible = true` requires `time_window_violation_count = 0`
 - `time_window_feasible = false` requires `time_window_violation_count > 0`
 - If the routing problem carries no time-windowed stops (`time_window_constrained = false`), `time_window_feasible = true` and `time_window_violation_count = 0` for any complete route plan
@@ -249,10 +261,11 @@ Core quality evaluation computes the following quality metrics from the route si
 | `routes_total` | uint32 | `vehicle_count` from the routing problem | Total available vehicles. Always equals `vehicle_count`. |
 | `time_window_violation_count` | uint32 | Count of stops where `arrival_time_s > time_window_close` | Zero for a time-window-feasible plan. Mirrors the count in `ActualOutcomeClassification`. |
 | `time_window_feasible` | bool | `time_window_violation_count == 0` | True when no time window violations were detected. Mirrors `ActualOutcomeClassification.time_window_feasible`. |
-| `violated_stop_ids` | list\<int\> | Stop IDs where `arrival_time_s > time_window_close` | Diagnostics: which stops have time window violations. Empty when `time_window_feasible = true`. Must not appear in log events per SPEC-001 Security Considerations. |
+| `violated_stop_ids` | list\<int\> | Stop IDs where `arrival_time_s > time_window_close` | Diagnostics: which stops have time window violations. Empty when `time_window_feasible = true`. Must not appear in structured log events. See Security Considerations. |
 | `per_vehicle_distance_km` | list\<float64\> | Indexed by vehicle index (0 through `vehicle_count − 1`) | Per-vehicle route distance. Enables reporting and load-balance analysis. |
+| `quality_comparison_eligible` | bool | `(NOT time_window_constrained) OR (time_window_feasible = true)` | True when `hindsight_quality` is valid for cross-backend comparison. False when time windows exist and the plan violates at least one. Conservative false when `time_window_constrained = true` and simulation could not be performed (`time_window_feasible` null). See FR-7. |
 
-**Note:** `time_window_violation_count` and `time_window_feasible` are duplicated between `QualityMetrics` and `ActualOutcomeClassification` for different consumers: `ActualOutcomeClassification` is written to the decision record (SPEC-003 FR-10) for scheduler effectiveness analysis; `QualityMetrics` is written to the quality evaluation record (SPEC-006 FR-7) for detailed evidence. Both values must be identical — they are computed from the same simulation run.
+**Note on duplication:** `time_window_violation_count` and `time_window_feasible` are duplicated between `QualityMetrics` and `ActualOutcomeClassification` for different consumers: `ActualOutcomeClassification` is written to the decision record (SPEC-003 FR-10) for scheduler effectiveness analysis; `QualityMetrics` is written to the quality evaluation record (SPEC-006 FR-7) for detailed evidence. Both values must be identical — they are computed from the same simulation run. See Testability TC-24.
 
 **Acceptance Criteria:**
 - `total_route_distance_km` is the sum of all per-vehicle distances including return legs
@@ -261,6 +274,10 @@ Core quality evaluation computes the following quality metrics from the route si
 - `per_vehicle_distance_km` has exactly `vehicle_count` entries
 - `per_vehicle_distance_km[i]` is the route distance for vehicle `i` (0.0 for an empty route)
 - All metric values are non-negative
+- `quality_comparison_eligible = true` when `time_window_constrained = false`
+- `quality_comparison_eligible = true` when `time_window_constrained = true` and `time_window_feasible = true`
+- `quality_comparison_eligible = false` when `time_window_constrained = true` and `time_window_feasible = false`
+- `quality_comparison_eligible = false` when `time_window_constrained = true` and `time_window_feasible` is null
 
 ---
 
@@ -282,8 +299,10 @@ hindsight_quality = total_route_distance_km
 - It is defined in kilometers (float64, non-negative).
 - It is present (non-null) when `solution_present = true`.
 - It is null when `solution_present = false` (no route plan in the SolverResponse).
-- A time-window-infeasible plan has a valid `hindsight_quality` value. The quality value and the feasibility assessment are separate dimensions. Consumers must check `time_window_feasible` before using `hindsight_quality` for optimization comparison purposes.
 - `hindsight_quality` is dimensionally stable for comparison only within the same routing problem. Cross-problem comparison of `hindsight_quality` values is not meaningful because stop counts, depot positions, and geographic distribution vary.
+
+**Comparison validity constraint:**
+`hindsight_quality` MUST NOT be used in cross-backend comparisons unless `quality_comparison_eligible = true` (FR-6) for all plans being compared. An infeasible plan may achieve a shorter route by ignoring time window constraints, which represents a different optimality surface, not superior performance. Comparing `hindsight_quality` between a time-feasible and a time-infeasible plan produces a misleading signal that could corrupt Scheduler effectiveness analysis over time.
 
 **Why total route distance:**
 Total route distance is the canonical VRP primary objective. It is computable from a RoutePlan and a routing problem without additional inputs, is deterministic, is universally applicable across all problem configurations (with or without time windows), and produces a value directly interpretable in physical units. This makes it suitable for the normalized quality signal the Scheduler uses in effectiveness analysis.
@@ -295,7 +314,7 @@ The Scheduler's `predicted_quality` field in the decision record (SPEC-003 FR-10
 - `hindsight_quality = total_route_distance_km` computed per FR-6
 - `hindsight_quality` is null when no route plan was provided
 - `hindsight_quality` is a non-negative float64
-- A time-window-infeasible plan has a non-null `hindsight_quality`; consumers must check `time_window_feasible` separately
+- `hindsight_quality` MUST NOT be used in cross-backend comparisons when `quality_comparison_eligible = false`
 
 ---
 
@@ -308,23 +327,22 @@ Core quality evaluation produces a regret analysis comparing the Scheduler's pre
 
 | Field | Type | Present When | Formula | Description |
 |---|---|---|---|---|
-| `predicted_latency_ms` | uint64 | Always | `scheduler_decision.predicted_latency × 1000` | Scheduler's predicted execution latency converted to milliseconds. Derived from `latency_profile[problem_size_class]` for the selected backend (SPEC-003 FR-4). Present for all `Selected` decisions; null if decision_status was not Selected. |
-| `actual_execution_duration_ms` | uint64 | When `solution_present` or any response received | `solver_response.statistics.execution_duration_ms` (SPEC-004 FR-6) | Actual wall-clock execution time reported by the solver. |
+| `predicted_latency_ms` | uint64 | Always | `scheduler_decision.predicted_latency × 1000` | Scheduler's predicted execution latency converted to milliseconds. Always non-null: the Scheduler decision record has `predicted_latency` populated before a job enters execution (SPEC-003 FR-10 precondition guaranteed by FR-2 invocation contract). |
+| `actual_execution_duration_ms` | uint64 | When `solver_response.statistics` is non-null | `solver_response.statistics.execution_duration_ms` (SPEC-004 FR-6) | Actual wall-clock execution time reported by the solver. Non-null for all `Succeeded` responses; may be null for `Timeout` and `Cancelled` responses. |
 | `latency_delta_ms` | int64 | When both `predicted_latency_ms` and `actual_execution_duration_ms` are present | `actual_execution_duration_ms - predicted_latency_ms` | Signed latency delta: negative means faster than predicted; positive means slower. Zero is an exact prediction. |
 | `predicted_quality_tier` | QualityProfile enum | Always | `scheduler_decision.predicted_quality` | The Scheduler's predicted quality tier (`Baseline`, `Competitive`, `Near-Optimal`). |
-| `actual_hindsight_quality_km` | float64 | When `solution_present = true` | `hindsight_quality` (FR-7) | The actual normalized quality metric. Enables comparison against `predicted_quality_tier` qualitatively. |
-| `predicted_cost` | float64 | Always | `scheduler_decision.predicted_cost` | The Scheduler's predicted per-execution cost (static `cost_profile` per SPEC-003 FR-4). |
+| `actual_hindsight_quality_km` | float64 | When `solution_present = true` | `hindsight_quality` (FR-7) | The actual normalized quality metric. Enables qualitative comparison against `predicted_quality_tier`. |
 | `confidence_score` | float64 | Always | `scheduler_decision.confidence_score` | The score margin at decision time (SPEC-003 FR-10). Preserved for effectiveness analysis. |
-| `outcome_matched_prediction` | bool | Always | Derived | True when `solver_outcome = Succeeded` AND `time_window_feasible = true` (a fully successful execution), OR when the predicted_quality_tier is `Baseline` and a non-null `hindsight_quality` was produced. See note. |
 
-**Note on `outcome_matched_prediction`:** A fully boolean "did the prediction come true" is challenging because `predicted_quality` is categorical and `hindsight_quality` is numeric. `outcome_matched_prediction` is a simplified binary signal: was a usable, time-window-feasible solution produced? True when `solver_outcome ∈ {Succeeded, Timeout, Cancelled}` AND `solution_present = true` AND `time_window_feasible = true`. False otherwise. This field enables simple effectiveness dashboards. The numeric `hindsight_quality` and the categorical `predicted_quality_tier` are preserved separately for richer analysis.
+**Note on cost regret:** `predicted_cost` is preserved in the Scheduler's decision record but is not included in `RegretAnalysis`. Cost regret analysis requires `actual_cost` reporting from the solver contract (SPEC-004 OQ-2), which is deferred to post-MVP. `RegretAnalysis` will be extended with a `cost_delta` field when SPEC-004 OQ-2 is resolved.
+
+**Note on prediction success assessment:** Whether the execution "matched" the Scheduler's prediction is a reporting-layer concern, not an evidence record concern. The evidence record stores the raw facts (`solver_outcome`, `solution_present`, `time_window_feasible`, `predicted_quality_tier`, `actual_hindsight_quality_km`) from which any reporting consumer can derive prediction success by its own definition. Embedding a specific boolean interpretation in the evidence record would foreclose alternative definitions and violate the evidence-vs-interpretation boundary that underpins the project's evidence model.
 
 **Acceptance Criteria:**
 - `RegretAnalysis` is always present in the `QualityEvaluationResult`, even when no route plan was available (fields are null in that case)
+- `predicted_latency_ms` is always non-null (SPEC-003 FR-10 precondition guaranteed by FR-2)
 - `latency_delta_ms` is null when either `predicted_latency_ms` or `actual_execution_duration_ms` is null
 - `latency_delta_ms = actual_execution_duration_ms - predicted_latency_ms` (signed, exact subtraction)
-- `outcome_matched_prediction` is false when `solution_present = false`
-- `outcome_matched_prediction` is false when `time_window_feasible = false`
 - `confidence_score` is preserved exactly as received from the decision record
 
 ---
@@ -338,11 +356,11 @@ Core quality evaluation returns a single `QualityEvaluationResult` to the Worker
 
 | Field | Type | Present When | Description |
 |---|---|---|---|
-| `actual_outcome` | ActualOutcomeClassification | Always | The actual outcome classification (FR-4). Written by Worker to the decision record's `actual_outcome` field. |
-| `quality_metrics` | QualityMetrics | When `solution_present = true` | The full quality metrics (FR-6). Null when no route plan. |
-| `hindsight_quality` | float64 | When `solution_present = true` | The primary normalized quality metric (FR-7). Null when no route plan. |
+| `actual_outcome` | ActualOutcomeClassification | Always | The actual outcome classification (FR-4). Written by Worker to the decision record's `actual_outcome` field. Input-derived fields (`solver_outcome`, `solution_present`, `time_window_constrained`) are always non-null. |
+| `quality_metrics` | QualityMetrics | When `solution_present = true` and simulation succeeded | The full quality metrics (FR-6). Null when no route plan or when simulation infrastructure failed. |
+| `hindsight_quality` | float64 | When `solution_present = true` and simulation succeeded | The primary normalized quality metric (FR-7). Null when no route plan or when simulation infrastructure failed. |
 | `regret_analysis` | RegretAnalysis | Always | Regret comparison (FR-8). Individual fields are null where inputs are absent. |
-| `evaluation_metadata` | EvaluationMetadata | Always | Evaluation context and provenance (FR-10). |
+| `evaluation_metadata` | EvaluationMetadata | Always | Evaluation context and provenance (FR-12). |
 
 The `QualityEvaluationResult` is passed from Core to the Worker. The Worker distributes its fields to the appropriate persistence targets:
 - `actual_outcome` → decision record `actual_outcome` field (SPEC-003 FR-10; SPEC-006 FR-5.4)
@@ -350,8 +368,8 @@ The `QualityEvaluationResult` is passed from Core to the Worker. The Worker dist
 - `quality_metrics` + `regret_analysis` + `evaluation_metadata` → quality evaluation record (SPEC-006 FR-7)
 
 **Acceptance Criteria:**
-- `QualityEvaluationResult` is always fully constructed; partial results are not returned
-- `quality_metrics` and `hindsight_quality` are null when no route plan was present
+- `QualityEvaluationResult` is always returned by Core; null is never returned
+- On infrastructure failure, Core returns a partial `QualityEvaluationResult` in which `actual_outcome.solver_outcome`, `actual_outcome.solution_present`, and `actual_outcome.time_window_constrained` are always non-null (derived from inputs); simulation-derived fields (`time_window_feasible`, `time_window_violation_count`, `quality_metrics`, `hindsight_quality`) are null
 - `actual_outcome` is never null; even when no route plan is present, it contains the SolverOutcome and `solution_present = false`
 - The Worker does not interpret or transform `QualityEvaluationResult` fields before persisting them
 
@@ -365,6 +383,8 @@ Core quality evaluation must be deterministic. SPEC-005 Assumption 9 and SPEC-00
 **Determinism invariant:**
 Given identical inputs — same `routing_problem`, same `route_plan`, same `solver_response`, same `scheduler_decision`, and same `travel_speed_kmh` — Core quality evaluation must produce an identical `QualityEvaluationResult` on every invocation.
 
+The determinism invariant applies to all computed fields in `QualityEvaluationResult`. The `evaluated_at` field in `EvaluationMetadata` (FR-12) is a wall-clock timestamp and is explicitly excluded from the determinism invariant. Two invocations at different wall-clock times may produce different `evaluated_at` values and are still considered deterministically equivalent if all computed fields are identical.
+
 **Requirements:**
 1. **No stochastic operations:** Core quality evaluation must not use any PRNG, system time, process ID, or OS random source in its computation path. The evaluation algorithm is purely deterministic arithmetic.
 2. **No external state:** Core quality evaluation must not read configuration, database state, or any external resource during evaluation. All inputs are passed as parameters.
@@ -376,8 +396,8 @@ Given identical inputs — same `routing_problem`, same `route_plan`, same `solv
 SPEC-005 FR-14 relies on Core quality evaluation being deterministic. On message redelivery, the Worker re-executes the solver and re-invokes evaluation. Because both the solver (SPEC-004 FR-11 reproducibility invariant) and Core quality evaluation are deterministic from the same inputs and seeds, the same `QualityEvaluationResult` is produced and upserted into the evidence record without creating divergent records.
 
 **Acceptance Criteria:**
-- Two invocations of Core quality evaluation with identical inputs produce byte-identical `QualityEvaluationResult` fields
-- No `QualityEvaluationResult` field is derived from system time, random state, or any non-input value
+- Two invocations of Core quality evaluation with identical inputs produce byte-identical `QualityEvaluationResult` computed fields; `EvaluationMetadata.evaluated_at` is explicitly excluded from this comparison
+- No `QualityEvaluationResult` computed field is derived from system time, random state, or any non-input value
 - Floating-point values in `QualityEvaluationResult` are IEEE 754 double precision
 - Changing any evaluation formula increments the `evaluation_schema_version` (FR-11)
 
@@ -391,7 +411,7 @@ The quality evaluation record carries an `evaluation_schema_version` identifier 
 **Current version:** `1`
 
 **Version semantics:**
-- `evaluation_schema_version` is a uint32 value present in every `EvaluationMetadata` (FR-10, below) and in every quality evaluation record in the Evidence Log.
+- `evaluation_schema_version` is a uint32 value present in every `EvaluationMetadata` (FR-12) and in every quality evaluation record in the Evidence Log.
 - Version 1 defines the metric set, formulas, and type definitions in this specification.
 
 **Breaking changes (MUST increment `evaluation_schema_version`):**
@@ -429,8 +449,8 @@ Every `QualityEvaluationResult` carries an `EvaluationMetadata` record that capt
 | Field | Type | Description |
 |---|---|---|
 | `evaluation_schema_version` | uint32 | The schema version under which this evaluation was produced (FR-11). Current value: 1. |
-| `evaluated_at` | timestamp (UTC) | Wall-clock timestamp at the time evaluation was invoked. Note: this field is metadata only; it does not participate in the determinism invariant (FR-10) and is not used in any computation. |
-| `route_simulation_performed` | bool | True when the route simulation (FR-5) was performed (i.e., a route plan was present). False when evaluation was invoked with no route plan — only `actual_outcome` is populated. |
+| `evaluated_at` | timestamp (UTC) | Wall-clock timestamp at the time evaluation was invoked. This field is metadata only; it does not participate in the determinism invariant (FR-10) and is not used in any computation. |
+| `route_simulation_performed` | bool | True when the route simulation (FR-5) was performed (i.e., a route plan was present and simulation completed). False when evaluation was invoked with no route plan, or when simulation could not be performed due to infrastructure failure. |
 | `travel_speed_kmh_used` | float64 | The `travel_speed_kmh` parameter value used in the route simulation (FR-5). Null when `route_simulation_performed = false`. Records the simulation parameter for reproducibility and diagnostic purposes. |
 | `stop_count` | uint32 | Stop count from the routing problem. Retained for Evidence Log queries without requiring a join to the routing problem. |
 | `vehicle_count` | uint32 | Vehicle count from the routing problem. Same rationale. |
@@ -454,13 +474,30 @@ Core quality evaluation can fail due to infrastructure faults or invalid invocat
 | Failure Condition | Classification | Worker Response |
 |---|---|---|
 | Missing required input (null `routing_problem`, null `scheduler_decision`) | Invocation contract violation — Worker construction error | Worker logs a structured error; does not invoke Core; records quality evaluation as failed in the evidence record; job still reaches `Completed` |
-| Core process unavailable or unclassified exception during evaluation | Infrastructure failure | Worker logs `worker.quality.evaluation.failed` per SPEC-005 FR-15 failure handling; quality fields are null in persisted record; job still reaches `Completed` |
+| Core process unavailable or unclassified exception during evaluation | Infrastructure failure | Core returns a partial `QualityEvaluationResult` (see below); Worker writes partial result to evidence record; Worker logs `worker.quality.evaluation.failed` per SPEC-005 FR-15; job still reaches `Completed` |
 | `travel_speed_kmh = 0` or negative | Invocation contract violation | Worker logs a structured error; evaluation fails; quality fields are null; job still reaches `Completed` |
 
-**On evaluation failure:**
-Per SPEC-005 FR-15 failure handling: if Core quality evaluation fails, the Worker persists the solver run record with `actual_outcome` and `hindsight_quality` null. The job proceeds to the reporting stage and reaches `Completed`. The failure is captured in the `result.evaluate` span status as Error and in a structured log event.
+**Partial `QualityEvaluationResult` on infrastructure failure:**
+When Core QE experiences an infrastructure failure after receiving valid inputs, Core returns a partial `QualityEvaluationResult` rather than null. The partial result contains all input-derived fields and leaves simulation-derived fields null:
 
-A quality evaluation failure does not cause the job to transition to `Failed`. Quality evaluation failure is not a pre-evidence failure.
+| Field | Value on Infrastructure Failure |
+|---|---|
+| `actual_outcome.solver_outcome` | Non-null — populated from `solver_response.outcome` (input-derived) |
+| `actual_outcome.solution_present` | Non-null — populated from SolverResponse (input-derived) |
+| `actual_outcome.time_window_constrained` | Non-null — populated from `routing_problem` (input-derived) |
+| `actual_outcome.time_window_feasible` | Null — simulation not completed |
+| `actual_outcome.time_window_violation_count` | Null — simulation not completed |
+| `quality_metrics` | Null — simulation not completed |
+| `hindsight_quality` | Null — simulation not completed |
+| `regret_analysis` | Partially populated: `predicted_latency_ms`, `predicted_quality_tier`, `confidence_score` present; `actual_execution_duration_ms`, `latency_delta_ms`, `actual_hindsight_quality_km` null |
+| `evaluation_metadata.route_simulation_performed` | False |
+
+This ensures the Worker always has `solver_outcome` and `solution_present` to write to the decision record, eliminating the evidence gap that would occur if `actual_outcome` were entirely null on infrastructure failure.
+
+**On evaluation failure:**
+Per SPEC-005 FR-15 failure handling: if Core quality evaluation infrastructure fails, the Worker writes the partial `QualityEvaluationResult` to the evidence record. The decision record receives `actual_outcome` with `solver_outcome` and `solution_present` populated; simulation-derived quality fields are null. The job proceeds to the reporting stage and reaches `Completed`. The failure is captured in the `result.evaluate` span status as Error and in a structured log event.
+
+A quality evaluation infrastructure failure does not cause the job to transition to `Failed`. Quality evaluation failure is not a pre-evidence failure.
 
 **Core must not fail for these inputs:**
 - Time-window-infeasible route plans (these produce quality metrics with violations, not failures)
@@ -471,6 +508,7 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 - Core quality evaluation does not panic or produce undefined behavior on any input satisfying FR-3's type constraints
 - An infeasible route plan (time window violations) produces a `QualityEvaluationResult` with `time_window_feasible = false`, not a failure
 - A missing required input causes a structured invocation contract violation, not a silent evaluation failure
+- On infrastructure failure, `actual_outcome.solver_outcome`, `actual_outcome.solution_present`, and `actual_outcome.time_window_constrained` are always non-null in the returned partial result
 
 ---
 
@@ -496,7 +534,7 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 1. The routing problem passed to Core quality evaluation has been validated by Core per ADR-009. Evaluation does not re-validate domain constraints.
 2. The RoutePlan passed to Core quality evaluation has passed structural validation per SPEC-005 FR-11 and SPEC-004 FR-5. All stops appear exactly once and all capacities are satisfied.
 3. The Haversine formula used in route simulation (FR-5) is the same implementation as SPEC-001 FR-5. No alternative distance formula is used.
-4. The `travel_speed_kmh` parameter is a configurable system value. Its authoritative source (routing problem property vs. system configuration) is defined in OQ-1.
+4. Per Project Owner Decision ODR-1, `travel_speed_kmh` is a routing problem attribute (`RoutingProblem.average_vehicle_speed_kmh`). SPEC-001 will formally introduce this field in a future revision. SPEC-007 references this field as an accepted dependency.
 5. The synthetic routing problems generated by SPEC-002 are designed to be feasible under the configured `travel_speed_kmh`. That is, synthetic time windows are achievable given the stop geography and the speed setting. This is a SPEC-002 generation contract, not a SPEC-007 evaluation assumption.
 6. Core is an in-process C++ library within the Worker process (SPEC-005 Assumption 3). Quality evaluation has no network latency.
 7. At-most-one evaluation is invoked per job per execution attempt. The Worker does not invoke quality evaluation more than once for the same SolverResponse.
@@ -508,10 +546,10 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 1. Core quality evaluation must be deterministic per FR-10. No stochastic operations, external entropy, or system state may affect the evaluation output.
 2. All floating-point computation in the evaluation path must use IEEE 754 double precision. Extended precision is prohibited (ADR-010 Decision 6).
 3. The Haversine implementation must match SPEC-001 FR-5 for consistency with the routing problem model.
-4. `violated_stop_ids` must not appear in structured log events (SPEC-001 Security Considerations on log safety). It is for evidence record storage only.
+4. `violated_stop_ids` must not appear in structured log events. See Security Considerations for rationale. It is for evidence record storage only.
 5. Core quality evaluation must be implemented in C++ (ADR-001).
 6. Adding a new quality metric must not change `evaluation_schema_version` if the metric is optional and additive. Changing a metric formula requires a version increment (FR-11).
-7. The `evaluated_at` timestamp must not participate in any computed field. It is metadata only.
+7. The `evaluated_at` timestamp must not participate in any computed field. It is metadata only and is excluded from the determinism invariant (FR-10).
 
 ---
 
@@ -523,7 +561,7 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 | Route plan | Worker (extracted from SolverResponse) | SPEC-004 FR-5 RoutePlan |
 | Solver response | Worker (from solver backend) | SPEC-004 FR-3 SolverResponse |
 | Scheduler decision record | Worker (loaded from PostgreSQL after decision persistence) | SPEC-003 FR-10 DecisionRecord |
-| Travel speed parameter | Worker (from system configuration per OQ-1) | float64, km/h, positive non-zero |
+| Travel speed parameter | Worker (from routing problem per ODR-1: `RoutingProblem.average_vehicle_speed_kmh`; pending SPEC-001 revision) | float64, km/h, positive non-zero |
 
 ---
 
@@ -565,9 +603,9 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 
 **Condition:** Core throws an unclassified exception or the in-process library is in an invalid state.
 
-**Behavior:** The Worker catches the exception and records the infrastructure failure per SPEC-005 FR-15 failure handling.
+**Behavior:** Core returns a partial `QualityEvaluationResult` per FR-13. Input-derived fields (`actual_outcome.solver_outcome`, `actual_outcome.solution_present`, `actual_outcome.time_window_constrained`) are always populated. Simulation-derived fields are null.
 
-**Worker response:** Quality fields are null in persisted record. `result.evaluate` span records Error. Job still reaches `Completed`. This is a transient failure; it does not cause a NACK or job re-queuing (quality evaluation failure on completion is not retried at MVP scope per SPEC-005 FR-15).
+**Worker response:** Worker writes the partial `QualityEvaluationResult` to the evidence record. `actual_outcome.solver_outcome` and `actual_outcome.solution_present` are persisted to the decision record. Simulation-derived quality fields are null in the evidence record. `result.evaluate` span records Error. Job still reaches `Completed`. This is a transient failure; it does not cause a NACK or job re-queuing (quality evaluation failure on completion is not retried at MVP scope per SPEC-005 FR-15).
 
 ---
 
@@ -575,7 +613,7 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 
 **Condition:** The simulated routes reveal arrival times that violate one or more `time_window_close` constraints.
 
-**Behavior:** Core quality evaluation completes successfully. `time_window_feasible = false`. `time_window_violation_count > 0`. `violated_stop_ids` lists the offending stops. `hindsight_quality` is computed normally.
+**Behavior:** Core quality evaluation completes successfully. `time_window_feasible = false`. `time_window_violation_count > 0`. `violated_stop_ids` lists the offending stops. `hindsight_quality` is computed normally. `quality_comparison_eligible = false`.
 
 **This is not a failure mode.** It is the correct evaluation output for an infeasible plan.
 
@@ -590,14 +628,14 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 | Persistence | Yes — defines the full quality evaluation record schema (SPEC-006 FR-7 extension); defines `actual_outcome` as `ActualOutcomeClassification` requiring schema update |
 | Solver Runtime | Yes — defines what Core does with SolverResponse after execution; no change to solver contract |
 | Observability | Indirect — `result.evaluate` span attributes (owned by Worker/SPEC-005) may be extended with evaluation summary data |
-| Configuration | Yes — `travel_speed_kmh` is a new configurable parameter (OQ-1 determines its home) |
+| Configuration | Yes — `travel_speed_kmh` is a routing problem attribute per ODR-1; SPEC-001 revision is the formal introduction |
 | Security | Minimal — `violated_stop_ids` must not appear in logs; evaluation operates on pre-validated data |
 
-**SPEC-003 FR-10:** `actual_outcome` type is now defined as `ActualOutcomeClassification` (FR-4). `hindsight_quality` type is now defined as float64 (FR-7). SPEC-003 FR-10's reserved fields are no longer untyped.
+**SPEC-003 FR-10:** `actual_outcome` type is now defined as `ActualOutcomeClassification` (FR-4). `hindsight_quality` type is now defined as float64 (FR-7). SPEC-003 FR-10's reserved fields are no longer untyped. The explicit named dependencies on `predicted_latency`, `predicted_quality`, and `confidence_score` fields from SPEC-003 FR-10 are consumed by FR-8 `RegretAnalysis`.
 
 **SPEC-006 FR-7.2:** The quality evaluation record schema deferred to this specification is now defined. SPEC-006 FR-7 must be extended with the full field set from FR-6, FR-7, FR-8, FR-10, FR-11, and FR-12. (See Documentation Updates Required.)
 
-**SPEC-006 FR-5.4:** SPEC-006 FR-5.4 states "The `actual_outcome` field in the decision record is updated by the Worker after the solver run completes, using the `SolverOutcome` value from the SolverResponse." SPEC-007 defines `actual_outcome` as the structured `ActualOutcomeClassification` type, not a bare `SolverOutcome` enum. SPEC-006 FR-5.4 requires revision to reflect that: (a) `actual_outcome` is of type `ActualOutcomeClassification`; (b) it is produced by Core quality evaluation; and (c) the Worker writes it after receiving the `QualityEvaluationResult`, not directly from the SolverResponse. (See Documentation Updates Required.)
+**SPEC-006 FR-5.4:** SPEC-006 FR-5.4 states "The `actual_outcome` field in the decision record is updated by the Worker after the solver run completes, using the `SolverOutcome` value from the SolverResponse." SPEC-007 defines `actual_outcome` as the structured `ActualOutcomeClassification` type produced by Core quality evaluation, not a bare `SolverOutcome` enum. SPEC-006 FR-5.4 requires revision to reflect that: (a) `actual_outcome` is of type `ActualOutcomeClassification`; (b) it is produced by Core quality evaluation; and (c) the Worker writes it after receiving the `QualityEvaluationResult`, not directly from the SolverResponse. Even on infrastructure failure, `actual_outcome.solver_outcome` and `actual_outcome.solution_present` are always written — they are input-derived and present in the partial result (FR-13). (See Documentation Updates Required.)
 
 ---
 
@@ -605,7 +643,7 @@ A quality evaluation failure does not cause the job to transition to `Failed`. Q
 
 Every quality evaluation behavior must be proven before this feature is considered complete. These are test contracts, not test implementations.
 
-1. **Unit: Determinism invariant** — Two invocations of Core quality evaluation with identical `routing_problem`, `route_plan`, `solver_response`, `scheduler_decision`, and `travel_speed_kmh` produce byte-identical `QualityEvaluationResult` values. `evaluated_at` is excluded from comparison.
+1. **Unit: Determinism invariant** — Two invocations of Core quality evaluation with identical `routing_problem`, `route_plan`, `solver_response`, `scheduler_decision`, and `travel_speed_kmh` produce byte-identical `QualityEvaluationResult` computed fields. `EvaluationMetadata.evaluated_at` is explicitly excluded from comparison per FR-10.
 
 2. **Unit: Time window feasibility — zero violations** — A route plan where all simulated arrival times are at or before `time_window_close` for every time-windowed stop produces `time_window_feasible = true`, `time_window_violation_count = 0`, `violated_stop_ids = []`.
 
@@ -633,13 +671,25 @@ Every quality evaluation behavior must be proven before this feature is consider
 
 14. **Unit: Invocation contract violation — invalid travel speed** — Core quality evaluation called with `travel_speed_kmh = 0` returns a structured invocation contract violation.
 
-15. **Unit: Time-window-infeasible plan produces quality metrics** — A route plan with time window violations still produces `total_route_distance_km`, `hindsight_quality`, and the full `QualityMetrics`. Evaluation does not fail on an infeasible plan.
+15. **Unit: Time-window-infeasible plan produces quality metrics** — A route plan with time window violations still produces `total_route_distance_km`, `hindsight_quality`, and the full `QualityMetrics`. `quality_comparison_eligible = false`. Evaluation does not fail on an infeasible plan.
 
 16. **Property: Service duration applied** — For a stop with `service_duration = 300` (5 minutes) and no time window: departure time from that stop is `arrival_time_s + 300`. For a stop with `service_duration = 300` and `time_window_open = 600`: departure time is `max(arrival_time_s, 600) + 300`.
 
 17. **Integration: Full quality evaluation record** — A completed job with a Succeeded solver outcome produces a quality evaluation record in the Evidence Log with all required fields: `job_id`, `evaluation_status`, `evaluated_at`, `evaluation_schema_version`, `actual_outcome`, `hindsight_quality`, `quality_metrics`, `regret_analysis`, `evaluation_metadata`.
 
-18. **Integration: Scheduler effectiveness analysis** — For two jobs with the same `problem_id` executed with different backends (nearest-neighbor vs. QUBO SA), both producing Succeeded responses: the `hindsight_quality` values are retrievable by `problem_id` query, and the decision records for both contain `actual_outcome` and `hindsight_quality`, enabling backend quality comparison for that problem.
+18. **Integration: Scheduler effectiveness analysis** — For two jobs with the same `problem_id` executed with different backends (nearest-neighbor vs. QUBO SA), both producing Succeeded responses with time-feasible plans: the `hindsight_quality` values are retrievable by `problem_id` query, `quality_comparison_eligible = true` for both, and the decision records for both contain `actual_outcome` and `hindsight_quality`, enabling valid backend quality comparison for that problem.
+
+19. **Unit: Infrastructure failure partial result** — When Core QE infrastructure fails after receiving a valid SolverResponse with `solver_outcome = Succeeded` and a route plan, the returned partial `QualityEvaluationResult` MUST have non-null `actual_outcome.solver_outcome`, `actual_outcome.solution_present`, and `actual_outcome.time_window_constrained`. Fields `actual_outcome.time_window_feasible`, `actual_outcome.time_window_violation_count`, `quality_metrics`, and `hindsight_quality` MUST be null.
+
+20. **Unit: `quality_comparison_eligible` — no time windows** — A routing problem with no time-windowed stops produces `quality_comparison_eligible = true` regardless of route order or distances.
+
+21. **Unit: `quality_comparison_eligible` — time-feasible plan** — A routing problem with time-windowed stops and all simulated arrival times within `time_window_close` produces `quality_comparison_eligible = true`.
+
+22. **Unit: `quality_comparison_eligible` — time-infeasible plan** — A routing problem with time-windowed stops and at least one simulated arrival time exceeding `time_window_close` produces `quality_comparison_eligible = false`.
+
+23. **Unit: `quality_comparison_eligible` — simulation failure** — When `time_window_constrained = true` and route simulation cannot be performed (infrastructure failure), `quality_comparison_eligible = false`. Absence of feasibility confirmation is not confirmation of eligibility.
+
+24. **Unit: Duplication identity invariant** — For any `QualityEvaluationResult` where both `QualityMetrics.time_window_violation_count` and `ActualOutcomeClassification.time_window_violation_count` are non-null, their values MUST be identical. The same applies to `QualityMetrics.time_window_feasible` and `ActualOutcomeClassification.time_window_feasible`.
 
 ---
 
@@ -696,7 +746,7 @@ The final attribute set on `result.evaluate` is a Worker implementation concern.
 
 # Security Considerations
 
-**`violated_stop_ids`:** This field contains stop ID integers, not geographic coordinates. It is safe to store in the Evidence Log. It must not appear in structured log events per SPEC-001 Security Considerations (which restrict raw stop lists and coordinate arrays from logs). Stop IDs alone are not sensitive in the MVP with synthetic data.
+**`violated_stop_ids`:** This field contains stop ID integers, not geographic coordinates. It is safe to store in the Evidence Log. It must not appear in structured log events. SPEC-001 Security Considerations restrict geographic coordinates and raw stop arrays from appearing in logs; integer stop IDs are not geographic coordinates and are not covered by that restriction. The prohibition on logging `violated_stop_ids` is a forward-looking protective measure for non-synthetic deployments: in production, stop IDs may map to customer premises, and logged stop IDs in violation traces could constitute location-identifying exposure depending on jurisdiction. The violation count and the `time_window_feasible` flag in `ActualOutcomeClassification` are sufficient for operational monitoring without exposing location-identifying identifiers.
 
 **Input trust:** The routing problem and route plan passed to Core quality evaluation have been validated by Core (ADR-009) and by the Worker (SPEC-005 FR-11) respectively. Core quality evaluation may trust structural validity and does not re-validate.
 
@@ -720,11 +770,13 @@ The final attribute set on `result.evaluate` is a Worker implementation concern.
 
 - **SPEC-006 FR-7 (Proposed):** Must be extended with the full quality evaluation record schema as defined in FR-6, FR-7, FR-8, FR-11, and FR-12 of this specification. The minimum fields (`job_id`, `evaluation_status`, `evaluated_at`) are supplemented by: `evaluation_schema_version`, `actual_outcome` (as `ActualOutcomeClassification`), `hindsight_quality`, `quality_metrics` (as `QualityMetrics`), `regret_analysis` (as `RegretAnalysis`), `evaluation_metadata` (as `EvaluationMetadata`). The `OQ-1 (Blocking)` note in SPEC-006 FR-7 is resolved by this specification.
 
-- **SPEC-006 FR-5.4 (Proposed):** Must be revised to reflect that (a) `actual_outcome` is of type `ActualOutcomeClassification` defined in SPEC-007 FR-4, not a bare `SolverOutcome` enum; (b) it is produced by Core quality evaluation and returned in the `QualityEvaluationResult`; and (c) the Worker writes it to the decision record after receiving the `QualityEvaluationResult`, not directly from the SolverResponse. The phrase "using the `SolverOutcome` value from the SolverResponse" should be replaced with "using the `actual_outcome` field from the Core quality evaluation result (`QualityEvaluationResult.actual_outcome`)."
+- **SPEC-006 FR-5.4 (Proposed):** Must be revised to reflect that (a) `actual_outcome` is of type `ActualOutcomeClassification` defined in SPEC-007 FR-4, not a bare `SolverOutcome` enum; (b) it is produced by Core quality evaluation and returned in the `QualityEvaluationResult`; and (c) the Worker writes it to the decision record after receiving the `QualityEvaluationResult`. Even on Core QE infrastructure failure, `actual_outcome.solver_outcome` and `actual_outcome.solution_present` are always written — they are input-derived and present in the partial result (FR-13). The phrase "using the `SolverOutcome` value from the SolverResponse" should be replaced with "using the `actual_outcome` field from the Core quality evaluation result (`QualityEvaluationResult.actual_outcome`), which is always non-null in its input-derived fields."
 
-- **SPEC-003 FR-10 (Accepted):** The types and semantics of `actual_outcome` and `hindsight_quality` are now defined: `actual_outcome` is `ActualOutcomeClassification` (SPEC-007 FR-4); `hindsight_quality` is float64 representing total route distance in km (SPEC-007 FR-7). The parenthetical "Type and semantics defined by the Core specification" is satisfied by SPEC-007.
+- **SPEC-003 FR-10 (Accepted):** The types and semantics of `actual_outcome` and `hindsight_quality` are now defined: `actual_outcome` is `ActualOutcomeClassification` (SPEC-007 FR-4); `hindsight_quality` is float64 representing total route distance in km (SPEC-007 FR-7). The parenthetical "Type and semantics defined by the Core specification" is satisfied by SPEC-007. The explicit named dependencies on SPEC-003 FR-10 fields `predicted_latency`, `predicted_quality`, and `confidence_score` are consumed by SPEC-007 FR-8 `RegretAnalysis`.
 
 - **SPEC-005 Assumption 9 (Proposed):** The assumption that "Core quality evaluation is deterministic... this property must be established by the Core Quality Evaluation Specification" is now satisfied by SPEC-007 FR-10. SPEC-005 Assumption 9 can reference SPEC-007 FR-10 as the authority.
+
+- **SPEC-001 (Accepted — revision required):** Per Project Owner Decision ODR-1, a future SPEC-001 revision must formally introduce `average_vehicle_speed_kmh` as a routing problem field (positive float64; required when any stop has time window fields; optional otherwise with a configurable system default). SPEC-007 FR-3 and FR-5 reference this field as an accepted dependency pending that revision.
 
 - **docs/architecture.md:** The runtime execution flow mentions "Runtime evaluates quality, cost, runtime, and regret." This language is now concretely realized by SPEC-007. No change to architecture.md is required; the existing language is satisfied. The `result.evaluate` span already appears in the required spans list.
 
@@ -734,52 +786,33 @@ The final attribute set on `result.evaluate` is a Worker implementation concern.
 
 # Open Questions
 
-### OQ-1: Travel Speed Parameter Source (Blocking)
+### OQ-1: Travel Speed Parameter Source (Resolved — Project Owner Decision ODR-1)
 
-**Question:** Is `travel_speed_kmh` a field on the routing problem (SPEC-001 extension), a system configuration parameter, or a scheduler configuration field?
+**Question (resolved):** Is `travel_speed_kmh` a field on the routing problem (SPEC-001 extension), a system configuration parameter, or a scheduler configuration field?
 
-**Why it matters:** Core quality evaluation requires a vehicle travel speed to convert Haversine distances (km) to travel times (seconds) for time window feasibility simulation (FR-5). No existing specification defines this parameter. Without a speed value, route simulation cannot be performed and time window feasibility cannot be verified. This is a blocking dependency for FR-5 implementation.
+**Owner Decision (ODR-1):** The Project Owner has accepted the architectural recommendation. `travel_speed_kmh` (`RoutingProblem.average_vehicle_speed_kmh`) belongs to the routing problem domain. It is a property of the vehicles in the fleet, which is a routing problem concern. SPEC-007 references this field as an accepted dependency.
 
-**Consequence per answer:**
-- **Routing problem field:** Requires SPEC-001 revision to add `average_vehicle_speed_kmh` (positive float64, required when any stop has time window fields, optional otherwise). Most correct architecturally: the speed is problem-specific and part of the VRP definition.
-- **System configuration:** Requires a new configuration parameter outside the routing problem. Simpler at the cost of treating all problems as having the same vehicle speed regardless of context.
-- **Scheduler configuration field:** Ties execution speed to scheduling policy, which is architecturally awkward.
+**Required action:** A future SPEC-001 revision must formally introduce `average_vehicle_speed_kmh` as a routing problem field.
 
-**MVP recommendation:** Add `average_vehicle_speed_kmh` as a routing problem field (SPEC-001 revision). This is the architecturally correct home: the speed is a property of the vehicles in the fleet, which is a routing problem concern. Default to a configurable system value when absent, to maintain backward compatibility with SPEC-001.
-
-**Owner:** Project Owner decision. Requires SPEC-001 revision if the routing problem approach is selected.
-
-**Blocking:** Blocking for SPEC-007 implementation (FR-5 cannot be implemented without a speed source). Not blocking for Draft status.
+**Status:** Resolved at the owner-decision level. No longer blocking for SPEC-007 Proposed status. Blocking for FR-5 implementation until the SPEC-001 revision is complete.
 
 ---
 
-### OQ-2: Evaluation Schema Versioning (Blocking)
+### OQ-2: Evaluation Schema Versioning (Resolved — Project Owner Decision ODR-2)
 
-**Question:** Should the quality evaluation record carry an `evaluation_schema_version` field that enables consumers to distinguish records produced under different metric formulas?
+**Question (resolved):** Should the quality evaluation record carry an `evaluation_schema_version` field that enables consumers to distinguish records produced under different metric formulas?
 
-**Why it matters:** If `hindsight_quality` formula or `QualityMetrics` definitions change, historical evidence records and new records are not directly comparable without version tracking. Benchmarking, experiment comparison, and scheduler effectiveness analysis depend on comparable quality values.
+**Owner Decision (ODR-2):** The Project Owner has confirmed that `evaluation_schema_version` shall remain part of SPEC-007. Evaluation outputs require schema versioning for historical comparability. All versioning requirements (FR-11, FR-12) are preserved as specified.
 
-**SPEC-007 position:** This specification includes `evaluation_schema_version` as a required field in `EvaluationMetadata` (FR-11 and FR-12). It defines the breaking change procedure for this field. This is the recommended approach.
-
-**If the owner prefers not to version:** Remove FR-11, remove `evaluation_schema_version` from `EvaluationMetadata` (FR-12), remove the versioning acceptance criteria. Acknowledge that historical records become incomparable when metric definitions change. This simplification is acceptable if the project does not anticipate evolving the quality metric formulas.
-
-**Owner:** Project Owner confirmation required before SPEC-007 can advance beyond Draft.
-
-**Blocking:** Blocking for SPEC-007 Proposed status.
+**Status:** Resolved. FR-11 and FR-12 are retained. No further action required.
 
 ---
 
-### OQ-3: Regret Analysis Location in Evidence (Non-Blocking)
+### OQ-3: Regret Analysis Location in Evidence (Non-Blocking, Deferred)
 
 **Question:** Should `RegretAnalysis` be stored in the quality evaluation record, or should it be computable on demand from the decision record and solver run record?
 
-**Why it matters:** `RegretAnalysis` fields (FR-8) are derivable from existing evidence fields: `latency_delta_ms` from `execution_duration_ms` and `predicted_latency`; `predicted_quality_tier` from the decision record. Storing `RegretAnalysis` redundantly improves query performance but adds schema complexity.
-
-**SPEC-007 position:** This specification includes `RegretAnalysis` as a stored field in the quality evaluation record. Pre-computing it at evaluation time ensures a consistent snapshot and avoids recomputation bugs if the decision record fields are later updated.
-
-**If the owner prefers computed-on-demand:** Remove `RegretAnalysis` from `QualityEvaluationResult`, remove FR-8, and acknowledge that effectiveness analysis dashboards must join across the decision record and solver run record to derive regret values.
-
-**Owner:** Project Owner preference. Neither approach is architecturally incorrect.
+**Architecture Review adjudication:** Deferred to implementation planning. The preliminary architectural recommendation is to store `RegretAnalysis` in the quality evaluation record. `RegretAnalysis` fields are computed from transient state (the Scheduler's prediction fields at the time of execution). Storing ensures a consistent snapshot and avoids recomputation divergence if decision record fields are later updated or if Scheduler model updates change how predictions are computed. Consumers that prefer on-demand computation may choose not to use the stored `RegretAnalysis` fields without affecting correctness.
 
 **Blocking:** Not blocking for SPEC-007 Draft or Proposed status.
 
@@ -808,9 +841,9 @@ The final attribute set on `result.evaluate` is a Worker implementation concern.
 - [x] Observability requirements exist.
 - [x] Security considerations exist.
 - [x] Documentation updates are identified.
-- [ ] OQ-1 resolved — travel speed parameter source (blocking for implementation; Project Owner decision).
-- [ ] OQ-2 resolved — evaluation schema versioning (blocking for Proposed status; Project Owner confirmation).
-- [ ] OQ-3 resolved — regret analysis location (non-blocking).
+- [x] OQ-1 resolved — Project Owner Decision ODR-1 accepted: `travel_speed_kmh` belongs to routing problem domain as `RoutingProblem.average_vehicle_speed_kmh`. Blocking for implementation (SPEC-001 revision); not blocking for Proposed status.
+- [x] OQ-2 resolved — Project Owner Decision ODR-2: `evaluation_schema_version` confirmed; all versioning requirements (FR-11, FR-12) preserved.
+- [ ] OQ-3 resolved — Deferred to implementation planning; preliminary recommendation to store `RegretAnalysis`. Non-blocking.
 
 ---
 
@@ -819,11 +852,11 @@ The final attribute set on `result.evaluate` is a Worker implementation concern.
 This feature is complete when:
 
 - All functional requirements (FR-1 through FR-13) are implemented and acceptance criteria pass.
-- OQ-1 (travel speed parameter source) is resolved, incorporated in FR-3 and FR-5, and the authoritative source is documented.
-- OQ-2 (evaluation schema versioning) is resolved; `evaluation_schema_version` is included or excluded per Project Owner decision.
+- OQ-1 (travel speed parameter source) is resolved by Project Owner Decision ODR-1: `travel_speed_kmh` is `RoutingProblem.average_vehicle_speed_kmh`. FR-3 and FR-5 reference this field. SPEC-001 revision is complete and the field is formally defined.
+- OQ-2 (evaluation schema versioning) is resolved per Project Owner Decision ODR-2: `evaluation_schema_version` is included and all versioning requirements are preserved.
 - All test contracts defined in the Testability section pass.
 - SPEC-006 FR-7 is extended with the full quality evaluation record schema per this specification.
-- SPEC-006 FR-5.4 is revised to reflect `actual_outcome` as `ActualOutcomeClassification`.
+- SPEC-006 FR-5.4 is revised to reflect `actual_outcome` as `ActualOutcomeClassification` with partial population semantics on infrastructure failure.
 - SPEC-005 Assumption 9 references SPEC-007 FR-10 as the determinism authority.
 - The `result.evaluate` span emits quality evaluation outcomes and is verifiable in the test environment.
 - Core quality evaluation passes the determinism property test (test contract 1) across two execution attempts for the same inputs.
