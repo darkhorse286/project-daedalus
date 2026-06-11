@@ -6,7 +6,7 @@
 
 **Title:** Core Quality Evaluation
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
@@ -332,9 +332,9 @@ Core quality evaluation produces a regret analysis comparing the Scheduler's pre
 |---|---|---|---|---|
 | `predicted_latency_ms` | uint64 | Always | `scheduler_decision.predicted_latency × 1000` | Scheduler's predicted execution latency converted to milliseconds. Always non-null: the Scheduler decision record has `predicted_latency` populated before a job enters execution (SPEC-003 FR-10 precondition guaranteed by FR-2 invocation contract). |
 | `actual_execution_duration_ms` | uint64 | When `solver_response.statistics` is non-null | `solver_response.statistics.execution_duration_ms` (SPEC-004 FR-6) | Actual wall-clock execution time reported by the solver. Non-null for all `Succeeded` responses; may be null for `Timeout` and `Cancelled` responses. |
-| `latency_delta_ms` | int64 | When both `predicted_latency_ms` and `actual_execution_duration_ms` are present | `actual_execution_duration_ms - predicted_latency_ms` | Signed latency delta: negative means faster than predicted; positive means slower. Zero is an exact prediction. |
+| `latency_delta_ms` | int64 | When `actual_execution_duration_ms` is non-null | `actual_execution_duration_ms - predicted_latency_ms` | Signed latency delta: negative means faster than predicted; positive means slower. Zero is an exact prediction. |
 | `predicted_quality_tier` | QualityProfile enum | Always | `scheduler_decision.predicted_quality` | The Scheduler's predicted quality tier (`Baseline`, `Competitive`, `Near-Optimal`). |
-| `actual_hindsight_quality_km` | float64 | When `solution_present = true` | `hindsight_quality` (FR-7) | The actual normalized quality metric. Enables qualitative comparison against `predicted_quality_tier`. |
+| `actual_hindsight_quality_km` | float64 | When `solution_present = true` and route simulation completed successfully (FR-7) | `hindsight_quality` (FR-7) | The actual normalized quality metric. Enables qualitative comparison against `predicted_quality_tier`. |
 | `confidence_score` | float64 | Always | `scheduler_decision.confidence_score` | The score margin at decision time (SPEC-003 FR-10). Preserved for effectiveness analysis. |
 
 **Note on cost regret:** `predicted_cost` is preserved in the Scheduler's decision record but is not included in `RegretAnalysis`. Cost regret analysis requires `actual_cost` reporting from the solver contract (SPEC-004 OQ-2), which is deferred to post-MVP. `RegretAnalysis` will be extended with a `cost_delta` field when SPEC-004 OQ-2 is resolved.
@@ -863,6 +863,7 @@ This feature is complete when:
 - SPEC-006 FR-7 is extended with the full quality evaluation record schema per this specification.
 - SPEC-006 FR-5.4 is revised to reflect `actual_outcome` as `ActualOutcomeClassification` with partial population semantics on infrastructure failure.
 - SPEC-005 Assumption 9 references SPEC-007 FR-10 as the determinism authority.
+- SPEC-005 FR-15 is revised to reflect the partial `QualityEvaluationResult` model defined in SPEC-007 FR-13: input-derived `actual_outcome` fields are always non-null on infrastructure failure; only simulation-derived quality fields (`hindsight_quality`, `quality_metrics`) are null.
 - The `result.evaluate` span emits quality evaluation outcomes and is verifiable in the test environment.
 - Core quality evaluation passes the determinism property test (test contract 1) across two execution attempts for the same inputs.
 - Engineering review passes.
