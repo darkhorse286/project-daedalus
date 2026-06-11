@@ -249,7 +249,7 @@ For each vehicle route in the RoutePlan (indexed 0 through `vehicle_count − 1`
 ### FR-6: Quality Metrics Model
 
 **Description:**
-Core quality evaluation computes the following quality metrics from the route simulation (FR-5). Metrics are present when `solution_present = true`. All metrics are null when no route plan was provided.
+Core quality evaluation computes the following quality metrics from the route simulation (FR-5). Metrics are present when `solution_present = true` and route simulation completed successfully. All metrics are null when no route plan was provided, or when route simulation could not be performed due to infrastructure failure (FR-13).
 
 **Type: `QualityMetrics`**
 
@@ -266,6 +266,8 @@ Core quality evaluation computes the following quality metrics from the route si
 | `quality_comparison_eligible` | bool | `(NOT time_window_constrained) OR (time_window_feasible = true)` | True when `hindsight_quality` is valid for cross-backend comparison. False when time windows exist and the plan violates at least one. Conservative false when `time_window_constrained = true` and simulation could not be performed (`time_window_feasible` null). See FR-7. |
 
 **Note on duplication:** `time_window_violation_count` and `time_window_feasible` are duplicated between `QualityMetrics` and `ActualOutcomeClassification` for different consumers: `ActualOutcomeClassification` is written to the decision record (SPEC-003 FR-10) for scheduler effectiveness analysis; `QualityMetrics` is written to the quality evaluation record (SPEC-006 FR-7) for detailed evidence. Both values must be identical — they are computed from the same simulation run. See Testability TC-24.
+
+**Note on `quality_comparison_eligible` when `quality_metrics` is null:** When `quality_metrics` is null (simulation infrastructure failure, FR-13), `quality_comparison_eligible` is contained within a null struct and is therefore null. Consumers MUST treat a null `quality_metrics` as comparison-ineligible, equivalent to `quality_comparison_eligible = false`. Null `quality_metrics` means comparison eligibility cannot be confirmed; no cross-backend comparison using `hindsight_quality` should be performed.
 
 **Acceptance Criteria:**
 - `total_route_distance_km` is the sum of all per-vehicle distances including return legs
@@ -297,8 +299,9 @@ hindsight_quality = total_route_distance_km
 **Semantics:**
 - `hindsight_quality` is a minimization metric: lower is better.
 - It is defined in kilometers (float64, non-negative).
-- It is present (non-null) when `solution_present = true`.
+- It is present (non-null) when `solution_present = true` and route simulation completed successfully.
 - It is null when `solution_present = false` (no route plan in the SolverResponse).
+- It is null when route simulation could not be performed due to infrastructure failure (FR-13), even when `solution_present = true`. In this case the partial `QualityEvaluationResult` contains a non-null `actual_outcome` but a null `hindsight_quality`.
 - `hindsight_quality` is dimensionally stable for comparison only within the same routing problem. Cross-problem comparison of `hindsight_quality` values is not meaningful because stop counts, depot positions, and geographic distribution vary.
 
 **Comparison validity constraint:**
@@ -312,7 +315,7 @@ The Scheduler's `predicted_quality` field in the decision record (SPEC-003 FR-10
 
 **Acceptance Criteria:**
 - `hindsight_quality = total_route_distance_km` computed per FR-6
-- `hindsight_quality` is null when no route plan was provided
+- `hindsight_quality` is null when no route plan was provided or when route simulation infrastructure failed (FR-13)
 - `hindsight_quality` is a non-negative float64
 - `hindsight_quality` MUST NOT be used in cross-backend comparisons when `quality_comparison_eligible = false`
 
@@ -341,7 +344,7 @@ Core quality evaluation produces a regret analysis comparing the Scheduler's pre
 **Acceptance Criteria:**
 - `RegretAnalysis` is always present in the `QualityEvaluationResult`, even when no route plan was available (fields are null in that case)
 - `predicted_latency_ms` is always non-null (SPEC-003 FR-10 precondition guaranteed by FR-2)
-- `latency_delta_ms` is null when either `predicted_latency_ms` or `actual_execution_duration_ms` is null
+- `latency_delta_ms` is null when `actual_execution_duration_ms` is null (`predicted_latency_ms` is always non-null per the SPEC-003 FR-10 precondition)
 - `latency_delta_ms = actual_execution_duration_ms - predicted_latency_ms` (signed, exact subtraction)
 - `confidence_score` is preserved exactly as received from the decision record
 
@@ -687,7 +690,7 @@ Every quality evaluation behavior must be proven before this feature is consider
 
 22. **Unit: `quality_comparison_eligible` — time-infeasible plan** — A routing problem with time-windowed stops and at least one simulated arrival time exceeding `time_window_close` produces `quality_comparison_eligible = false`.
 
-23. **Unit: `quality_comparison_eligible` — simulation failure** — When `time_window_constrained = true` and route simulation cannot be performed (infrastructure failure), `quality_comparison_eligible = false`. Absence of feasibility confirmation is not confirmation of eligibility.
+23. **Unit: `quality_comparison_eligible` — simulation failure** — When `time_window_constrained = true` and route simulation cannot be performed (infrastructure failure), `quality_metrics` is null (FR-9, FR-13), and `quality_comparison_eligible` is therefore null as a subfield of a null struct. Consumers MUST treat this as comparison-ineligible per the normative statement in FR-6. Absence of feasibility confirmation is not confirmation of eligibility.
 
 24. **Unit: Duplication identity invariant** — For any `QualityEvaluationResult` where both `QualityMetrics.time_window_violation_count` and `ActualOutcomeClassification.time_window_violation_count` are non-null, their values MUST be identical. The same applies to `QualityMetrics.time_window_feasible` and `ActualOutcomeClassification.time_window_feasible`.
 
@@ -775,6 +778,8 @@ The final attribute set on `result.evaluate` is a Worker implementation concern.
 - **SPEC-003 FR-10 (Accepted):** The types and semantics of `actual_outcome` and `hindsight_quality` are now defined: `actual_outcome` is `ActualOutcomeClassification` (SPEC-007 FR-4); `hindsight_quality` is float64 representing total route distance in km (SPEC-007 FR-7). The parenthetical "Type and semantics defined by the Core specification" is satisfied by SPEC-007. The explicit named dependencies on SPEC-003 FR-10 fields `predicted_latency`, `predicted_quality`, and `confidence_score` are consumed by SPEC-007 FR-8 `RegretAnalysis`.
 
 - **SPEC-005 Assumption 9 (Proposed):** The assumption that "Core quality evaluation is deterministic... this property must be established by the Core Quality Evaluation Specification" is now satisfied by SPEC-007 FR-10. SPEC-005 Assumption 9 can reference SPEC-007 FR-10 as the authority.
+
+- **SPEC-005 FR-15 (Proposed):** Must be revised to reflect the partial `QualityEvaluationResult` model defined in SPEC-007 FR-13. The current language "the Worker persists the solver run record with `actual_outcome` and `hindsight_quality` null" is inconsistent with SPEC-007 FR-13: on Core QE infrastructure failure, Core returns a partial result in which `actual_outcome.solver_outcome`, `actual_outcome.solution_present`, and `actual_outcome.time_window_constrained` are always non-null (input-derived). The Worker writes this partial `actual_outcome` to the decision record. Only simulation-derived quality fields (`hindsight_quality`, `quality_metrics`) are null on infrastructure failure. This is the intended behavior of Amendment A (M-1 resolution).
 
 - **SPEC-001 (Accepted — revision required):** Per Project Owner Decision ODR-1, a future SPEC-001 revision must formally introduce `average_vehicle_speed_kmh` as a routing problem field (positive float64; required when any stop has time window fields; optional otherwise with a configurable system default). SPEC-007 FR-3 and FR-5 reference this field as an accepted dependency pending that revision.
 
