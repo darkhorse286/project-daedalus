@@ -5,8 +5,9 @@
 Accepted
 
 **Date:** 2026-06-08
+**Amended:** 2026-06-12 — Worker owns execution seed derivation; solver specifications define seed usage policy only, not derivation policy (ODR-4, SPEC-005 FR-7)
 
-**Related Feature(s):** SPEC-001 (Routing Problem Model), SPEC-002 (Synthetic Workload Generator), QUBO Simulated Annealing Backend
+**Related Feature(s):** SPEC-001 (Routing Problem Model), SPEC-002 (Synthetic Workload Generator), SPEC-005 (Worker Execution Lifecycle), QUBO Simulated Annealing Backend
 
 **Related ADR(s):** ADR-001, ADR-006, ADR-007, ADR-008, ADR-009
 
@@ -30,7 +31,7 @@ Without an architectural policy, each component that requires stochastic computa
 - **Scope inconsistency:** Some components commit to cross-platform reproducibility; others commit to within-platform only. The system-level reproducibility claim is undefined.
 - **Breaking change blindness:** An algorithm change in one component is not recognized as a system-level breaking change because no policy exists defining what "system-level" means.
 
-This ADR resolves the architectural policy governing deterministic randomness and reproducibility across Project DAEDALUS. It binds the architecture.md reproducibility principle at the implementation level. It does not specify component-level draw ordering, solver seed derivation strategies, or manifest serialization details — those remain in their respective specifications.
+This ADR resolves the architectural policy governing deterministic randomness and reproducibility across Project DAEDALUS. It binds the architecture.md reproducibility principle at the implementation level. It does not specify component-level draw ordering, solver seed *usage* strategies (how a solver initializes its PRNG from the `execution_seed` it receives), or manifest serialization details — those remain in their respective specifications. Execution seed *derivation* is defined here in Decision 4 and is a Worker responsibility, not a solver specification concern.
 
 ---
 
@@ -87,7 +88,9 @@ The problem seed (SPEC-001 FR-6, 64-bit non-negative integer) is the exclusive e
 
 **One seeding per reproducibility unit:** The PRNG is seeded exactly once per reproducibility unit from the problem seed. A reproducibility unit is one self-contained stochastic computation whose output must be reproducible: for the generator, one generation invocation; for a solver, one solver execution.
 
-**Solver seed derivation:** How a solver derives its PRNG seed from job context — for example, whether the QUBO annealing backend seeds its PRNG directly from the problem seed or from a deterministic function of the problem seed and execution configuration — is defined in each solver's specification. Derivation must be deterministic and must not mix in additional entropy. Solver-specific derivation strategies are outside the scope of this ADR.
+**Execution seed derivation:** The Worker is the authoritative owner of execution seed derivation for all backends (SPEC-005 FR-7). The execution seed passed to the solver in the SolverRequest is derived as: `execution_seed = RoutingProblem.seed`. No transformation is applied (ODR-4). This policy is uniform across all registered backends; no per-backend derivation strategy exists.
+
+**Solver seed usage policy:** Solver specifications define seed *usage* policy only — how the solver seeds its internal PRNG from the `execution_seed` value it receives in the SolverRequest. Solver specifications do not define seed derivation policy. Seed derivation is a Worker-exclusive responsibility; solvers are consumers of the execution seed, not producers. Solver internal PRNG seeding must be deterministic and must not mix in additional entropy.
 
 ## Decision 5: Backward Compatibility Requirements
 
@@ -231,7 +234,7 @@ The architecture.md reproducibility principle has concrete, enforceable implemen
 
 SPEC-002 OQ-1 is resolved by this ADR. The generator specification can close OQ-1 and reference this ADR for PRNG algorithm, distribution sampling standard, and semantic equivalence scope. SPEC-002 can transition from Draft to Proposed.
 
-The QUBO simulated annealing backend specification has a clear policy to reference when defining its seed derivation and stochastic execution model. Algorithm inconsistency between the generator and solver is prevented by shared policy.
+The QUBO simulated annealing backend specification has a clear policy to reference when defining its seed usage model and stochastic execution behavior. Algorithm inconsistency between the generator and solver is prevented by shared policy.
 
 Breaking changes are explicitly defined. Any algorithm change that would silently invalidate existing evidence is identified as requiring a coordinated, documented response.
 
@@ -272,7 +275,7 @@ Box-Muller uses transcendental functions whose results may differ by at most 1 U
 
 **Synthetic Workload Generator:** OQ-1 is resolved. SPEC-002 FR-3 must document the PCG64 stream constant and specify the bounded integer sampling algorithm. SPEC-002 FR-9 must reference this ADR's semantic equivalence standard. SPEC-002 FR-5 must account for Box-Muller's two-output form in draw count calculations.
 
-**QUBO Simulated Annealing:** The annealing process must seed its PRNG from the problem seed via an explicitly specified deterministic derivation. The derivation strategy is defined in the solver specification, constrained by Decision 4 of this ADR.
+**QUBO Simulated Annealing:** The annealing process must seed its PRNG from the `execution_seed` it receives in the SolverRequest. The seed usage policy — how the solver initializes its PRNG from `execution_seed` — is defined in the QUBO solver specification. The solver specification does not define derivation policy; `execution_seed` is derived by the Worker per Decision 4 and ODR-4.
 
 **Infrastructure:** PCG64 must be adopted as a C++ project dependency. The specific implementation library (the pcg-random.org header-only reference implementation is the default candidate) must be designated during implementation planning. This is not resolved by this ADR.
 
@@ -311,7 +314,7 @@ Solver stochastic operations consume PRNG draws in a fixed or explicitly documen
 This ADR does not specify:
 
 - The PCG64 stream constant for any component. The stream constant is a component-level implementation decision; it must be documented in the component specification and treated as frozen once the specification is accepted.
-- How any solver derives its PRNG seed from job context. Seed derivation strategy is a solver specification concern.
+- How any solver uses the `execution_seed` it receives to seed its internal PRNG. Seed usage policy is a solver specification concern; seed derivation policy is a Worker responsibility (SPEC-005 FR-7, Decision 4).
 - The PRNG draw ordering within any component. Draw ordering is specified per component (SPEC-002 FR-3 for the generator).
 - Which PCG64 implementation library to adopt. This is an implementation planning decision.
 - Floating-point determinism obligations for computations outside reproducibility-critical paths (for example, scheduler scoring arithmetic). This policy applies only to computations whose outputs are included in evidence or must be exactly reproducible from a seed.
@@ -323,6 +326,7 @@ Variable-draw-count algorithms are prohibited only in contexts where the compone
 # Documentation Updates
 
 - SPEC-002: Close OQ-1 with reference to this ADR. Update FR-3 to name PCG64 and document the stream constant placeholder, name Box-Muller as the normal distribution algorithm, and name the approved bounded integer sampling algorithm. Update FR-9 to reference this ADR's semantic equivalence standard. Transition SPEC-002 status from Draft to Proposed.
+- SPEC-005: FR-7 is the authoritative definition of Worker execution seed derivation. Decision 4 of this ADR has been revised to reference SPEC-005 FR-7 and ODR-4 for the approved derivation policy (`execution_seed = RoutingProblem.seed`).
 - docs/architecture.md: No changes required. The reproducibility principle is already stated. This ADR provides the implementation-level binding.
 
 ---
