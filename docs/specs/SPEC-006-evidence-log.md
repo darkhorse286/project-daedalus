@@ -2,7 +2,7 @@
 ## Metadata
 **Feature ID:** SPEC-006
 **Title:** Evidence Log
-**Status:** Proposed
+**Status:** Accepted
 **Author:** Darkhorse286
 **Created:** 2026-06-08
 **Last Modified:** 2026-06-12
@@ -36,7 +36,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 | **Job record** | The lifecycle state record for a job. Created by the API; updated by the Worker. |
 | **Decision record** | The scheduler decision record produced by Core and persisted by the Worker. Defined by SPEC-003 FR-10. |
 | **Solver run record** | The artifact capturing solver execution inputs and outputs, including the reproducibility tuple. |
-| **Quality evaluation record** | The artifact capturing the quality evaluation result for a solver run. Schema defined by the Core Quality Evaluation Specification. |
+| **Quality evaluation record** | The artifact capturing the quality evaluation result for a solver run. Schema defined by SPEC-007 (Core Quality Evaluation). |
 | **Failure record** | The artifact capturing structured failure detail for a job that failed before or during solver invocation. |
 | **Report metadata record** | The artifact capturing metadata about a generated evidence report. Minimum fields defined here; schema extended by the Report Generator Specification. |
 | **Reproducibility tuple** | The four-value set `(problem_id, execution_seed, backend_id, contract_version)` sufficient to reproduce a solver execution. |
@@ -60,7 +60,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 - The routing problem itself. The routing problem is an immutable artifact owned by SPEC-001 and referenced by `problem_id`. The Evidence Log references the routing problem by `problem_id`; it does not duplicate routing problem data.
 - The decision logic that produced the decision record. Decision logic is owned by SPEC-003.
 - The solver contract or solver execution semantics. Those are owned by SPEC-004 and SPEC-005.
-- The quality evaluation algorithm or quality evaluation schema. Those are owned by the Core Quality Evaluation Specification (pending).
+- The quality evaluation algorithm or quality evaluation schema. Those are owned by SPEC-007 (Core Quality Evaluation, Accepted).
 - The report generation algorithm or report schema. Those are owned by the Report Generator Specification (pending).
 - Job scheduling, message queue management, or Worker lifecycle.
 
@@ -76,7 +76,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 1. One job record with `status = Completed`.
 2. One decision record.
 3. One solver run record.
-4. Zero or one quality evaluation records (present when quality evaluation was invoked; may be absent when quality evaluation failed or was skipped — see FR-7).
+4. Zero or one quality evaluation records. The quality evaluation record is present whenever Core quality evaluation was invoked, regardless of whether evaluation succeeded or failed (see FR-7 and AC-6). When quality evaluation fails due to infrastructure failure, the record is persisted with `evaluation_status = Failed` and partial `QualityEvaluationResult` content per SPEC-007 FR-13 (see FR-7.4). The quality evaluation record is absent only when Core quality evaluation was not invoked (no route plan present).
 5. Zero or one report metadata records (present only when a report has been generated — see FR-9).
 
 A `Completed` job does not have a failure record. Failure records are present only for `Failed` jobs (see FR-8.5 and FR-13.3).
@@ -151,7 +151,7 @@ A `Completed` job does not have a failure record. Failure records are present on
 | `confidence_score` | SPEC-003 FR-10 |
 | `decision_status` | SPEC-003 FR-10 |
 | `timestamp` | SPEC-003 FR-10 |
-| `actual_outcome` | SPEC-003 FR-10 (reserved; populated post-execution) |
+| `actual_outcome` | SPEC-003 FR-10 (reserved; see FR-5.4 for type definition, write source via `QualityEvaluationResult`, and partial population semantics) |
 | `hindsight_quality` | SPEC-003 FR-10 (reserved; populated post-quality-evaluation) |
 
 **3.5.3** The Evidence Log stores the decision record keyed by `job_id`. The `decision_id` is a correlation identifier within a single execution attempt. On re-execution (message re-delivery), the Worker receives a new `decision_id` from Core. The new decision record replaces the prior attempt's record via `job_id`-keyed upsert.
@@ -394,7 +394,7 @@ When the failure stage is `Schedule` (NoEligibleSolver, InvalidConfiguration, or
 
 **3.17.2** The decision record (FR-5) provides the complete scheduler decision including `objective_mode`, `candidate_scores`, `rejection_reasons`, `predicted_latency`, `predicted_cost`, `predicted_quality`, and `confidence_score`. This satisfies the "why was this backend selected" audit requirement.
 
-**3.17.3** The `actual_outcome` and `hindsight_quality` fields in the decision record (updated post-execution and post-evaluation respectively) provide the comparative record for scheduler effectiveness analysis.
+**3.17.3** The `actual_outcome` and `hindsight_quality` fields in the decision record (both updated post-quality-evaluation via `QualityEvaluationResult` per FR-5.4) provide the comparative record for scheduler effectiveness analysis.
 
 **3.17.4** Evidence records must not be modified after a job reaches a terminal state, except as required by `job_id`-keyed upsert on re-delivery (which is not possible after a terminal state is reached — see FR-3.4). Audit integrity depends on terminal-state record immutability.
 
@@ -500,7 +500,7 @@ The following are explicitly out of scope for this specification:
 
 5. **Integration: Transient persistence failure — NACK with requeue** — Given a PostgreSQL failure during solver run record persistence, verify that the Worker NACKs with requeue and the job status remains `Processing` (not `Failed`).
 
-6. **Integration: Quality evaluation failure — Completed without QE** — Given a job where quality evaluation fails with an infrastructure error, verify that the job status transitions to `Completed`, the quality evaluation record has `evaluation_status = Failed`, and no failure record is present.
+6. **Integration: Quality evaluation infrastructure failure — quality evaluation record persists with Failed status** — Given a job where quality evaluation fails with an infrastructure error, verify that the job status transitions to `Completed`, the quality evaluation record has `evaluation_status = Failed`, and no failure record is present.
 
 7. **Integration: Pre-solver failure — failure record present** — Given a job that fails at the `Load` stage (routing problem not found), verify that a failure record is persisted with `failure_stage = Load` and the job status transitions to `Failed`.
 
