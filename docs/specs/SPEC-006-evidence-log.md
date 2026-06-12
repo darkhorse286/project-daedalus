@@ -2,12 +2,12 @@
 ## Metadata
 **Feature ID:** SPEC-006
 **Title:** Evidence Log
-**Status:** Proposed
+**Status:** Accepted
 **Author:** Darkhorse286
 **Created:** 2026-06-08
-**Last Modified:** 2026-06-09
-**Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005
-**Blocks:** Core Quality Evaluation Specification (pending), Report Generator Specification (pending)
+**Last Modified:** 2026-06-12
+**Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-007
+**Blocks:** Report Generator Specification (pending)
 
 ---
 
@@ -36,7 +36,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 | **Job record** | The lifecycle state record for a job. Created by the API; updated by the Worker. |
 | **Decision record** | The scheduler decision record produced by Core and persisted by the Worker. Defined by SPEC-003 FR-10. |
 | **Solver run record** | The artifact capturing solver execution inputs and outputs, including the reproducibility tuple. |
-| **Quality evaluation record** | The artifact capturing the quality evaluation result for a solver run. Schema defined by the Core Quality Evaluation Specification. |
+| **Quality evaluation record** | The artifact capturing the quality evaluation result for a solver run. Schema defined by SPEC-007 (Core Quality Evaluation). |
 | **Failure record** | The artifact capturing structured failure detail for a job that failed before or during solver invocation. |
 | **Report metadata record** | The artifact capturing metadata about a generated evidence report. Minimum fields defined here; schema extended by the Report Generator Specification. |
 | **Reproducibility tuple** | The four-value set `(problem_id, execution_seed, backend_id, contract_version)` sufficient to reproduce a solver execution. |
@@ -60,7 +60,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 - The routing problem itself. The routing problem is an immutable artifact owned by SPEC-001 and referenced by `problem_id`. The Evidence Log references the routing problem by `problem_id`; it does not duplicate routing problem data.
 - The decision logic that produced the decision record. Decision logic is owned by SPEC-003.
 - The solver contract or solver execution semantics. Those are owned by SPEC-004 and SPEC-005.
-- The quality evaluation algorithm or quality evaluation schema. Those are owned by the Core Quality Evaluation Specification (pending).
+- The quality evaluation algorithm or quality evaluation schema. Those are owned by SPEC-007 (Core Quality Evaluation, Accepted).
 - The report generation algorithm or report schema. Those are owned by the Report Generator Specification (pending).
 - Job scheduling, message queue management, or Worker lifecycle.
 
@@ -76,7 +76,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 1. One job record with `status = Completed`.
 2. One decision record.
 3. One solver run record.
-4. Zero or one quality evaluation records (present when quality evaluation was invoked; may be absent when quality evaluation failed or was skipped — see FR-7).
+4. Zero or one quality evaluation records. The quality evaluation record is present whenever Core quality evaluation was invoked, regardless of whether evaluation succeeded or failed (see FR-7 and AC-6). When quality evaluation fails due to infrastructure failure, the record is persisted with `evaluation_status = Failed` and partial `QualityEvaluationResult` content per SPEC-007 FR-13 (see FR-7.4). The quality evaluation record is absent only when Core quality evaluation was not invoked (no route plan present).
 5. Zero or one report metadata records (present only when a report has been generated — see FR-9).
 
 A `Completed` job does not have a failure record. Failure records are present only for `Failed` jobs (see FR-8.5 and FR-13.3).
@@ -151,12 +151,12 @@ A `Completed` job does not have a failure record. Failure records are present on
 | `confidence_score` | SPEC-003 FR-10 |
 | `decision_status` | SPEC-003 FR-10 |
 | `timestamp` | SPEC-003 FR-10 |
-| `actual_outcome` | SPEC-003 FR-10 (reserved; populated post-execution) |
+| `actual_outcome` | SPEC-003 FR-10 (reserved; see FR-5.4 for type definition, write source via `QualityEvaluationResult`, and partial population semantics) |
 | `hindsight_quality` | SPEC-003 FR-10 (reserved; populated post-quality-evaluation) |
 
 **3.5.3** The Evidence Log stores the decision record keyed by `job_id`. The `decision_id` is a correlation identifier within a single execution attempt. On re-execution (message re-delivery), the Worker receives a new `decision_id` from Core. The new decision record replaces the prior attempt's record via `job_id`-keyed upsert.
 
-**3.5.4** The `actual_outcome` field in the decision record is updated by the Worker after the solver run completes, using the `SolverOutcome` value from the SolverResponse (SPEC-004 FR-4). The `hindsight_quality` field is updated by the Worker after quality evaluation completes, if quality evaluation succeeds.
+**3.5.4** The `actual_outcome` field in the decision record is of type `ActualOutcomeClassification` (SPEC-007 FR-4). It is produced by Core quality evaluation and returned in `QualityEvaluationResult.actual_outcome` (SPEC-007 FR-9). The Worker writes `actual_outcome` to the decision record after receiving the `QualityEvaluationResult` from Core. On Core quality evaluation infrastructure failure, the Worker writes the partial result: `actual_outcome.solver_outcome`, `actual_outcome.solution_present`, and `actual_outcome.time_window_constrained` are always non-null (input-derived per SPEC-007 FR-13); simulation-derived subfields within `actual_outcome` are null. The `hindsight_quality` field is updated by the Worker when Core returns a non-null `QualityEvaluationResult.hindsight_quality` (SPEC-007 FR-7); it is null when quality evaluation was not invoked or when route simulation could not be completed.
 
 **3.5.5** The decision record must support `job_id`-keyed upsert. A second write for the same `job_id` updates the existing record; it does not create a duplicate.
 
@@ -195,25 +195,31 @@ A `Completed` job does not have a failure record. Failure records are present on
 
 ### FR-7: Quality Evaluation Record Persistence
 
-**3.7.1** The quality evaluation record captures the result of the Core quality evaluation invoked after solver execution (SPEC-005 FR-15).
+**3.7.1** The quality evaluation record captures the result of the Core quality evaluation invoked after solver execution (SPEC-005 FR-15). The full quality evaluation schema is defined by SPEC-007.
 
-**3.7.2** The quality evaluation record schema is defined by the Core Quality Evaluation Specification (pending). That specification is authoritative for the quality evaluation record schema. The Evidence Log does not define quality evaluation schema fields except as follows.
+**3.7.2** The quality evaluation record schema is defined by SPEC-007 (FR-6, FR-7, FR-8, FR-11, FR-12). SPEC-007 is authoritative for field semantics and computation rules. The Evidence Log is the authoritative owner of evidence persistence behavior and schema ownership; it adopts the SPEC-007-defined field set in full in FR-7.3.
 
-**3.7.3** The quality evaluation record must include at minimum:
+**3.7.3** The quality evaluation record must include:
 
 | Field | Notes |
 |---|---|
 | `job_id` | Foreign key to job record |
-| `evaluation_status` | Whether evaluation completed, was skipped, or failed |
+| `evaluation_status` | Whether evaluation completed (`Completed`), was skipped (`Skipped`), or failed (`Failed`) |
 | `evaluated_at` | Timestamp of evaluation; UTC; null when evaluation absent |
+| `evaluation_schema_version` | uint32; the evaluation schema version under which this record was produced (SPEC-007 FR-11); current value: 1 |
+| `actual_outcome` | `ActualOutcomeClassification` (SPEC-007 FR-4); null when evaluation was not invoked (no route plan present); input-derived subfields (`solver_outcome`, `solution_present`, `time_window_constrained`) are non-null on any invocation, including infrastructure failure (SPEC-007 FR-13) |
+| `hindsight_quality` | float64; total route distance in km (SPEC-007 FR-7); null when no route plan was present or when route simulation could not be completed |
+| `quality_metrics` | `QualityMetrics` (SPEC-007 FR-6); null when no route plan was present or when route simulation could not be completed |
+| `regret_analysis` | `RegretAnalysis` (SPEC-007 FR-8); present when evaluation was invoked; individual fields may be null when input values are absent |
+| `evaluation_metadata` | `EvaluationMetadata` (SPEC-007 FR-12); present when evaluation was invoked |
 
-**3.7.4** When Core quality evaluation fails due to an infrastructure failure (SPEC-005 FR-15 failure handling), the quality evaluation record is persisted with `evaluation_status` set to `Failed` and all quality score fields null. The absence of a quality evaluation result must not prevent the job from reaching `Completed` state.
+**3.7.4** When Core quality evaluation fails due to an infrastructure failure (SPEC-005 FR-15 failure handling), the quality evaluation record is persisted with `evaluation_status` set to `Failed`. Input-derived fields within `actual_outcome` (`solver_outcome`, `solution_present`, `time_window_constrained`) are non-null; simulation-derived subfields and computed quality metrics (`hindsight_quality`, `quality_metrics`, regret analysis simulation-derived fields) are null per SPEC-007 FR-13. The absence of a quality evaluation result must not prevent the job from reaching `Completed` state.
 
-**3.7.5** When quality evaluation succeeds, the Worker updates the `hindsight_quality` field in the decision record via `job_id`-keyed upsert, using the quality score returned by Core quality evaluation (SPEC-005 FR-15).
+**3.7.5** When quality evaluation succeeds, the Worker updates the `hindsight_quality` field in the decision record via `job_id`-keyed upsert, using `QualityEvaluationResult.hindsight_quality` from Core quality evaluation (SPEC-007 FR-7).
 
 **3.7.6** The quality evaluation record must support `job_id`-keyed upsert.
 
-**Open Question OQ-1 (Blocking):** The Core Quality Evaluation Specification has not been authored. The quality evaluation record schema is deferred until that specification is accepted. SPEC-006 FR-7 cannot advance to Accepted until OQ-1 is resolved.
+**OQ-1 (Resolved):** SPEC-007 (Core Quality Evaluation) has been accepted. The quality evaluation record schema is fully defined in SPEC-007 and incorporated in FR-7.3 above. OQ-1 no longer blocks SPEC-006 from advancing to Accepted.
 
 ---
 
@@ -318,7 +324,7 @@ When the failure stage is `Schedule` (NoEligibleSolver, InvalidConfiguration, or
 
 **3.13.1** A job in `Completed` state must have the following artifacts present in the Evidence Log:
 - One job record with `status = Completed`.
-- One decision record. The `actual_outcome` field is populated when Core quality evaluation succeeded; it is null when quality evaluation failed (SPEC-005 FR-15 failure handling) or was not invoked (no RoutePlan present, per SPEC-005 FR-15 invocation rules).
+- One decision record. The `actual_outcome` field (type `ActualOutcomeClassification`, SPEC-007 FR-4) is non-null whenever Core quality evaluation was invoked; input-derived subfields (`solver_outcome`, `solution_present`, `time_window_constrained`) are always non-null on any invocation including infrastructure failure (SPEC-007 FR-13). Simulation-derived subfields are null when simulation could not be completed. `actual_outcome` is null only when Core quality evaluation was not invoked (no RoutePlan present, per SPEC-005 FR-15 invocation rules). The `hindsight_quality` field on the decision record is non-null when simulation completed successfully; it is null when quality evaluation was not invoked or when simulation infrastructure failed.
 - One solver run record with the complete reproducibility tuple.
 
 **3.13.2** Quality evaluation record and report metadata record are not required for `Completed` state. Their absence is permitted and must not prevent the `Completed` transition.
@@ -349,7 +355,7 @@ When the failure stage is `Schedule` (NoEligibleSolver, InvalidConfiguration, or
 
 ### FR-15: Retention Requirements
 
-**3.15.1** Evidence records must be retained for at least the configured minimum retention period after the job's terminal timestamp (`completed_at` or `failed_at`). The minimum retention period is configurable at deployment time. The default minimum retention period is 90 days; this default requires Project Owner confirmation before SPEC-006 advances to Accepted (see OQ-3).
+**3.15.1** Evidence records must be retained for at least the configured minimum retention period after the job's terminal timestamp (`completed_at` or `failed_at`). The minimum retention period is configurable at deployment time. The default minimum retention period is 90 days (confirmed by Project Owner Decision ODR-3). Deployments may configure longer retention periods.
 
 **3.15.2** Evidence records must not be automatically deleted before the minimum retention period expires.
 
@@ -388,7 +394,7 @@ When the failure stage is `Schedule` (NoEligibleSolver, InvalidConfiguration, or
 
 **3.17.2** The decision record (FR-5) provides the complete scheduler decision including `objective_mode`, `candidate_scores`, `rejection_reasons`, `predicted_latency`, `predicted_cost`, `predicted_quality`, and `confidence_score`. This satisfies the "why was this backend selected" audit requirement.
 
-**3.17.3** The `actual_outcome` and `hindsight_quality` fields in the decision record (updated post-execution and post-evaluation respectively) provide the comparative record for scheduler effectiveness analysis.
+**3.17.3** The `actual_outcome` and `hindsight_quality` fields in the decision record (both updated post-quality-evaluation via `QualityEvaluationResult` per FR-5.4) provide the comparative record for scheduler effectiveness analysis.
 
 **3.17.4** Evidence records must not be modified after a job reaches a terminal state, except as required by `job_id`-keyed upsert on re-delivery (which is not possible after a terminal state is reached — see FR-3.4). Audit integrity depends on terminal-state record immutability.
 
@@ -452,7 +458,7 @@ The following are explicitly out of scope for this specification:
 2. The Worker is the sole writer of Evidence Log artifacts after the API creates the job record.
 3. `job_id` values assigned by the API are globally unique and not reused.
 4. The routing problem identified by `problem_id` is immutable (SPEC-001). Evidence Log reproducibility depends on this guarantee.
-5. Quality evaluation is deterministic — given the same RoutePlan and routing problem, Core produces identical quality evaluation results on every invocation (SPEC-005 Assumption 9). This property must be established by the Core Quality Evaluation Specification.
+5. Quality evaluation is deterministic — given the same RoutePlan, routing problem, solver response, scheduler decision, and travel speed, Core produces identical quality evaluation results on every invocation. This property is established by SPEC-007 FR-10.
 6. At-least-once delivery semantics for job messages are a system invariant. All Evidence Log persistence operations must be idempotent by design.
 7. A re-executed job may produce a different solver *outcome* than the prior attempt (e.g., `Timeout` instead of `Succeeded`) due to timing differences or external signal differences. When both executions produce `Succeeded`, SPEC-004 FR-11's reproducibility invariant guarantees identical solutions given identical inputs. The upsert model treats the most recent execution's artifacts as authoritative regardless of whether outcomes are identical.
 
@@ -494,7 +500,7 @@ The following are explicitly out of scope for this specification:
 
 5. **Integration: Transient persistence failure — NACK with requeue** — Given a PostgreSQL failure during solver run record persistence, verify that the Worker NACKs with requeue and the job status remains `Processing` (not `Failed`).
 
-6. **Integration: Quality evaluation failure — Completed without QE** — Given a job where quality evaluation fails with an infrastructure error, verify that the job status transitions to `Completed`, the quality evaluation record has `evaluation_status = Failed`, and no failure record is present.
+6. **Integration: Quality evaluation infrastructure failure — quality evaluation record persists with Failed status** — Given a job where quality evaluation fails with an infrastructure error, verify that the job status transitions to `Completed`, the quality evaluation record has `evaluation_status = Failed`, and no failure record is present.
 
 7. **Integration: Pre-solver failure — failure record present** — Given a job that fails at the `Load` stage (routing problem not found), verify that a failure record is persisted with `failure_stage = Load` and the job status transitions to `Failed`.
 
@@ -514,21 +520,21 @@ Evidence Log persistence must be observable through the Worker's telemetry syste
 
 ## 10. Open Questions
 
-**OQ-1 (Blocking — SPEC-006 FR-7):** The Core Quality Evaluation Specification has not been authored. The quality evaluation record schema beyond the minimum fields defined in FR-7.3 is deferred. SPEC-006 cannot advance to Accepted until the Core Quality Evaluation Specification is accepted and its schema is incorporated.
+**OQ-1 (Resolved — SPEC-006 FR-7):** SPEC-007 (Core Quality Evaluation) has been accepted. The quality evaluation record schema beyond the minimum fields is now defined in SPEC-007 (FR-6, FR-7, FR-8, FR-11, FR-12) and incorporated into FR-7.3. OQ-1 no longer blocks SPEC-006 from advancing to Accepted.
 
 **OQ-2 (Non-Blocking — SPEC-006 FR-9):** The Report Generator Specification has not been authored. The report metadata record schema extension beyond the minimum fields defined in FR-9.2 is deferred. SPEC-006 may advance to Accepted with OQ-2 open; FR-9 is marked as schema-incomplete.
 
-**OQ-3 (Blocking — SPEC-006 FR-15.1):** The default minimum evidence retention period is provisionally 90 days. This default requires Project Owner confirmation before SPEC-006 advances to Accepted. The selection should be justified against evidence analysis use cases (benchmarking, effectiveness analysis, experiment comparison) and any operational constraints. The behavioral requirement (records must not be deleted before the configured minimum period) is architecturally accepted; only the specific default value requires confirmation.
+**OQ-3 (Resolved — SPEC-006 FR-15.1):** The default minimum evidence retention period of 90 days is confirmed by Project Owner Decision ODR-3. Rationale: supports reproducibility investigations, benchmark verification, and post-implementation review; storage growth acceptable for MVP; deployments may configure longer retention periods. OQ-3 no longer blocks SPEC-006 from advancing to Accepted.
 
 ---
 
 ## 11. Documentation Updates Required
 
-- **Core Quality Evaluation Specification (pending):** Must define the quality evaluation record schema (SPEC-006 FR-7), establish that quality evaluation is deterministic (SPEC-005 Assumption 9 / SPEC-006 Assumption 5), and define the `hindsight_quality` value format populated into the decision record.
-- **Report Generator Specification (pending):** Must extend the report metadata record schema defined in SPEC-006 FR-9.2. Must define the Worker-invocable report generation interface (SPEC-005 FR-17 dependency).
+- **SPEC-007 (Accepted):** The quality evaluation record schema (SPEC-006 FR-7) and determinism guarantee (SPEC-006 Assumption 5) are satisfied by SPEC-007. FR-7.3 has been extended with the full field set from SPEC-007 (FR-6, FR-7, FR-8, FR-11, FR-12). FR-5.4 has been revised to reflect `actual_outcome` as `ActualOutcomeClassification` (SPEC-007 FR-4) with partial population semantics on infrastructure failure (SPEC-007 FR-13). No further updates to SPEC-006 from SPEC-007 are outstanding.
+- **SPEC-005 (Proposed — additive extension required):** Must be extended with additive telemetry definitions for Evidence Log persistence: the `worker.evidence.persist` OTel span (FR-19 span table and span attributes), updated `worker.evidence.persisted` event fields (reconciled to include `artifacts_written` and `duration_ms`), and new `worker.evidence.upsert.collision` and `worker.evidence.persistence.failed` events (Section 9). SPEC-006 FR-18 declares the observability requirements; SPEC-005 owns the telemetry definitions. Additionally, SPEC-005 FR-15 uses language ("the Worker persists the solver run record with `actual_outcome` and `hindsight_quality` null") that is inconsistent with SPEC-007 FR-13: input-derived `actual_outcome` subfields are always non-null on infrastructure failure. SPEC-005 FR-15 must be revised accordingly when SPEC-005 advances.
 - **SPEC-005 FR-16 (Accepted):** FR-16 establishes that the Evidence Log must specify `job_id`-keyed upsert semantics. This specification satisfies that dependency via FR-10 and FR-12.
-- **SPEC-005 (Proposed — additive extension required):** Must be extended with additive telemetry definitions for Evidence Log persistence: the `worker.evidence.persist` OTel span (FR-19 span table and span attributes), updated `worker.evidence.persisted` event fields (reconciled to include `artifacts_written` and `duration_ms`), and new `worker.evidence.upsert.collision` and `worker.evidence.persistence.failed` events (Section 9). This additive extension is a pre-condition for SPEC-006 advancing to Proposed. SPEC-006 FR-18 declares the observability requirements; SPEC-005 owns the telemetry definitions.
 - **SPEC-003 FR-10 (Accepted):** Any future revision to the SPEC-003 FR-10 decision record schema requires a corresponding update to SPEC-006 FR-5.2 (the traceability reproduction table). The field table in FR-5.2 must remain a verbatim copy of SPEC-003 FR-10's authoritative field list.
+- **Report Generator Specification (pending):** Must extend the report metadata record schema defined in SPEC-006 FR-9.2. Must define the Worker-invocable report generation interface (SPEC-005 FR-17 dependency).
 - **ADR-010:** Must be revised when SPEC-005 advances to Accepted. ADR-010 Decision 4 conflicts with SPEC-005 FR-7 and SPEC-004 FR-11.3 regarding seed derivation ownership. That conflict is a SPEC-005 pre-condition for Accepted status; it is not a SPEC-006 concern.
 
 ---
@@ -541,5 +547,5 @@ Evidence Log persistence must be observable through the Worker's telemetry syste
 | Scheduler Decision Record Schema | SPEC-003 FR-10 | Accepted | Decision record field definitions (FR-5.2) |
 | Solver Contract | SPEC-004 | Accepted | SolverResponse fields, SolverOutcome, ExecutionStatistics, SolverFailureDetail (FR-6.2) |
 | Worker Execution Lifecycle | SPEC-005 | Proposed | Artifact set definition, idempotency model, failure taxonomy, telemetry definitions (additive extension required — see Section 11) |
-| Core Quality Evaluation Specification | Pending | Not authored | Quality evaluation record schema (FR-7) — blocking |
+| Core Quality Evaluation | SPEC-007 | Accepted | Quality evaluation record schema (FR-7) — resolved; full schema incorporated in FR-7.3 |
 | Report Generator Specification | Pending | Not authored | Report metadata record schema extension (FR-9) — non-blocking |
