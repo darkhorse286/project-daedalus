@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-09
 
-**Last Updated:** 2026-06-09
+**Last Updated:** 2026-06-12
 
 **Supersedes:** None
 
@@ -20,7 +20,7 @@
 
 **Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006 Evidence Log, (pending) Core Quality Evaluation Specification
+**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006, SPEC-007
 
 ---
 
@@ -85,7 +85,7 @@ SPEC-005 defines the Worker's responsibilities and explicitly allocates the adja
 | **Core** (architecture.md) | Authoritative domain validation (ADR-009); workload feature extraction; Scheduler invocation; quality evaluation and regret calculation; populating `actual_outcome` and `hindsight_quality` on the decision record | Solver invocation; timeout enforcement; job state management; message acknowledgment |
 | **Scheduler** (SPEC-003) | Backend eligibility filtering; candidate scoring; backend selection; decision record production | Execution; persistence; timeout enforcement |
 | **Solver Backend** (SPEC-004) | Executing the routing optimization within the SolverRequest contract; self-termination by `execution_timeout_ms`; reporting the honest outcome | Persisting results; evaluating quality; selecting the problem to solve |
-| **Evidence Log** (pending specification) | Defining the persistence schema for all job execution artifacts | Producing or evaluating any artifact |
+| **Evidence Log** (SPEC-006) | Defining the persistence schema for all job execution artifacts | Producing or evaluating any artifact |
 | **API** (architecture.md) | Job submission; routing problem validation for fast caller feedback (ADR-009); scheduler config validation; job status endpoint | Solver execution; Core invocation; evidence persistence |
 
 **Acceptance Criteria:**
@@ -246,8 +246,8 @@ When Core returns a non-`Selected` decision record, the Worker also persists it.
 
 **Persistence obligation:**
 - The decision record is persisted atomically: either the full record is written or nothing is written. Partial record persistence is not acceptable.
-- The persistence schema is defined by the Evidence Log Specification (pending). SPEC-005 defines the ordering and ownership obligation; schema details are deferred.
-- The Worker does not modify the decision record after receiving it from Core. The `actual_outcome` and `hindsight_quality` reserved fields (SPEC-003 FR-12) are absent (null) when persisted at this stage; they are populated by Core during quality evaluation (FR-15).
+- The persistence schema is defined by SPEC-006 (Evidence Log). SPEC-005 defines the ordering and ownership obligation; schema details are deferred to SPEC-006.
+- The Worker does not modify the decision record after receiving it from Core. The `actual_outcome` and `hindsight_quality` reserved fields (SPEC-003 FR-10) are absent (null) when persisted at this stage; they are populated by Core during quality evaluation (FR-15).
 
 **Acceptance Criteria:**
 - The decision record is persisted before the solver is invoked (for `Selected` outcomes)
@@ -519,22 +519,23 @@ After the SolverResponse passes post-receipt validation (FR-11), the Worker pass
 - The routing problem (for time window feasibility verification and regret context)
 - The Scheduler decision record (for regret context: predicted vs. actual)
 
-**Core quality evaluation produces:**
-- Route quality metrics (specific metrics defined by the Core Quality Evaluation Specification, pending)
-- Time window feasibility assessment
-- Regret calculation (actual vs. predicted quality, cost, and latency)
-- Updated `actual_outcome` and `hindsight_quality` fields for the decision record (SPEC-003 FR-12)
+**Core quality evaluation produces (`QualityEvaluationResult` — SPEC-007 FR-9):**
+- `actual_outcome` (`ActualOutcomeClassification`, SPEC-007 FR-4): classification of the actual solver outcome; input-derived subfields (`solver_outcome`, `solution_present`, `time_window_constrained`) are always non-null on any invocation, including infrastructure failure (SPEC-007 FR-13)
+- `hindsight_quality` (float64, SPEC-007 FR-7): total route distance in km; null when simulation could not be completed
+- `quality_metrics` (`QualityMetrics`, SPEC-007 FR-6): route quality metrics; null on infrastructure failure
+- `regret_analysis` (`RegretAnalysis`, SPEC-007 FR-8): actual vs. predicted quality, cost, and latency
+- `evaluation_metadata` (`EvaluationMetadata`, SPEC-007 FR-12): evaluation provenance
 
 **When quality evaluation is invoked:**
 - `outcome = Succeeded`: always invoke; RoutePlan is present and structurally valid
 - `outcome = Timeout` or `Cancelled` with solution present: invoke; RoutePlan has passed structural validation
-- `outcome = Infeasible`, `Failed`, `Timeout` with no solution, `Cancelled` with no solution: do not invoke quality evaluation; there is no route plan to evaluate. Regret calculation in the absence of a solution is defined by the Core Quality Evaluation Specification.
+- `outcome = Infeasible`, `Failed`, `Timeout` with no solution, `Cancelled` with no solution: do not invoke quality evaluation; there is no route plan to evaluate. Regret calculation in the absence of a solution is defined by SPEC-007 (Core Quality Evaluation, Accepted).
 
 **Failure handling:**
-If Core quality evaluation fails due to an infrastructure failure (Core process unavailable, unclassified error), the Worker persists the solver run record with `actual_outcome` and `hindsight_quality` null. The job proceeds to FR-16 and FR-17 with quality evaluation absent. The failure is captured in the `result.evaluate` span status as Error and in a structured log event (`worker.quality.evaluation.failed`). The Worker does not re-invoke the solver. Retrying quality evaluation specifically — without re-executing the solver — is deferred to implementation planning and is not required at MVP scope.
+If Core quality evaluation fails due to an infrastructure failure (Core process unavailable, unclassified error), Core returns a partial `QualityEvaluationResult` per SPEC-007 FR-13. The Worker writes this partial result to the evidence record: input-derived `actual_outcome` subfields (`solver_outcome`, `solution_present`, `time_window_constrained`) are non-null; simulation-derived `actual_outcome` subfields and computed quality metrics (`hindsight_quality`, `quality_metrics`) are null. The quality evaluation record is persisted with `evaluation_status = Failed` per SPEC-006 FR-7.4. The job proceeds to FR-16 and FR-17. The failure is captured in the `result.evaluate` span status as Error and in a structured log event (`worker.quality.evaluation.failed`). The Worker does not re-invoke the solver. Retrying quality evaluation specifically — without re-executing the solver — is deferred to implementation planning and is not required at MVP scope.
 
 **Dependency:**
-The exact interface between the Worker and Core for quality evaluation — what is passed and what is returned — is defined by the Core Quality Evaluation Specification (pending). This specification establishes the Worker's obligation to invoke the evaluation; the evaluation interface details are deferred.
+The interface between the Worker and Core for quality evaluation — what is passed and what is returned — is defined by SPEC-007 (Core Quality Evaluation, Accepted). SPEC-007 FR-9 defines the `QualityEvaluationResult` returned to the Worker; SPEC-007 FR-10 establishes the determinism invariant. This specification establishes the Worker's obligation to invoke the evaluation; SPEC-007 is authoritative for evaluation interface details.
 
 **Acceptance Criteria:**
 - Core quality evaluation is invoked for every SolverResponse that includes a structurally valid RoutePlan
@@ -547,7 +548,7 @@ The exact interface between the Worker and Core for quality evaluation — what 
 ### FR-16: Evidence Persistence Handoff
 
 **Description:**
-After quality evaluation is complete (or skipped per FR-15), the Worker persists all execution artifacts to PostgreSQL. The Evidence Log Specification (pending) defines the persistence schema. This specification defines the Worker's persistence obligations and the artifact set.
+After quality evaluation is complete (or skipped per FR-15), the Worker persists all execution artifacts to PostgreSQL. SPEC-006 (Evidence Log) defines the persistence schema. This specification defines the Worker's persistence obligations and the artifact set.
 
 **Artifacts the Worker must persist:**
 1. Updated job lifecycle state (to `Completed` or `Failed`)
@@ -565,13 +566,13 @@ After quality evaluation is complete (or skipped per FR-15), the Worker persists
 Evidence artifacts are persisted together as an atomic unit where possible. If atomicity is not achievable across all artifacts (for example, if some require different PostgreSQL tables), partial persistence must be recoverable through idempotent re-execution (FR-14).
 
 **Dependency:**
-The schema for each artifact is defined by the Evidence Log Specification (pending). SPEC-005 does not define column names, table names, or data types. The Evidence Log Specification has a dependency on SPEC-005 for the artifact set definition and must specify that all artifact tables support `job_id`-keyed upsert semantics as the idempotency mechanism, consistent with FR-14.
+The schema for each artifact is defined by SPEC-006 (Evidence Log). SPEC-005 does not define column names, table names, or data types. SPEC-006 has a dependency on SPEC-005 for the artifact set definition and specifies that all artifact tables support `job_id`-keyed upsert semantics as the idempotency mechanism, consistent with FR-14.
 
 **Acceptance Criteria:**
 - All listed artifacts are persisted before the report generation stage (FR-17)
 - A persistence failure at this stage triggers a NACK with requeue (transient failure), not an immediate permanent job failure
 - The solver run record always includes `execution_seed` so that deterministic replay is possible
-- The `actual_outcome` and `hindsight_quality` fields on the decision record are persisted with whatever value Core provided (null if Core quality evaluation was not invoked)
+- The `actual_outcome` and `hindsight_quality` fields on the decision record are persisted with whatever value Core provided; `actual_outcome` is null only when Core quality evaluation was not invoked (no RoutePlan present); on infrastructure failure, input-derived `actual_outcome` subfields are non-null per SPEC-007 FR-13
 
 ---
 
@@ -728,7 +729,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 - The Worker does not perform domain validation (ADR-009; Core responsibility)
 - The Worker does not compute workload features (Core responsibility)
 - The Worker does not evaluate solver eligibility or score candidates (Scheduler/Core responsibility)
-- The Worker does not evaluate route quality or calculate regret (Core responsibility; interface defined in Core Quality Evaluation Specification)
+- The Worker does not evaluate route quality or calculate regret (Core responsibility; interface defined by SPEC-007, Core Quality Evaluation)
 - The Worker does not define the evidence persistence schema (Evidence Log Specification responsibility)
 - The Worker does not define the HTML report content or format (Report Generator component responsibility)
 - The Worker does not select which solver to invoke; it executes the Scheduler's decision exactly as given
@@ -748,9 +749,9 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 4. The backend registry is populated before the Worker processes its first job. An empty registry is a configuration fault, not a condition the Worker compensates for.
 5. MVP solver backends (nearest-neighbor, greedy insertion, QUBO simulated annealing) are C++ in-process implementations invoked via direct function call. The Python adapter backend dispatch is not in scope until ADR-005 is resolved.
 6. At most one Worker instance is running at any given time at MVP scope. Multi-Worker concurrency and job ownership protocols are deferred.
-7. The Evidence Log Specification will define a persistence schema compatible with the artifact set described in FR-16 before SPEC-005 implementation is complete.
-8. The Core Quality Evaluation Specification will define a Worker-invocable quality evaluation interface compatible with the handoff described in FR-15 before SPEC-005 implementation is complete.
-9. Core quality evaluation is deterministic — given the same RoutePlan and the same routing problem, Core produces identical quality evaluation results on every invocation. The idempotency model defined in FR-14 depends on this property. The Core Quality Evaluation Specification must establish this guarantee when authored.
+7. SPEC-006 (Evidence Log, Proposed) defines a persistence schema compatible with the artifact set described in FR-16. SPEC-006 must be accepted before SPEC-005 implementation is complete.
+8. SPEC-007 (Core Quality Evaluation, Accepted) defines the Worker-invocable quality evaluation interface compatible with the handoff described in FR-15. The `QualityEvaluationResult` interface (SPEC-007 FR-9) satisfies this assumption.
+9. Core quality evaluation is deterministic — given the same routing problem, route plan, solver response, scheduler decision, and travel speed, Core produces identical quality evaluation results on every invocation. The idempotency model defined in FR-14 depends on this property. This guarantee is established by SPEC-007 FR-10 (Accepted).
 
 ---
 
@@ -777,7 +778,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 | Scheduler configuration | PostgreSQL (loaded by Worker) | Scheduler configuration object (SPEC-003 FR-13) | Resolved before Core invocation |
 | Scheduler decision record | Core (produced during FR-5) | SPEC-003 FR-10 decision record schema | Produced for every invocation, successful or failed |
 | SolverResponse | Solver backend (produced during FR-9/FR-10) | SPEC-004 FR-3 SolverResponse schema | Always produced; Worker constructs fallback if backend is unresponsive |
-| Quality evaluation result | Core (produced during FR-15) | Core Quality Evaluation Specification (pending) | Absent if solver produced no RoutePlan |
+| Quality evaluation result | Core (produced during FR-15) | SPEC-007 FR-9 (QualityEvaluationResult) | Absent if solver produced no RoutePlan |
 
 ---
 
@@ -1034,8 +1035,8 @@ Report generation occurs after evidence is persisted. Its contribution to total 
 - **docs/architecture.md**: Worker Responsibilities section should be updated to reflect SPEC-005 as the authoritative source for Worker lifecycle behavior. The existing list in architecture.md is a summary; SPEC-005 is the binding contract.
 - **ADR-003**: Dead-letter reprocessing strategy is partially addressed by FR-13. The remaining operational strategy for reprocessing dead-lettered jobs should be documented during Worker implementation planning.
 - **SPEC-004 FR-11.3**: The execution seed derivation ownership reference to the Worker specification is satisfied by SPEC-005 FR-7. SPEC-004's "Non-Requirements" section can be updated to reference SPEC-005 rather than "Worker specification (future)."
-- **Evidence Log Specification (pending)**: Must define the persistence schema for the artifact set described in FR-16. The schema must support `job_id`-keyed upsert semantics as the idempotency mechanism for all artifact tables, consistent with SPEC-005 FR-14. SPEC-005 is a dependency for that specification.
-- **Core Quality Evaluation Specification (pending)**: Must define the Worker-invocable quality evaluation interface compatible with FR-15. Must establish that Core quality evaluation is deterministic (same RoutePlan and routing problem produce identical results on every invocation), as the FR-14 idempotency model depends on this property. SPEC-005 is a dependency for that specification.
+- **SPEC-006 (Evidence Log, Proposed)**: Defines the persistence schema for the artifact set described in FR-16. The schema supports `job_id`-keyed upsert semantics as the idempotency mechanism for all artifact tables, consistent with SPEC-005 FR-14. SPEC-005 is a listed dependency of SPEC-006. SPEC-006 must advance to Accepted before SPEC-005 implementation is complete.
+- **SPEC-007 (Core Quality Evaluation, Accepted)**: Defines the Worker-invocable quality evaluation interface compatible with FR-15 (`QualityEvaluationResult`, SPEC-007 FR-9). Establishes the determinism invariant (SPEC-007 FR-10) on which the FR-14 idempotency model depends. SPEC-005 is a listed dependency of SPEC-007 and has been updated to reference SPEC-007 as authoritative.
 - **ADR-010 Decision 4**: Must be revised when SPEC-005 advances to Accepted. Decision 4 currently states "How a solver derives its PRNG seed from job context...is defined in each solver's specification." This conflicts with SPEC-005 FR-7 and SPEC-004 FR-11.3 (Accepted), which establish that the Worker is the authoritative owner of the uniform derivation policy and that solver specifications document seed *usage* policy only, not derivation. Revising Decision 4 to reflect the accepted Worker-owned uniform derivation policy is a pre-condition for SPEC-005 advancing to Accepted.
 - **Report Generator Specification (pending)**: Must define the Worker-invocable interface for evidence report generation, the report file format and storage location, and idempotency behavior on re-invocation with the same `job_id`. SPEC-005 FR-17 implementation is blocked until this specification is accepted.
 
@@ -1156,7 +1157,7 @@ This feature is complete when:
 - OQ-3 (execution seed derivation formula) is resolved, documented, and incorporated in FR-7
 - All test contracts defined in the Testability section pass
 - All required OTel spans (job.consume, problem.load, result.evaluate, report.generate, job.complete) are emitted and verifiable in the test environment
-- The Evidence Log Specification is accepted and the persistence schema is compatible with the FR-16 artifact set
-- The Core Quality Evaluation Specification is accepted and the evaluation interface is compatible with FR-15
+- SPEC-006 (Evidence Log) is accepted and the persistence schema is compatible with the FR-16 artifact set
+- SPEC-007 (Core Quality Evaluation) is accepted and the evaluation interface is compatible with FR-15 — satisfied
 - Engineering review passes
 - Specification status is updated to Verified
