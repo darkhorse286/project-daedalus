@@ -6,7 +6,7 @@ Accepted
 
 **Date:** 2026-06-08
 
-**Related Feature(s):** SPEC-001 (Routing Problem Model), SPEC-002 (Synthetic Workload Generator), QUBO Simulated Annealing Backend
+**Related Feature(s):** SPEC-001 (Routing Problem Model), SPEC-002 (Synthetic Workload Generator), SPEC-005 (Worker Execution Lifecycle), QUBO Simulated Annealing Backend
 
 **Related ADR(s):** ADR-001, ADR-006, ADR-007, ADR-008, ADR-009
 
@@ -87,7 +87,7 @@ The problem seed (SPEC-001 FR-6, 64-bit non-negative integer) is the exclusive e
 
 **One seeding per reproducibility unit:** The PRNG is seeded exactly once per reproducibility unit from the problem seed. A reproducibility unit is one self-contained stochastic computation whose output must be reproducible: for the generator, one generation invocation; for a solver, one solver execution.
 
-**Solver seed derivation:** How a solver derives its PRNG seed from job context — for example, whether the QUBO annealing backend seeds its PRNG directly from the problem seed or from a deterministic function of the problem seed and execution configuration — is defined in each solver's specification. Derivation must be deterministic and must not mix in additional entropy. Solver-specific derivation strategies are outside the scope of this ADR.
+**Execution seed derivation:** The Worker is the authoritative owner of execution seed derivation for all backends (SPEC-005 FR-7). The execution seed passed to the solver in the SolverRequest is derived as: `execution_seed = RoutingProblem.seed`. No transformation is applied (ODR-4). This policy is uniform across all registered backends; no per-backend derivation strategy exists. Each solver specification defines how the solver seeds its internal PRNG from the `execution_seed` it receives in the SolverRequest — not from raw job context. Solver internal seeding must be deterministic and must not mix in additional entropy.
 
 ## Decision 5: Backward Compatibility Requirements
 
@@ -323,6 +323,7 @@ Variable-draw-count algorithms are prohibited only in contexts where the compone
 # Documentation Updates
 
 - SPEC-002: Close OQ-1 with reference to this ADR. Update FR-3 to name PCG64 and document the stream constant placeholder, name Box-Muller as the normal distribution algorithm, and name the approved bounded integer sampling algorithm. Update FR-9 to reference this ADR's semantic equivalence standard. Transition SPEC-002 status from Draft to Proposed.
+- SPEC-005: FR-7 is the authoritative definition of Worker execution seed derivation. Decision 4 of this ADR has been revised to reference SPEC-005 FR-7 and ODR-4 for the approved derivation policy (`execution_seed = RoutingProblem.seed`).
 - docs/architecture.md: No changes required. The reproducibility principle is already stated. This ADR provides the implementation-level binding.
 
 ---

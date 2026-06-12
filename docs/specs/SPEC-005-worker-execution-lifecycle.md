@@ -267,7 +267,7 @@ The Worker is the authoritative owner of the `execution_seed` derivation policy.
 2. The derivation applies identically to all registered backends regardless of `backend_id`. There is no per-backend derivation strategy.
 3. The derivation is deterministic and does not mix in any additional entropy (system time, process ID, OS random sources, or hardware entropy are prohibited per ADR-010 Decision 4).
 4. The derivation produces a `uint64` value as required by SPEC-004 FR-2.
-5. The specific derivation formula is an implementation planning decision and is not defined in this specification. It must be documented in the Worker implementation specification before implementation begins. See OQ-3.
+5. The derivation formula is: `execution_seed = RoutingProblem.seed`. No transformation is applied. (ODR-4)
 
 **Derivation timing:**
 The `execution_seed` is derived after the Scheduler decision is received and before the SolverRequest is constructed. It is derived once per job execution.
@@ -280,7 +280,7 @@ Because the derivation is deterministic and backend-neutral, any two executions 
 - No other Worker code path (feature extraction invocation, quality evaluation invocation) derives or modifies the execution seed
 - Given the same routing problem seed, the Worker produces the same `execution_seed` on every invocation
 - The execution seed derivation does not use any entropy source other than the problem seed
-- The specific derivation formula is documented in the Worker implementation specification (OQ-3)
+- Given the same routing problem, the Worker sets `execution_seed = RoutingProblem.seed`; no additional derivation steps are performed (ODR-4)
 
 ---
 
@@ -1037,7 +1037,7 @@ Report generation occurs after evidence is persisted. Its contribution to total 
 - **SPEC-004 FR-11.3**: The execution seed derivation ownership reference to the Worker specification is satisfied by SPEC-005 FR-7. SPEC-004's "Non-Requirements" section can be updated to reference SPEC-005 rather than "Worker specification (future)."
 - **SPEC-006 (Evidence Log, Proposed)**: Defines the persistence schema for the artifact set described in FR-16. The schema supports `job_id`-keyed upsert semantics as the idempotency mechanism for all artifact tables, consistent with SPEC-005 FR-14. SPEC-005 is a listed dependency of SPEC-006. SPEC-006 must advance to Accepted before SPEC-005 implementation is complete.
 - **SPEC-007 (Core Quality Evaluation, Accepted)**: Defines the Worker-invocable quality evaluation interface compatible with FR-15 (`QualityEvaluationResult`, SPEC-007 FR-9). Establishes the determinism invariant (SPEC-007 FR-10) on which the FR-14 idempotency model depends. SPEC-005 is a listed dependency of SPEC-007 and has been updated to reference SPEC-007 as authoritative.
-- **ADR-010 Decision 4**: Must be revised when SPEC-005 advances to Accepted. Decision 4 currently states "How a solver derives its PRNG seed from job context...is defined in each solver's specification." This conflicts with SPEC-005 FR-7 and SPEC-004 FR-11.3 (Accepted), which establish that the Worker is the authoritative owner of the uniform derivation policy and that solver specifications document seed *usage* policy only, not derivation. Revising Decision 4 to reflect the accepted Worker-owned uniform derivation policy is a pre-condition for SPEC-005 advancing to Accepted.
+- **ADR-010 Decision 4**: Revised to reflect Worker-owned execution seed derivation (SPEC-005 FR-7) and the approved derivation policy `execution_seed = RoutingProblem.seed` (ODR-4). The prior text ("Solver-specific derivation strategies are outside the scope of this ADR") has been replaced. This revision was a pre-condition for SPEC-005 advancing to Accepted — satisfied.
 - **Report Generator Specification (pending)**: Must define the Worker-invocable interface for evidence report generation, the report file format and storage location, and idempotency behavior on re-invocation with the same `job_id`. SPEC-005 FR-17 implementation is blocked until this specification is accepted.
 
 ---
@@ -1082,20 +1082,13 @@ The mechanism sub-questions depend on resolution of sub-question 1, and further:
 
 ---
 
-### OQ-3: Execution Seed Derivation Formula
+### OQ-3: Execution Seed Derivation Formula — RESOLVED (ODR-4)
 
-**Question:** What is the specific formula by which the Worker derives `execution_seed` from the routing problem seed?
+**Resolution:** `execution_seed = RoutingProblem.seed`. No transformation is applied. Incorporated in FR-7 Policy item 5 and FR-7 Acceptance Criteria.
 
-**Why it matters:** FR-7 establishes that the Worker owns the derivation and that the formula must be deterministic and not mix in additional entropy. The specific formula is deferred to implementation planning. However, the formula must be documented before implementation begins, because:
-- It determines whether `execution_seed == problem_seed`, a transformed value, or a component of a hash function.
-- It must be consistent with ADR-010 Decision 4 (problem seed as exclusive entropy source).
-- It becomes a frozen commitment once the first backend specification referencing SPEC-005 is accepted (ADR-010 Decision 5 backward compatibility).
+**Decision rationale (ODR-4):** Maximum reproducibility; simplest implementation; consistent with ADR-010 deterministic randomness policy; eliminates unnecessary derivation complexity; backend-neutral. Approved by Project Owner.
 
-**Constraint:** The formula must use only the problem seed as input. It may use deterministic arithmetic or bitwise operations. It may not use system time, process ID, or any external state.
-
-**Owner:** Worker implementation specification. Requires Project Owner confirmation before the specification is accepted.
-
-**Blocking:** Not blocking for SPEC-005 Draft status. Blocking for SPEC-005 Accepted status and for any backend specification that references SPEC-005 FR-7.
+**Blocking:** Was blocking for Accepted status. Resolved — no longer blocking.
 
 ---
 
@@ -1142,7 +1135,7 @@ The mechanism sub-questions depend on resolution of sub-question 1, and further:
 - [x] Documentation updates are identified
 - [ ] OQ-1 resolved — execution timeout budget policy (blocking for implementation; Project Owner decision)
 - [ ] OQ-2 resolved — cancellation signal mechanism (blocking for FR-12 implementation)
-- [ ] OQ-3 resolved — execution seed derivation formula (blocking for Accepted status)
+- [x] OQ-3 resolved — execution seed derivation formula: `execution_seed = RoutingProblem.seed` (ODR-4)
 - [ ] OQ-4 resolved — dead-letter reprocessing strategy (non-blocking; operational concern)
 
 ---
@@ -1154,7 +1147,7 @@ This feature is complete when:
 - All functional requirements (FR-1 through FR-19) are implemented and acceptance criteria pass
 - OQ-1 (execution timeout budget policy) is resolved and incorporated in FR-9/FR-10
 - OQ-2 (cancellation signal mechanism) is resolved and incorporated in FR-12
-- OQ-3 (execution seed derivation formula) is resolved, documented, and incorporated in FR-7
+- OQ-3 (execution seed derivation formula) is resolved: `execution_seed = RoutingProblem.seed` (ODR-4) — satisfied
 - All test contracts defined in the Testability section pass
 - All required OTel spans (job.consume, problem.load, result.evaluate, report.generate, job.complete) are emitted and verifiable in the test environment
 - SPEC-006 (Evidence Log) is accepted and the persistence schema is compatible with the FR-16 artifact set
