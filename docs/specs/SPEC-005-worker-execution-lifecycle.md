@@ -82,7 +82,7 @@ SPEC-005 defines the Worker's responsibilities and explicitly allocates the adja
 | Component | Responsibilities at This Boundary | Explicitly Not Responsible For |
 |---|---|---|
 | **Worker** (SPEC-005) | Job consumption; problem and configuration loading; Core invocation coordination; solver contract invocation; execution seed derivation; execution timeout enforcement; cancellation signal dispatch; SolverResponse post-receipt structural validation; decision record persistence; quality evaluation handoff to Core; evidence persistence handoff; report generation invocation; job lifecycle state management; all required OTel span emissions | Routing problem domain validation; workload feature computation; solver backend selection; solution quality evaluation; regret calculation; evidence persistence schema definition; report content definition |
-| **Core** (architecture.md) | Authoritative domain validation (ADR-009); workload feature extraction; Scheduler invocation; quality evaluation and regret calculation; populating `actual_outcome` and `hindsight_quality` on the decision record | Solver invocation; timeout enforcement; job state management; message acknowledgment |
+| **Core** (architecture.md) | Authoritative domain validation (ADR-009); workload feature extraction; Scheduler invocation; quality evaluation and regret calculation; computing `actual_outcome` and `hindsight_quality` values and returning them in `QualityEvaluationResult` | Solver invocation; timeout enforcement; job state management; message acknowledgment |
 | **Scheduler** (SPEC-003) | Backend eligibility filtering; candidate scoring; backend selection; decision record production | Execution; persistence; timeout enforcement |
 | **Solver Backend** (SPEC-004) | Executing the routing optimization within the SolverRequest contract; self-termination by `execution_timeout_ms`; reporting the honest outcome | Persisting results; evaluating quality; selecting the problem to solve |
 | **Evidence Log** (SPEC-006) | Defining the persistence schema for all job execution artifacts | Producing or evaluating any artifact |
@@ -515,9 +515,10 @@ A re-execution on message redelivery may produce a new `decision_id` from Core (
 After the SolverResponse passes post-receipt validation (FR-11), the Worker passes the solution to Core for quality evaluation and regret calculation. This step is the Worker's responsibility to invoke; the evaluation logic belongs to Core.
 
 **Worker inputs to Core quality evaluation:**
-- The SolverResponse (specifically the `solution` RoutePlan and `statistics`)
+- The SolverResponse (complete, including `outcome`, `solution` RoutePlan, `statistics`, `failure_detail`, and `extension_metadata`) — SPEC-007 FR-3
 - The routing problem (for time window feasibility verification and regret context)
 - The Scheduler decision record (for regret context: predicted vs. actual)
+- The average vehicle speed (`RoutingProblem.average_vehicle_speed_kmh` per ODR-1); required for route simulation — SPEC-007 FR-3
 
 **Core quality evaluation produces (`QualityEvaluationResult` — SPEC-007 FR-9):**
 - `actual_outcome` (`ActualOutcomeClassification`, SPEC-007 FR-4): classification of the actual solver outcome; input-derived subfields (`solver_outcome`, `solution_present`, `time_window_constrained`) are always non-null on any invocation, including infrastructure failure (SPEC-007 FR-13)
@@ -876,7 +877,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 |---|---|
 | Domain Layer | Yes — Worker is the primary C++ execution service; execution seed derivation is a new Worker-owned policy |
 | API Layer | Indirect — API reads job status written by Worker; no new API surface from this spec |
-| Persistence | Yes — Worker writes job lifecycle state, decision records, solver run records, quality evaluations; schema defined by Evidence Log Specification |
+| Persistence | Yes — Worker writes job lifecycle state, decision records, solver run records, quality evaluations; schema defined by SPEC-006 (Evidence Log) |
 | Solver Runtime | Yes — Worker is the invoker of all solver backends via SolverContract (SPEC-004); no changes to existing solver specs |
 | Observability | Yes — Worker emits four new spans (job.consume, problem.load, result.evaluate, report.generate, job.complete) and enforces span context propagation |
 | Configuration | Yes — execution timeout budget policy (OQ-1) and maximum retry count (OQ-4) are Worker configuration concerns |
