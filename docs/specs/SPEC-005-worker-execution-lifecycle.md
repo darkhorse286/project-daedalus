@@ -750,7 +750,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 4. The backend registry is populated before the Worker processes its first job. An empty registry is a configuration fault, not a condition the Worker compensates for.
 5. MVP solver backends (nearest-neighbor, greedy insertion, QUBO simulated annealing) are C++ in-process implementations invoked via direct function call. The Python adapter backend dispatch is not in scope until ADR-005 is resolved.
 6. At most one Worker instance is running at any given time at MVP scope. Multi-Worker concurrency and job ownership protocols are deferred.
-7. SPEC-006 (Evidence Log, Proposed) defines a persistence schema compatible with the artifact set described in FR-16. SPEC-006 must be accepted before SPEC-005 implementation is complete.
+7. SPEC-006 (Evidence Log, Accepted) defines a persistence schema compatible with the artifact set described in FR-16. SPEC-006 is accepted. This requirement is satisfied.
 8. SPEC-007 (Core Quality Evaluation, Accepted) defines the Worker-invocable quality evaluation interface compatible with the handoff described in FR-15. The `QualityEvaluationResult` interface (SPEC-007 FR-9) satisfies this assumption.
 9. Core quality evaluation is deterministic — given the same routing problem, route plan, solver response, scheduler decision, and travel speed, Core produces identical quality evaluation results on every invocation. The idempotency model defined in FR-14 depends on this property. This guarantee is established by SPEC-007 FR-10 (Accepted).
 
@@ -879,7 +879,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 | API Layer | Indirect — API reads job status written by Worker; no new API surface from this spec |
 | Persistence | Yes — Worker writes job lifecycle state, decision records, solver run records, quality evaluations; schema defined by SPEC-006 (Evidence Log) |
 | Solver Runtime | Yes — Worker is the invoker of all solver backends via SolverContract (SPEC-004); no changes to existing solver specs |
-| Observability | Yes — Worker emits four new spans (job.consume, problem.load, result.evaluate, report.generate, job.complete) and enforces span context propagation |
+| Observability | Yes — Worker emits seven spans (job.consume, problem.load, solver.execute, result.evaluate, worker.evidence.persist, report.generate, job.complete) and enforces span context propagation |
 | Configuration | Yes — execution timeout budget policy (OQ-1) and maximum retry count (OQ-4) are Worker configuration concerns |
 | Security | Yes — Worker is a trust boundary for inbound job messages; messages must be treated as untrusted (malformed message handling in FR-3) |
 | Deployment | Yes — Worker container must have access to PostgreSQL, RabbitMQ, Core libraries, solver backends, Python adapter process (when applicable), and report volume |
@@ -1036,7 +1036,7 @@ Report generation occurs after evidence is persisted. Its contribution to total 
 - **docs/architecture.md**: Worker Responsibilities section should be updated to reflect SPEC-005 as the authoritative source for Worker lifecycle behavior. The existing list in architecture.md is a summary; SPEC-005 is the binding contract.
 - **ADR-003**: Dead-letter reprocessing strategy is partially addressed by FR-13. The remaining operational strategy for reprocessing dead-lettered jobs should be documented during Worker implementation planning.
 - **SPEC-004 FR-11.3**: The execution seed derivation ownership reference to the Worker specification is satisfied by SPEC-005 FR-7. SPEC-004's "Non-Requirements" section can be updated to reference SPEC-005 rather than "Worker specification (future)."
-- **SPEC-006 (Evidence Log, Proposed)**: Defines the persistence schema for the artifact set described in FR-16. The schema supports `job_id`-keyed upsert semantics as the idempotency mechanism for all artifact tables, consistent with SPEC-005 FR-14. SPEC-005 is a listed dependency of SPEC-006. SPEC-006 must advance to Accepted before SPEC-005 implementation is complete.
+- **SPEC-006 (Evidence Log, Accepted)**: Defines the persistence schema for the artifact set described in FR-16. The schema supports `job_id`-keyed upsert semantics as the idempotency mechanism for all artifact tables, consistent with SPEC-005 FR-14. SPEC-005 is a listed dependency of SPEC-006. SPEC-006 is accepted.
 - **SPEC-007 (Core Quality Evaluation, Accepted)**: Defines the Worker-invocable quality evaluation interface compatible with FR-15 (`QualityEvaluationResult`, SPEC-007 FR-9). Establishes the determinism invariant (SPEC-007 FR-10) on which the FR-14 idempotency model depends. SPEC-005 is a listed dependency of SPEC-007 and has been updated to reference SPEC-007 as authoritative.
 - **ADR-010 Decision 4**: Revised to reflect Worker-owned execution seed derivation (SPEC-005 FR-7) and the approved derivation policy `execution_seed = RoutingProblem.seed` (ODR-4). The prior text ("Solver-specific derivation strategies are outside the scope of this ADR") has been replaced. This revision was a pre-condition for SPEC-005 advancing to Accepted — satisfied.
 - **Report Generator Specification (pending)**: Must define the Worker-invocable interface for evidence report generation, the report file format and storage location, and idempotency behavior on re-invocation with the same `job_id`. SPEC-005 FR-17 implementation is blocked until this specification is accepted.
@@ -1151,7 +1151,7 @@ This feature is complete when:
 - OQ-3 (execution seed derivation formula) is resolved: `execution_seed = RoutingProblem.seed` (ODR-4) — satisfied
 - All test contracts defined in the Testability section pass
 - All required OTel spans (job.consume, problem.load, result.evaluate, report.generate, job.complete) are emitted and verifiable in the test environment
-- SPEC-006 (Evidence Log) is accepted and the persistence schema is compatible with the FR-16 artifact set
+- SPEC-006 (Evidence Log) is accepted and the persistence schema is compatible with the FR-16 artifact set — satisfied
 - SPEC-007 (Core Quality Evaluation) is accepted and the evaluation interface is compatible with FR-15 — satisfied
 - Engineering review passes
 - Specification status is updated to Verified
