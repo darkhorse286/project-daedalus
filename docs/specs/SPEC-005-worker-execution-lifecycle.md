@@ -6,7 +6,7 @@
 
 **Title:** Worker Execution Lifecycle
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
