@@ -139,9 +139,10 @@ The Report Generator returns a structured result to the Worker:
 | `generation_status` | Always | `Completed` or `Failed` |
 | `report_id` | On success | UUID assigned to this report artifact |
 | `file_path` | On success | Absolute path of the written report file on the report volume |
+| `generated_at` | On success | Wall-clock UTC timestamp at which the Report Generator completed stage 4 |
 | `failure_stage` | On failure | Where in the lifecycle the failure occurred: `invocation_contract_violation`, `rendering_error`, `file_write` |
 
-The Worker uses `report_id` and `file_path` from the successful result to populate the report metadata record it persists to PostgreSQL (SPEC-006 FR-9).
+The Worker uses `report_id`, `file_path`, and `generated_at` from the successful result to populate the report metadata record it persists to PostgreSQL (SPEC-006 FR-9).
 
 **Acceptance Criteria:**
 - The Report Generator receives all required inputs on every invocation
