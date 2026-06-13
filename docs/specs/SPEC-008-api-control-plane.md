@@ -18,7 +18,7 @@
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009
+**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-011
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006
 
@@ -239,6 +239,9 @@ After successful persistence, the API publishes a job message to the RabbitMQ ro
 | `problem_id` | The UUID generated in FR-4 |
 | `scheduler_config_id` | The resolved configuration identifier |
 
+**AMQP message metadata:**
+At publication time, the API injects W3C TraceContext (`traceparent`, optionally `tracestate`) from the active `job.submit` span context into the AMQP message `application_headers`. This is message-level metadata, distinct from the message payload body. The payload fields (`job_id`, `problem_id`, `scheduler_config_id`) are unchanged. The trace context schema carried in `application_headers` is owned by ADR-011.
+
 **Publication semantics:**
 
 - The message is published only after both the routing problem record and the job record are successfully persisted (FR-4).
@@ -248,7 +251,8 @@ After successful persistence, the API publishes a job message to the RabbitMQ ro
 
 **Acceptance Criteria:**
 - No job message is published unless routing problem and job records are committed to PostgreSQL
-- The published message contains exactly `job_id`, `problem_id`, and `scheduler_config_id`
+- The published message payload body contains exactly `job_id`, `problem_id`, and `scheduler_config_id`
+- The published AMQP message includes W3C TraceContext (`traceparent`, optionally `tracestate`) injected from the active `job.submit` span context into the AMQP message `application_headers` (ADR-011)
 - A RabbitMQ publication failure after successful PostgreSQL persistence causes HTTP 500; the persisted job record remains with `status = Pending`
 - The API publishes to the `routing-jobs` queue as defined by ADR-003; no other queue is used for job dispatch
 
@@ -723,7 +727,7 @@ The API is responsible for emitting the required OpenTelemetry spans for the sta
 **Log safety:** Structured log events must not include routing problem raw data (geographic coordinate arrays, full stop lists). Job identifiers, stop counts, and outcome codes are safe to log. Consistent with SPEC-005 Security Considerations and SPEC-001 Security Considerations.
 
 **Trace context propagation:**
-The API must preserve the `job.submit` span context in a form that allows the Worker's `job.consume` span to be linked to it, enabling end-to-end distributed trace continuity across the asynchronous execution boundary. This is an architectural requirement: without explicit propagation, submission and execution appear as disconnected traces in the observability system. How this is achieved — whether by propagating W3C TraceContext in AMQP message headers at publication time, storing a correlation identifier on the job record for the Worker to read, or another approach — is an implementation planning concern deferred to OQ-6. The requirement (cross-component trace continuity) is not deferred.
+The API propagates the `job.submit` span context to the Worker's `job.consume` span via W3C TraceContext (`traceparent`, optionally `tracestate`) injected into the AMQP message `application_headers` at queue publication time (FR-5). This is the authoritative architectural mechanism for cross-process trace continuity between the API and Worker (ADR-011). The API owns trace context injection at publication; Worker extraction and trace relationship establishment are owned by SPEC-005 FR-3 and FR-19. FR-17 does not redefine ADR-011; ADR-011 is the authoritative decision governing cross-process trace context propagation for Project DAEDALUS.
 
 **Prometheus metrics:**
 
@@ -739,6 +743,7 @@ The API must preserve the `job.submit` span context in a form that allows the Wo
 - `job.submit` is emitted on every job submission attempt, successful or not
 - All required `job.submit` attributes are present on every emission
 - `job.submit` span status is `Error` on any 4xx or 5xx response
+- The `job.submit` span context is injected as W3C TraceContext in AMQP message `application_headers` on every successful publication (FR-5)
 - Structured log events do not include routing problem coordinate data
 
 ---
@@ -1097,19 +1102,11 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 
 ---
 
-### OQ-6: Trace Context Correlation Between API and Worker
+### OQ-6: Trace Context Correlation Between API and Worker — RESOLVED (ADR-011)
 
-**Question:** How is the `job.submit` span context correlated with the Worker's `job.consume` span?
+**Resolution:** W3C TraceContext (`traceparent`, optionally `tracestate`) propagated in AMQP message `application_headers` at queue publication time. The API injects the active `job.submit` span context into the AMQP message `application_headers` at publication (FR-5); the Worker extracts it from the consumed message and establishes a navigable trace relationship between `job.consume` and the `job.submit` context (SPEC-005 FR-3, FR-19). ADR-011 is the authoritative architectural decision governing cross-process trace context propagation for Project DAEDALUS.
 
-**Why it matters:** architecture.md defines both spans as part of the execution trace chain. Without explicit propagation, the two spans appear as disconnected traces rather than a single distributed trace.
-
-**Candidate mechanisms:**
-- (a) W3C TraceContext headers propagated in AMQP message headers at publication time; Worker reads them from the message and starts `job.consume` as a child span.
-- (b) Trace correlation ID stored in the job record (PostgreSQL); Worker reads the job record and links its span using the stored ID.
-
-**Owner:** Implementation planning; OpenTelemetry SDK capabilities for both .NET and C++ must be assessed (ADR-006). This question has cross-component and cross-language scope — the chosen mechanism must be implemented consistently in the .NET API and the C++ Worker. Resolution may require architectural formalization via an ADR-006 amendment or a new ADR before implementation begins. Escalation path: if SDK limitations foreclose either candidate mechanism, the question must be escalated to the ADR process.
-
-**Blocking:** Blocking for complete observability chain. Not blocking for Draft status.
+**No further action required.**
 
 ---
 
@@ -1145,7 +1142,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [ ] OQ-3 resolved — API versioning strategy (non-blocking)
 - [ ] OQ-4 resolved — scheduler configuration mutability (non-blocking; read-only assumed)
 - [x] OQ-5 resolved — configuration list pagination: no pagination at MVP scope (Non-Requirements)
-- [ ] OQ-6 resolved — trace context propagation mechanism (blocking for observability chain)
+- [x] OQ-6 resolved — trace context propagation mechanism: W3C TraceContext in AMQP message `application_headers`; Worker establishes navigable trace relationship (ADR-011)
 
 ---
 

@@ -18,7 +18,7 @@
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010
+**Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010, ADR-011
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006, SPEC-007
 
@@ -166,11 +166,15 @@ The Worker holds the RabbitMQ message acknowledgment until the job reaches a ter
 
 **NACK and dead-letter routing:** Defined in FR-13.
 
+**Trace context extraction (ADR-011):**
+At message consumption, the Worker extracts W3C TraceContext from the AMQP message `application_headers` using OpenTelemetry-compatible propagation facilities and uses the extracted context to establish a navigable trace relationship for `job.consume`. If no trace context is present in the message headers (e.g., a message published without instrumentation), `job.consume` is created without a trace relationship. The concrete SDK integration approach is an implementation planning concern; see FR-19 for trace relationship requirements.
+
 **Acceptance Criteria:**
 - The Worker does not ACK a message until the job has reached a terminal state (`Completed` or `Failed`)
 - The Worker does not process more than one job per Worker instance concurrently at MVP scope
 - A Worker crash before ACK results in message redelivery by the broker; the redelivered message is processed per FR-14 idempotency rules
 - The `job_id`, `problem_id`, and `scheduler_config_id` are extracted from the message before any database access occurs; a malformed message that cannot be parsed is rejected (NACK, dead-letter) without modifying any persistent state
+- At message consumption, the Worker attempts to extract W3C TraceContext from the AMQP message `application_headers`; if trace context is present, the extracted context is used to establish a navigable trace relationship for `job.consume` (ADR-011); if absent, `job.consume` is created without a trace relationship
 
 ---
 
@@ -715,7 +719,7 @@ The Worker is responsible for emitting the required OpenTelemetry spans for the 
 **`worker.evidence.persist`** observability requirements are declared in SPEC-006 FR-18. This specification is the authoritative definition of span attributes and status rules.
 
 **Span context propagation:**
-All Worker spans are children of `job.consume`. Core-emitted spans (`features.extract`, `scheduler.score_solvers`) must propagate the trace context received from the Worker so they appear as children of `job.consume` in the trace. The specific context propagation mechanism is an implementation planning concern.
+All Worker spans are children of `job.consume`. Core-emitted spans (`features.extract`, `scheduler.score_solvers`) must propagate the trace context received from the Worker so they appear as children of `job.consume` in the trace. Trace context is propagated from the API's `job.submit` span via W3C TraceContext carried in AMQP message `application_headers` (ADR-011). The Worker extracts this context at message consumption (FR-3) and establishes a navigable trace relationship between `job.consume` and the `job.submit` context; the concrete integration approach is an implementation planning concern. Core-emitted spans propagate the trace context received from the Worker using in-process propagation facilities.
 
 **Span status rules for Worker-owned spans:**
 
