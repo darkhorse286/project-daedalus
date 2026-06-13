@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-06-12
 
@@ -150,11 +150,15 @@ The API injects W3C TraceContext (`traceparent`, optionally `tracestate`) into t
 
 **Trace relationship model:** For asynchronous producer-consumer patterns, the OpenTelemetry specification for messaging semantic conventions recommends that the consumer span establish a linked relationship to the producer context rather than a strict parent-child relationship. This is because the producer's span (`job.submit`) completes before the consumer's span (`job.consume`) begins — a temporal ordering that does not match the parent-child semantics of synchronous sub-operations. The Worker must establish an OpenTelemetry-compatible trace relationship — whether a span link, a child relationship under the extracted context, or another supported model — such that `job.submit` and `job.consume` are navigably connected in the observability backend. The specific relationship model is an implementation planning concern subject to the capabilities of the OpenTelemetry C++ SDK and the chosen observability backend.
 
+**Navigably connected defined:** Navigably connected means that an explicit OpenTelemetry trace-level relationship — a span link, parent-child relationship, or another relationship model supported by the OpenTelemetry specification — exists between `job.submit` and `job.consume`, enabling a trace backend to navigate from one to the other as a connected trace artifact. Query-time filtering by `job_id` attribute (Alternative 4) does not satisfy this requirement. The `job_id` attribute is a correlation handle and remains operationally useful, but attribute-based filtering alone is not a trace-level relationship and does not produce a distributed trace.
+
 `job.consume` remains the root of the Worker trace hierarchy. All subsequent Worker spans remain children of `job.consume` as specified in SPEC-005 FR-19. The effect is that the submission trace (`job.submit`) and the execution trace (rooted at `job.consume`) are navigably connected.
 
 **AMQP metadata:** The AMQP 0-9-1 `application_headers` table carries the W3C TraceContext values. The API injects them at publication. The Worker extracts them at consumption using OpenTelemetry-compatible propagation facilities. The concrete SDK integration — including any adapter or carrier implementation required by the C++ SDK — is an implementation planning concern.
 
 **No schema changes:** The message payload fields (`job_id`, `problem_id`, `scheduler_config_id`) defined in SPEC-008 FR-5 and SPEC-005 FR-3 are unchanged. The job record schema (SPEC-006 FR-4.2) is unchanged. AMQP `application_headers` are message metadata, not payload, and are outside the scope of the payload schemas defined in either specification.
+
+**AMQP metadata ownership:** ADR-011 is the authoritative owner of the trace context schema carried in AMQP message `application_headers` for Project DAEDALUS. The routing-jobs message payload schema (business fields: `job_id`, `problem_id`, `scheduler_config_id`) remains owned by SPEC-008 FR-5 and SPEC-005 FR-3. Future additions to AMQP message metadata require an amendment to this ADR or a new ADR.
 
 **Re-delivery behavior:** On message re-delivery (SPEC-005 FR-14), the `traceparent` value from the original publication travels with the redelivered message. The Worker establishes a trace relationship to the same original `job.submit` context. Both the original execution attempt and any re-delivered attempt are linked to the same originating submission trace.
 
@@ -188,7 +192,7 @@ The API injects W3C TraceContext (`traceparent`, optionally `tracestate`) into t
 |---|---|
 | API Layer (C# ASP.NET Core, ADR-002) | Yes — must inject W3C TraceContext into AMQP message `application_headers` at publication (SPEC-008 FR-5) |
 | Worker (C++, ADR-001) | Yes — must extract W3C TraceContext from AMQP message `application_headers` at consumption and establish a navigable trace relationship for `job.consume` (SPEC-005 FR-3, FR-19); concrete integration approach is an implementation planning concern |
-| RabbitMQ (ADR-003) | Yes — AMQP `application_headers` table is now used for trace context propagation; this is an additive metadata use of existing AMQP 0-9-1 message structure, not a queue topology change |
+| RabbitMQ (ADR-003) | Yes (no revision required) — The AMQP 0-9-1 `application_headers` capability is native to the infrastructure selected by ADR-003; ADR-011 uses this pre-existing protocol capability. Queue topology, queue names, and consumer acknowledgment semantics are unchanged. ADR-003 requires no revision. |
 | Observability (ADR-006) | Yes — both SDK configurations must enable W3C TraceContext propagation; the chosen trace relationship model must be supported by the SDK and observable in the selected backend |
 | PostgreSQL / Evidence Log (SPEC-006, ODR-6) | No — job record schema is unchanged |
 | Message Payload Schema (SPEC-008 FR-5, SPEC-005 FR-3) | No — payload fields unchanged; AMQP metadata is outside the payload schema boundary |
@@ -236,8 +240,9 @@ All changes are additive to existing specifications. None are behavioral revisio
 | 4 | SPEC-008 Acceptance Checklist | Check OQ-6 resolved |
 | 5 | SPEC-005 FR-3 | Add context extraction and trace relationship requirement; add graceful fallback for absent context |
 | 6 | SPEC-005 FR-19 | Replace "implementation planning concern" with ADR-011 mechanism; preserve implementation flexibility for concrete integration |
+| 7 | ADR-006 Documentation Updates | Add reference to ADR-011 as the architectural decision resolving cross-process W3C TraceContext propagation across the RabbitMQ boundary; note that ADR-011 addresses the accepted C++ SDK propagation risk identified in ADR-006 |
 
-Completing items 1–4 unblocks SPEC-008 from advancing from Draft to Proposed status (AR-1 was the blocking Architecture Review finding). SPEC-008's Acceptance Review remains blocked on AR-5 (ADR-002, ADR-003, ADR-004, ADR-006, ADR-009 promotion to Accepted). Items 5–6 are required before SPEC-005 can advance to Verified.
+Completing items 1–4 unblocks SPEC-008 from advancing from Draft to Proposed status (AR-1 was the blocking Architecture Review finding). SPEC-008's Acceptance Review remains blocked on AR-5 (ADR-002, ADR-003, ADR-004, ADR-006, ADR-009 promotion to Accepted). Items 5–6 are required before SPEC-005 can advance to Verified. Item 7 is a cross-reference update and does not block any status advancement.
 
 ---
 
