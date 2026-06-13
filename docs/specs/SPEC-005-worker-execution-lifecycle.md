@@ -18,7 +18,7 @@
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010
+**Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010, ADR-011
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006, SPEC-007
 
@@ -166,11 +166,15 @@ The Worker holds the RabbitMQ message acknowledgment until the job reaches a ter
 
 **NACK and dead-letter routing:** Defined in FR-13.
 
+**Trace context extraction (ADR-011):**
+At message consumption, the Worker extracts W3C TraceContext from the AMQP message `application_headers` using OpenTelemetry-compatible propagation facilities and uses the extracted context to establish a navigable trace relationship for `job.consume`. If no trace context is present in the message headers (e.g., a message published without instrumentation), `job.consume` is created without a trace relationship. The concrete SDK integration approach is an implementation planning concern; see FR-19 for trace relationship requirements.
+
 **Acceptance Criteria:**
 - The Worker does not ACK a message until the job has reached a terminal state (`Completed` or `Failed`)
 - The Worker does not process more than one job per Worker instance concurrently at MVP scope
 - A Worker crash before ACK results in message redelivery by the broker; the redelivered message is processed per FR-14 idempotency rules
 - The `job_id`, `problem_id`, and `scheduler_config_id` are extracted from the message before any database access occurs; a malformed message that cannot be parsed is rejected (NACK, dead-letter) without modifying any persistent state
+- At message consumption, the Worker attempts to extract W3C TraceContext from the AMQP message `application_headers`; if trace context is present, the extracted context is used to establish a navigable trace relationship for `job.consume` (ADR-011); if absent, `job.consume` is created without a trace relationship
 
 ---
 
@@ -409,29 +413,41 @@ The Worker does not attempt to correct or compensate for a structurally invalid 
 ### FR-12: Cancellation Handling
 
 **Description:**
-The Worker may receive an external cancellation signal directing it to terminate the current solver execution before the timeout deadline. The cancellation signal mechanism — how the cancellation intent reaches the Worker — is an open question (OQ-2).
+The Worker handles cancellation requests in two distinct phases: a pre-execution check before solver dispatch, and an in-execution response if the backend self-cancels.
 
-**Worker behavior on receiving a cancellation signal:**
-1. The Worker signals the backend to terminate using a backend-appropriate mechanism (implementation planning).
-2. The Worker awaits the backend's Cancelled SolverResponse. If the backend does not respond to the cancellation signal within a bounded time, the Worker applies Worker-enforced termination (FR-10 procedure) and constructs a Cancelled response.
-3. If the backend produces a Cancelled SolverResponse with a solution present, the Worker validates the solution structurally (FR-11) and passes it to Core for quality evaluation (FR-15).
-4. If the backend produces a Cancelled SolverResponse with no solution, Core quality evaluation is not invoked (no route plan to evaluate).
+**Delivery mechanism (ODR-5):**
+The API records the cancellation intent by writing `cancellation_requested = true` to the PostgreSQL job record (SPEC-008 FR-11, ODR-5). This is the sole delivery mechanism for external cancellation. Cancellation requests do not cause messages to be removed from the routing-jobs queue.
+
+**Pre-execution cancellation check (ODR-5):**
+After the Scheduler decision record is persisted (FR-6) and before the SolverRequest is dispatched (FR-9), the Worker reads the `cancellation_requested` flag from the PostgreSQL job record. If `cancellation_requested = true`:
+1. The Worker does not construct or dispatch a SolverRequest.
+2. The Worker constructs a Cancelled SolverResponse (see fields below).
+3. The Worker proceeds to evidence persistence (FR-16) with the Cancelled response. The job reaches `Completed` with `outcome = Cancelled`.
+
+This check handles both Pending-state and pre-dispatch Processing-state cancellations. A job that was in `Pending` state when cancellation was requested will be consumed by the Worker normally, transition to `Processing`, complete the loading and scheduling stages, and then be cancelled at the pre-execution check — without ever dispatching to a solver.
+
+**In-execution cancellation:**
+If a cancellation request is written to PostgreSQL after the pre-execution check passes (i.e., after the SolverRequest is dispatched), the running solver cannot be guaranteed to halt before completing. The Worker does not poll `cancellation_requested` continuously during solver execution. If the backend produces a Cancelled SolverResponse via its own self-cancellation mechanism:
+1. If the Cancelled SolverResponse includes a solution, the Worker validates the solution structurally (FR-11) and passes it to Core for quality evaluation (FR-15).
+2. If the Cancelled SolverResponse has no solution, Core quality evaluation is not invoked.
 
 **Worker-constructed Cancelled response fields:**
-- `contract_version`: the value sent in the SolverRequest
+- `contract_version`: the value sent in the SolverRequest (or the Worker's current version for pre-execution cancellation)
 - `outcome`: `Cancelled`
 - `failure`: present with `failure_code = ExecutionCancelled`
 - `solution`: absent
-- `statistics.execution_duration_ms`: the Worker's measured wall-clock time from dispatch to construction
+- `statistics.execution_duration_ms`: `0` for pre-execution cancellation; the Worker's measured wall-clock time from dispatch to construction for in-execution cancellation
 
 **Cancellation is not a Worker lifecycle failure:**
 A Cancelled outcome results in a `Completed` job with a Cancelled solver outcome in the evidence record. The job is not marked `Failed`.
 
 **Acceptance Criteria:**
-- The Worker responds to a cancellation signal during the `Executing` stage only; a cancellation signal received outside this stage is logged and ignored
-- A Worker-constructed Cancelled response is produced when the backend does not produce its own Cancelled response within a bounded time after the cancellation signal
+- The pre-execution cancellation check runs after decision record persistence (FR-6) and before SolverRequest dispatch (FR-9)
+- A pre-execution cancellation produces a `Completed` job with `outcome = Cancelled` and no SolverRequest dispatched
+- A Worker-constructed Cancelled response is produced for pre-execution cancellation with the fields specified above
 - A Cancelled outcome results in job `Completed`, not `Failed`
-- The cancellation signal mechanism (OQ-2) is defined before implementation begins
+- Pending jobs remain in the routing-jobs queue when cancellation is requested; the Worker handles cancellation at the pre-execution check, not at the queue level (ODR-5)
+- The `cancellation_requested` flag is read from the PostgreSQL job record (ODR-5 delivery mechanism)
 
 ---
 
@@ -703,7 +719,7 @@ The Worker is responsible for emitting the required OpenTelemetry spans for the 
 **`worker.evidence.persist`** observability requirements are declared in SPEC-006 FR-18. This specification is the authoritative definition of span attributes and status rules.
 
 **Span context propagation:**
-All Worker spans are children of `job.consume`. Core-emitted spans (`features.extract`, `scheduler.score_solvers`) must propagate the trace context received from the Worker so they appear as children of `job.consume` in the trace. The specific context propagation mechanism is an implementation planning concern.
+All Worker spans are children of `job.consume`. Core-emitted spans (`features.extract`, `scheduler.score_solvers`) must propagate the trace context received from the Worker so they appear as children of `job.consume` in the trace. Trace context is propagated from the API's `job.submit` span via W3C TraceContext carried in AMQP message `application_headers` (ADR-011). The Worker extracts this context at message consumption (FR-3) and establishes a navigable trace relationship between `job.consume` and the `job.submit` context; the concrete integration approach is an implementation planning concern. Core-emitted spans propagate the trace context received from the Worker using in-process propagation facilities.
 
 **Span status rules for Worker-owned spans:**
 
@@ -1064,22 +1080,16 @@ Report generation occurs after evidence is persisted. Its contribution to total 
 
 ---
 
-### OQ-2: Cancellation Signal Mechanism and Authorization
+### OQ-2: Cancellation Signal Mechanism and Authorization — RESOLVED (ODR-5)
 
-**Questions:**
-1. What actor or system is authorized to issue a cancellation for an in-flight job?
-2. Through what interface does that actor's cancellation intent reach the Worker?
-3. What signal does the Worker send to a C++ in-process backend to request cancellation?
+**Resolution:**
+- Sub-question 1 (authorized actor): The API caller is the authorized source. Cancellation is submitted via `POST /v1/jobs/{job_id}/cancel` (SPEC-008 FR-11).
+- Sub-question 2 (delivery mechanism): The API writes `cancellation_requested = true` to the PostgreSQL job record. The Worker reads this flag at the pre-execution check point (after FR-6 decision record persistence, before FR-9 SolverRequest dispatch). This is the sole delivery mechanism (ODR-5).
+- Sub-question 3 (C++ in-process backend signal for in-execution cancellation): Implementation planning concern. The pre-execution check (ODR-5 primary path) eliminates the need for mid-execution signaling in the majority of scenarios. In-execution backend signaling for the case where cancellation is requested after SolverRequest dispatch remains a Worker implementation planning concern; it is not a blocking specification gap.
 
-**Why it matters:** FR-12 defines the Worker's behavior when a cancellation signal is received, but neither the authorization source nor the delivery mechanism is defined. The authorization question (sub-question 1) is upstream of the mechanism questions (sub-questions 2 and 3): the mechanism cannot be resolved without first knowing who is authorized to issue a cancellation and through what interface. Additionally, if cancellations can originate from multiple sources (API caller request, operator intervention, system-level deadline), the source should be captured in the evidence record to distinguish caller-initiated from system-enforced cancellations.
+**Incorporated in:** FR-12 (pre-execution check, delivery mechanism, and Worker behavior). SPEC-008 FR-11 (API cancellation intake writes the flag).
 
-The mechanism sub-questions depend on resolution of sub-question 1, and further:
-- For C++ in-process backends: the Worker signal mechanism may be a cooperative cancellation flag, a thread interrupt, or a signal handler. This is Worker implementation specification territory.
-- For the Python adapter backend: the mechanism depends on the ADR-005 transport contract (currently unresolved).
-
-**Owner:** API specification for sub-questions 1 and 2 (external cancellation interface and authorization); Worker implementation specification for sub-question 3 (C++ in-process signal mechanism); ADR-005 for the Python adapter mechanism.
-
-**Blocking:** Blocking for FR-12 implementation. Not blocking for SPEC-005 Draft status or C++ solver implementation (which can proceed with timeout enforcement only).
+**Blocking:** Was blocking for FR-12 implementation. Resolved — the pre-execution cancellation path is fully specified and implementable. Mid-execution backend-native signaling is deferred to implementation planning and does not block MVP implementation.
 
 ---
 
@@ -1135,7 +1145,7 @@ The mechanism sub-questions depend on resolution of sub-question 1, and further:
 - [x] Security considerations exist
 - [x] Documentation updates are identified
 - [ ] OQ-1 resolved — execution timeout budget policy (blocking for implementation; Project Owner decision)
-- [ ] OQ-2 resolved — cancellation signal mechanism (blocking for FR-12 implementation)
+- [x] OQ-2 resolved — cancellation signal mechanism and delivery mechanism: PostgreSQL `cancellation_requested` flag; pre-execution check before solver dispatch; soft-cancel model (ODR-5)
 - [x] OQ-3 resolved — execution seed derivation formula: `execution_seed = RoutingProblem.seed` (ODR-4)
 - [ ] OQ-4 resolved — dead-letter reprocessing strategy (non-blocking; operational concern)
 
@@ -1147,7 +1157,7 @@ This feature is complete when:
 
 - All functional requirements (FR-1 through FR-19) are implemented and acceptance criteria pass
 - OQ-1 (execution timeout budget policy) is resolved and incorporated in FR-9/FR-10
-- OQ-2 (cancellation signal mechanism) is resolved and incorporated in FR-12
+- OQ-2 (cancellation signal mechanism) is resolved: PostgreSQL `cancellation_requested` flag written by API; Worker reads flag at pre-execution check before solver dispatch (ODR-5) — satisfied
 - OQ-3 (execution seed derivation formula) is resolved: `execution_seed = RoutingProblem.seed` (ODR-4) — satisfied
 - All test contracts defined in the Testability section pass
 - All required OTel spans (job.consume, problem.load, result.evaluate, report.generate, job.complete) are emitted and verifiable in the test environment

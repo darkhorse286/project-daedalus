@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-06-07
 
@@ -205,6 +205,7 @@ Alert configuration is out of scope for the MVP.
 # Documentation Updates
 
 - Architecture documentation (addressed by this ADR)
+- **ADR-011 (Trace Context Propagation, Accepted):** ADR-011 resolves the cross-process W3C TraceContext propagation mechanism for the API → RabbitMQ → Worker boundary, extending the observability architecture established by this ADR. ADR-006 remains the authoritative observability stack selection decision; ADR-011 addresses the accepted C++ SDK propagation risk identified in this ADR as requiring assessment during Worker implementation planning. ADR-011 does not alter the stack selection (OpenTelemetry SDK, Collector, Prometheus, Grafana), the required span hierarchy defined in architecture.md, or the in-process span context propagation model.
 
 ---
 
