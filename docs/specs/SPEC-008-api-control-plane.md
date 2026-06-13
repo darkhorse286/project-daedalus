@@ -6,7 +6,7 @@
 
 **Title:** API / Control Plane
 
-**Status:** Draft
+**Status:** Proposed
 
 **Author:** Darkhorse286
 
