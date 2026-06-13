@@ -212,7 +212,7 @@ After all validation passes, the API creates the job and persists the routing pr
 2. Generate `job_id`: UUID, system-generated. The `job_id` is the caller's correlation handle and the Evidence Log root key (SPEC-006 FR-2).
 3. Resolve `scheduler_config_id`: use the provided value, or the default configuration's ID (SPEC-003 FR-14).
 4. Persist the routing problem record to PostgreSQL with `problem_id`. All SPEC-001 fields are persisted. Persistence completes before queue publication (SPEC-001 FR-12).
-5. Create the job record in PostgreSQL with `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, and `submitted_at` timestamp.
+5. Create the job record in PostgreSQL with `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp (SPEC-006 FR-4.2).
 6. Steps 4 and 5 execute atomically: either both succeed or neither is committed. If persistence fails, no job message is published and HTTP 500 is returned to the caller.
 
 **Acceptance Criteria:**
@@ -328,8 +328,10 @@ The response includes both the job lifecycle state (`status`) and, for completed
 | `problem_id` | UUID string | Always | The associated routing problem identifier |
 | `scheduler_config_id` | UUID string | Always | The scheduler configuration used for this job |
 | `status` | string | Always | Current job lifecycle state (FR-9); reflects Worker execution phase, not solver outcome |
-| `submitted_at` | ISO 8601 UTC | Always | Timestamp of job creation |
-| `completed_at` | ISO 8601 UTC | When terminal | Timestamp of terminal state transition; absent for non-terminal jobs |
+| `created_at` | ISO 8601 UTC | Always | Immutable timestamp set by API at job creation (SPEC-006 FR-4.2) |
+| `updated_at` | ISO 8601 UTC | Always | Timestamp of the most recent state transition; equals `created_at` for `Pending` jobs |
+| `completed_at` | ISO 8601 UTC | When `status = Completed` | Set when status transitions to `Completed`; absent for non-terminal and `Failed` jobs (SPEC-006 FR-4.2) |
+| `failed_at` | ISO 8601 UTC | When `status = Failed` | Set when status transitions to `Failed`; absent for non-terminal and `Completed` jobs (SPEC-006 FR-4.2) |
 | `solver_outcome` | string | When `status = Completed` | The solver outcome code from the solver run record. Always present for `Completed` jobs. Absent for `Failed` jobs. |
 | `failure_reason` | string | When `status = Failed` | The Worker failure classification; absent for `Completed` jobs |
 | `report_available` | boolean | Always | Whether a report metadata record exists for this job |
@@ -340,6 +342,11 @@ The response includes both the job lifecycle state (`status`) and, for completed
 
 **Acceptance Criteria:**
 - Status reflects the current PostgreSQL job record state at the time of the request
+- `created_at` is always present and matches the timestamp set at job creation; it never changes across polls
+- `updated_at` is always present; for a `Pending` job it equals `created_at`
+- A `Completed` job always includes `completed_at` and never includes `failed_at`
+- A `Failed` job always includes `failed_at` and never includes `completed_at`
+- Non-terminal jobs (`Pending`, `Processing`) include neither `completed_at` nor `failed_at`
 - A `Completed` job always includes `solver_outcome`; the field is absent only for `Failed` jobs
 - A `Failed` job always includes `failure_reason` derived from the failure record (SPEC-006 FR-8)
 - `report_available = true` only when a report metadata record (SPEC-006 FR-9) exists for the job
@@ -811,7 +818,7 @@ The API must preserve the `job.submit` span context in a form that allows the Wo
 | Report file | HTTP caller | `text/html` | Served from report volume |
 | Cancellation acknowledgement | HTTP caller | JSON per FR-14 error or 202 body | |
 | Routing problem record | PostgreSQL | Per SPEC-001 | Persisted before queue publication |
-| Job record | PostgreSQL | `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, `submitted_at` | Initial creation; Worker updates status |
+| Job record | PostgreSQL | `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, `created_at` (SPEC-006 FR-4.2) | Initial creation; Worker updates status |
 | Job message | RabbitMQ `routing-jobs` | `{job_id, problem_id, scheduler_config_id}` | Consumed by Worker (SPEC-005) |
 | OTel spans | OpenTelemetry Collector | Traces per FR-17 | `job.submit` and secondary spans |
 | Structured log events | Stdout (JSON) | Per ADR-006 | At each lifecycle stage |
@@ -1019,7 +1026,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - **SPEC-001**: Must be revised to add `average_vehicle_speed_kmh` as a required routing problem field per ODR-1. Until that revision is accepted, SPEC-008 FR-2 and Assumption 6 define the API's treatment of this field.
 - **SPEC-003**: The scheduler configuration endpoint contract defined in SPEC-008 FR-10 is the API's implementation of the configuration persistence model implied by SPEC-003 FR-13. No SPEC-003 changes are required.
 - **SPEC-005 FR-12**: The cancellation delivery mechanism is resolved (ODR-5). SPEC-008 FR-11 (API writes `cancellation_requested`) and SPEC-005 FR-12 (Worker reads flag at pre-execution check) are consistent. No further cross-spec updates required for cancellation.
-- **SPEC-006 FR-4 (Job Record Persistence Schema)**: The job record creation sequence (SPEC-008 FR-4) and status response (SPEC-008 FR-8) reference fields not currently present in the SPEC-006 FR-4.2 schema definition — specifically `scheduler_config_id`, `cancellation_requested`, and the field naming of `submitted_at` (SPEC-006 uses `created_at`). SPEC-006 FR-4.2 requires coordination to align the schema definitions (Engineering Review B-2, B-3). SPEC-008 FR-4 and FR-8 must be reconciled with the SPEC-006 FR-4.2 schema post-correction. This is a cross-specification dependency that must be resolved before SPEC-008 advances to Architecture Review.
+- **SPEC-006 FR-4 (Job Record Persistence Schema)**: Resolved by ODR-6. SPEC-006 FR-4.2 has been updated to add `scheduler_config_id` and `cancellation_requested`, and SPEC-008 FR-4 and FR-8 have been aligned to SPEC-006's authoritative field names (`created_at`, `updated_at`, `completed_at`, `failed_at`). Engineering Review findings B-2 and B-3 are resolved. SPEC-006 is the authoritative schema owner per ODR-6; future job record field additions require a SPEC-006 revision.
 - **CLI Specification (pending)**: The Daedalus CLI (README.md) submits jobs through the API. The CLI specification must reference SPEC-008 for the HTTP contract it wraps.
 - **Report Generator Specification (pending)**: SPEC-008 FR-13 serves files written by the Report Generator. The report file naming and location convention must be consistent between the Report Generator Specification and SPEC-008 FR-13.
 

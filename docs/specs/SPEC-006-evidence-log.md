@@ -118,15 +118,19 @@ A `Completed` job does not have a failure record. Failure records are present on
 |---|---|---|
 | `job_id` | string | Immutable; system-assigned; unique; primary key |
 | `problem_id` | string | Immutable; set at creation; references SPEC-001 problem identity |
+| `scheduler_config_id` | string | Immutable; set by API at job creation; references the scheduler configuration used for this job (SPEC-003 FR-13) |
 | `status` | enum | `Pending`, `Processing`, `Completed`, `Failed` |
+| `cancellation_requested` | boolean | Set to `false` by API at job creation; may be set to `true` by API when a cancellation request is accepted for a non-terminal job (SPEC-008 FR-11); never reverted to `false` after being set |
 | `created_at` | timestamp | Immutable; set by API at job creation; UTC |
 | `updated_at` | timestamp | Updated on every state transition; UTC |
 | `completed_at` | timestamp | Set when status transitions to `Completed`; null otherwise |
 | `failed_at` | timestamp | Set when status transitions to `Failed`; null otherwise |
 
-**3.4.3** The job record must support `job_id`-keyed upsert for all fields mutable after creation. `job_id` and `created_at` are immutable after creation.
+**3.4.3** The job record must support `job_id`-keyed upsert for all fields mutable after creation. `job_id`, `problem_id`, `scheduler_config_id`, and `created_at` are immutable after creation.
 
 **3.4.4** The Worker sets `status` to `Processing` when it begins execution. The Worker sets `status` to `Completed` or `Failed` when the job reaches a terminal state.
+
+**3.4.5** The `cancellation_requested` field is initialized to `false` by the API at job creation. The API may set it to `true` when accepting a cancellation request for a non-terminal job (SPEC-008 FR-11). The Worker reads this field at the pre-execution check point (SPEC-005 FR-12) to determine whether to cancel execution before solver dispatch. The Worker does not write to `cancellation_requested`.
 
 ---
 
