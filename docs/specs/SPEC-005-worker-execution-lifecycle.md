@@ -20,7 +20,7 @@
 
 **Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010, ADR-011
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006, SPEC-007
+**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006, SPEC-007, SPEC-009
 
 ---
 
@@ -599,14 +599,14 @@ The schema for each artifact is defined by SPEC-006 (Evidence Log). SPEC-005 doe
 After evidence is persisted, the Worker invokes the report generator to produce an HTML evidence report for the job.
 
 **Worker obligations:**
-1. Invoke the report generator with the persisted evidence record for this job (job_id, decision record, solver run record, quality evaluation result).
+1. Invoke the report generator with the persisted evidence record for this job (job_id, job_record, decision record, solver run record, quality evaluation result).
 2. The report generator writes the HTML report to the report volume (per architecture.md container topology).
 3. The Worker emits the `report.generate` span covering the report generation call (FR-19).
 
 **Failure handling:**
 If report generation fails, the Worker logs a structured error and proceeds to job completion (FR-18) without marking the job `Failed`. The evidence has already been persisted; the job is not retried because of a report generation failure. The report generation failure is observable through the span status and structured logs.
 
-**The report content and format** are defined by the Report Generator component specification (not yet authored). SPEC-005 defines only that the Worker is the invoker.
+**The report content and format** are defined by SPEC-009 (Report Generator). The invocation input contract is defined by SPEC-009 FR-3. SPEC-005 defines only that the Worker is the invoker.
 
 **Acceptance Criteria:**
 - Report generation is invoked for every job that reaches the reporting stage, regardless of solver outcome
@@ -1055,7 +1055,7 @@ Report generation occurs after evidence is persisted. Its contribution to total 
 - **SPEC-006 (Evidence Log, Accepted)**: Defines the persistence schema for the artifact set described in FR-16. The schema supports `job_id`-keyed upsert semantics as the idempotency mechanism for all artifact tables, consistent with SPEC-005 FR-14. SPEC-005 is a listed dependency of SPEC-006. SPEC-006 is accepted.
 - **SPEC-007 (Core Quality Evaluation, Accepted)**: Defines the Worker-invocable quality evaluation interface compatible with FR-15 (`QualityEvaluationResult`, SPEC-007 FR-9). Establishes the determinism invariant (SPEC-007 FR-10) on which the FR-14 idempotency model depends. SPEC-005 is a listed dependency of SPEC-007 and has been updated to reference SPEC-007 as authoritative.
 - **ADR-010 Decision 4**: Revised to reflect Worker-owned execution seed derivation (SPEC-005 FR-7) and the approved derivation policy `execution_seed = RoutingProblem.seed` (ODR-4). The prior text ("Solver-specific derivation strategies are outside the scope of this ADR") has been replaced. This revision was a pre-condition for SPEC-005 advancing to Accepted — satisfied.
-- **Report Generator Specification (pending)**: Must define the Worker-invocable interface for evidence report generation, the report file format and storage location, and idempotency behavior on re-invocation with the same `job_id`. SPEC-005 FR-17 implementation is blocked until this specification is accepted.
+- **SPEC-009 (Report Generator, Accepted)**: Defines the Worker-invocable interface for evidence report generation (SPEC-009 FR-3), the report file format and storage location (SPEC-009 FR-6, FR-7), and idempotency behavior on re-invocation with the same `job_id` (SPEC-009 FR-8). SPEC-005 FR-17 implementation dependency on the Report Generator Specification is satisfied.
 
 ---
 

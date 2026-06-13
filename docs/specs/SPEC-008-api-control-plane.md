@@ -20,7 +20,7 @@
 
 **Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-011
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006
+**Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006, SPEC-009
 
 ---
 
@@ -563,7 +563,7 @@ The API serves the evidence report file for a given report identifier.
 - `404 Not Found`: no report with this `report_id` exists or the file is absent from the report volume
 
 **File serving:**
-The API reads the report file from the report volume shared between the Worker and API containers (architecture.md container topology). The API does not generate the file; it reads and serves a file that the Report Generator wrote. The API locates the report file by looking up the report metadata record (SPEC-006 FR-9) for the given `report_id`; it does not construct file paths directly from the `report_id` or any other caller-supplied value. File naming conventions, storage structure, and file location on the report volume are owned by the Report Generator Specification (pending) — SPEC-008 is a consumer of that contract, not its owner.
+The API reads the report file from the report volume shared between the Worker and API containers (architecture.md container topology). The API does not generate the file; it reads and serves a file that the Report Generator wrote. The API locates the report file by looking up the report metadata record (SPEC-006 FR-9) for the given `report_id`; it does not construct file paths directly from the `report_id` or any other caller-supplied value. File naming conventions, storage structure, and file location on the report volume are owned by SPEC-009 (FR-6, FR-7) — SPEC-008 is a consumer of that contract, not its owner.
 
 **Acceptance Criteria:**
 - A `report_id` returned by FR-12 resolves to the corresponding report file via this endpoint
@@ -756,9 +756,9 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 - The API does not define the Evidence Log persistence schema (SPEC-006 responsibility)
 - The API does not define Worker execution behavior (SPEC-005 responsibility)
 - The API does not define Worker internal cancellation mechanics beyond writing the `cancellation_requested` flag (Worker implementation planning concern)
-- The API does not define report generation behavior (Report Generator Specification, pending)
-- The API does not define report file naming conventions, report storage structure, or report volume layout — these are owned by the Report Generator Specification (pending)
-- The API does not provide report retrieval compatibility guarantees independently; retrieval compatibility is contingent on the Report Generator Specification maintaining a stable file location captured in the report metadata record (SPEC-006 FR-9)
+- The API does not define report generation behavior (SPEC-009, Report Generator)
+- The API does not define report file naming conventions, report storage structure, or report volume layout — these are owned by SPEC-009 (FR-6, FR-7)
+- The API does not provide report retrieval compatibility guarantees independently; retrieval compatibility is contingent on SPEC-009 maintaining a stable file location captured in the report metadata record (SPEC-006 FR-9)
 - The API does not support multi-tenant isolation, authentication, or authorization at MVP scope (deferred per README)
 - The API does not expose internal execution identifiers (`decision_id`, `execution_seed`, solver run identifiers)
 - The API does not support routing problem versioning, amendment, or deletion (SPEC-001)
@@ -820,7 +820,7 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 | Failure record | PostgreSQL | SPEC-006 FR-8 | Failure classification fields including `failure_reason` | FR-8 (status response — `failure_reason` field for `Failed` jobs) | Written by Worker (SPEC-005); absent for `Completed` and non-terminal jobs |
 | Report metadata record | PostgreSQL | SPEC-006 FR-9.2 | `report_id`, `job_id`, `report_format`, `generated_at`, `generation_status` | FR-8 (existence check for `report_available`), FR-12 (report discovery response), FR-13 (file path lookup for report serving) | Written by Worker (SPEC-005 FR-17); may be absent if report generation failed or job is not yet terminal |
 | Scheduler configuration record | PostgreSQL | SPEC-003 FR-13 | Objective mode and mode parameters | FR-3 (existence check at submission validation), FR-10 (configuration retrieval endpoints) | Written by API at creation time (FR-10) and seeded at startup (SPEC-003 FR-14) |
-| Report file | Report volume | Report Generator Specification (pending) | HTML | FR-13 (report retrieval response body) | Written by Report Generator; located via report metadata record lookup — not by direct path construction from caller input |
+| Report file | Report volume | SPEC-009 (FR-6, FR-7) | HTML | FR-13 (report retrieval response body) | Written by Report Generator; located via report metadata record lookup — not by direct path construction from caller input |
 
 ---
 
@@ -1046,7 +1046,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - **SPEC-005 FR-12**: The cancellation delivery mechanism is resolved (ODR-5). SPEC-008 FR-11 (API writes `cancellation_requested`) and SPEC-005 FR-12 (Worker reads flag at pre-execution check) are consistent. No further cross-spec updates required for cancellation.
 - **SPEC-006 FR-4 (Job Record Persistence Schema)**: Resolved by ODR-6. SPEC-006 FR-4.2 has been updated to add `scheduler_config_id` and `cancellation_requested`, and SPEC-008 FR-4 and FR-8 have been aligned to SPEC-006's authoritative field names (`created_at`, `updated_at`, `completed_at`, `failed_at`). Engineering Review findings B-2 and B-3 are resolved. SPEC-006 is the authoritative schema owner per ODR-6; future job record field additions require a SPEC-006 revision.
 - **CLI Specification (pending)**: The Daedalus CLI (README.md) submits jobs through the API. The CLI specification must reference SPEC-008 for the HTTP contract it wraps.
-- **Report Generator Specification (pending)**: SPEC-008 FR-13 serves files written by the Report Generator to the shared report volume. The API is a consumer of the report storage contract; the Report Generator Specification is the owner. The Report Generator Specification must define the following before SPEC-008 FR-13 can be fully implemented: (1) the file naming convention and storage structure on the report volume; and (2) the mechanism by which the API locates the physical file — specifically, whether the report metadata record (SPEC-006 FR-9) stores an explicit `file_path` field, or whether `report_id` is sufficient to derive the file location via a naming convention owned by the Report Generator Specification.
+- **SPEC-009 (Report Generator, Accepted)**: SPEC-008 FR-13 serves files written by the Report Generator to the shared report volume. The API is a consumer of the report storage contract; SPEC-009 is the owner. SPEC-009 FR-6 defines the file naming convention (`{report_id}.html`); SPEC-009 FR-7 defines the flat directory storage structure on the report volume; SPEC-009 FR-10 establishes that the report metadata record (SPEC-006 FR-9) stores an explicit `file_path` field from which the API locates the physical file. SPEC-008 FR-13 implementation dependency on the Report Generator Specification is satisfied.
 
 ---
 

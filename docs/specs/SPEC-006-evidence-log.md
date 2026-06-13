@@ -7,7 +7,7 @@
 **Created:** 2026-06-08
 **Last Modified:** 2026-06-12
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-007
-**Blocks:** Report Generator Specification (pending)
+**Blocks:** SPEC-009 (Accepted)
 
 ---
 
@@ -61,7 +61,7 @@ The persistence backend is PostgreSQL. The component responsible for writing evi
 - The decision logic that produced the decision record. Decision logic is owned by SPEC-003.
 - The solver contract or solver execution semantics. Those are owned by SPEC-004 and SPEC-005.
 - The quality evaluation algorithm or quality evaluation schema. Those are owned by SPEC-007 (Core Quality Evaluation, Accepted).
-- The report generation algorithm or report schema. Those are owned by the Report Generator Specification (pending).
+- The report generation algorithm or report schema. Those are owned by SPEC-009 (Report Generator).
 - Job scheduling, message queue management, or Worker lifecycle.
 
 **3.1.3** No component other than the Worker (SPEC-005) may write to Evidence Log artifact tables after job creation. The API layer creates the initial job record. The Worker creates and updates all remaining artifact records.
@@ -272,13 +272,13 @@ When the failure stage is `Schedule` (NoEligibleSolver, InvalidConfiguration, or
 | `generated_at` | Timestamp of report generation; UTC |
 | `generation_status` | Whether generation completed or failed |
 
-**3.9.3** The Report Generator Specification (pending) may extend the report metadata record schema with additional fields. The fields defined in FR-9.2 are the minimum required at Evidence Log specification scope.
+**3.9.3** SPEC-009 FR-10 extends the report metadata record schema with additional fields (`file_path`, `report_schema_version`, `solver_outcome`). The fields defined in FR-9.2 are the minimum required at Evidence Log specification scope; SPEC-009 FR-10 is the authoritative owner of Report Generator metadata schema extensions.
 
 **3.9.4** The report metadata record must support `job_id`-keyed upsert.
 
 **3.9.5** The absence of a report metadata record does not prevent a job from reaching `Completed` state. Report generation failure is captured in the Worker telemetry (SPEC-005 `worker.report.generation.failed` event); the job completes without a report metadata record.
 
-**Open Question OQ-2 (Non-Blocking):** The Report Generator Specification has not been authored. The report metadata record schema extension is deferred until that specification is accepted.
+**Open Question OQ-2 — RESOLVED:** SPEC-009 (Report Generator) is accepted. The report metadata record schema extensions are defined in SPEC-009 FR-10.
 
 ---
 
@@ -526,7 +526,7 @@ Evidence Log persistence must be observable through the Worker's telemetry syste
 
 **OQ-1 (Resolved — SPEC-006 FR-7):** SPEC-007 (Core Quality Evaluation) has been accepted. The quality evaluation record schema beyond the minimum fields is now defined in SPEC-007 (FR-6, FR-7, FR-8, FR-11, FR-12) and incorporated into FR-7.3. OQ-1 no longer blocks SPEC-006 from advancing to Accepted.
 
-**OQ-2 (Non-Blocking — SPEC-006 FR-9):** The Report Generator Specification has not been authored. The report metadata record schema extension beyond the minimum fields defined in FR-9.2 is deferred. SPEC-006 may advance to Accepted with OQ-2 open; FR-9 is marked as schema-incomplete.
+**OQ-2 (Resolved — SPEC-006 FR-9):** SPEC-009 (Report Generator) is accepted. The report metadata record schema extensions beyond the minimum fields defined in FR-9.2 are defined in SPEC-009 FR-10. OQ-2 is resolved.
 
 **OQ-3 (Resolved — SPEC-006 FR-15.1):** The default minimum evidence retention period of 90 days is confirmed by Project Owner Decision ODR-3. Rationale: supports reproducibility investigations, benchmark verification, and post-implementation review; storage growth acceptable for MVP; deployments may configure longer retention periods. OQ-3 no longer blocks SPEC-006 from advancing to Accepted.
 
@@ -538,7 +538,7 @@ Evidence Log persistence must be observable through the Worker's telemetry syste
 - **SPEC-005 (Proposed — additive extension required):** Must be extended with additive telemetry definitions for Evidence Log persistence: the `worker.evidence.persist` OTel span (FR-19 span table and span attributes), updated `worker.evidence.persisted` event fields (reconciled to include `artifacts_written` and `duration_ms`), and new `worker.evidence.upsert.collision` and `worker.evidence.persistence.failed` events (Section 9). SPEC-006 FR-18 declares the observability requirements; SPEC-005 owns the telemetry definitions. Additionally, SPEC-005 FR-15 uses language ("the Worker persists the solver run record with `actual_outcome` and `hindsight_quality` null") that is inconsistent with SPEC-007 FR-13: input-derived `actual_outcome` subfields are always non-null on infrastructure failure. SPEC-005 FR-15 must be revised accordingly when SPEC-005 advances.
 - **SPEC-005 FR-16 (Accepted):** FR-16 establishes that the Evidence Log must specify `job_id`-keyed upsert semantics. This specification satisfies that dependency via FR-10 and FR-12.
 - **SPEC-003 FR-10 (Accepted):** Any future revision to the SPEC-003 FR-10 decision record schema requires a corresponding update to SPEC-006 FR-5.2 (the traceability reproduction table). The field table in FR-5.2 must remain a verbatim copy of SPEC-003 FR-10's authoritative field list.
-- **Report Generator Specification (pending):** Must extend the report metadata record schema defined in SPEC-006 FR-9.2. Must define the Worker-invocable report generation interface (SPEC-005 FR-17 dependency).
+- **SPEC-009 (Report Generator, Accepted):** Extends the report metadata record schema defined in SPEC-006 FR-9.2 with additional fields via SPEC-009 FR-10. The Worker-invocable report generation interface is defined in SPEC-009 FR-3. No further updates required from SPEC-009 acceptance.
 - **ADR-010:** Must be revised when SPEC-005 advances to Accepted. ADR-010 Decision 4 conflicts with SPEC-005 FR-7 and SPEC-004 FR-11.3 regarding seed derivation ownership. That conflict is a SPEC-005 pre-condition for Accepted status; it is not a SPEC-006 concern.
 
 ---
@@ -552,4 +552,4 @@ Evidence Log persistence must be observable through the Worker's telemetry syste
 | Solver Contract | SPEC-004 | Accepted | SolverResponse fields, SolverOutcome, ExecutionStatistics, SolverFailureDetail (FR-6.2) |
 | Worker Execution Lifecycle | SPEC-005 | Proposed | Artifact set definition, idempotency model, failure taxonomy, telemetry definitions (additive extension required — see Section 11) |
 | Core Quality Evaluation | SPEC-007 | Accepted | Quality evaluation record schema (FR-7) — resolved; full schema incorporated in FR-7.3 |
-| Report Generator Specification | Pending | Not authored | Report metadata record schema extension (FR-9) — non-blocking |
+| Report Generator | SPEC-009 | Accepted | Report metadata record schema extension (FR-9) — resolved via SPEC-009 FR-10 |
