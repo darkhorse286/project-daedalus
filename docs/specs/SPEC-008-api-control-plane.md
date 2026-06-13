@@ -559,7 +559,7 @@ The API serves the evidence report file for a given report identifier.
 - `404 Not Found`: no report with this `report_id` exists or the file is absent from the report volume
 
 **File serving:**
-The API reads the report file from the report volume shared between the Worker and API containers (architecture.md container topology). The API does not generate the file; it reads and serves a file that the Worker's report generator wrote.
+The API reads the report file from the report volume shared between the Worker and API containers (architecture.md container topology). The API does not generate the file; it reads and serves a file that the Report Generator wrote. The API locates the report file by looking up the report metadata record (SPEC-006 FR-9) for the given `report_id`; it does not construct file paths directly from the `report_id` or any other caller-supplied value. File naming conventions, storage structure, and file location on the report volume are owned by the Report Generator Specification (pending) — SPEC-008 is a consumer of that contract, not its owner.
 
 **Acceptance Criteria:**
 - A `report_id` returned by FR-12 resolves to the corresponding report file via this endpoint
@@ -752,6 +752,8 @@ The API must preserve the `job.submit` span context in a form that allows the Wo
 - The API does not define Worker execution behavior (SPEC-005 responsibility)
 - The API does not define Worker internal cancellation mechanics beyond writing the `cancellation_requested` flag (Worker implementation planning concern)
 - The API does not define report generation behavior (Report Generator Specification, pending)
+- The API does not define report file naming conventions, report storage structure, or report volume layout — these are owned by the Report Generator Specification (pending)
+- The API does not provide report retrieval compatibility guarantees independently; retrieval compatibility is contingent on the Report Generator Specification maintaining a stable file location captured in the report metadata record (SPEC-006 FR-9)
 - The API does not support multi-tenant isolation, authentication, or authorization at MVP scope (deferred per README)
 - The API does not expose internal execution identifiers (`decision_id`, `execution_seed`, solver run identifiers)
 - The API does not support routing problem versioning, amendment, or deletion (SPEC-001)
@@ -792,17 +794,28 @@ The API must preserve the `job.submit` span context in a form that allows the Wo
 
 # Inputs
 
+**Caller requests:**
+
 | Input | Source | Format | Notes |
 |---|---|---|---|
 | Job submission request | HTTP caller | JSON body per FR-2 | Untrusted; validated before persistence |
 | Scheduler configuration creation request | HTTP caller | JSON body per FR-10 | Untrusted; validated before persistence |
-| Cancellation request | HTTP caller | Empty body; `job_id` in path | |
-| Status poll request | HTTP caller | `job_id` in path | Read-only |
-| Report retrieval request | HTTP caller | `report_id` in path | Read-only |
-| Job record (for status poll) | PostgreSQL | Job record with `status`, `solver_outcome`, `failure_reason` | Written by Worker (SPEC-005) |
-| Report metadata record (for discovery) | PostgreSQL | SPEC-006 FR-9 report metadata record | Written by Worker (SPEC-005 FR-17) |
-| Report file (for retrieval) | Report volume | HTML file | Written by Report Generator |
-| Scheduler configuration record (for validation) | PostgreSQL | Configuration per SPEC-003 FR-13 | Written by API; read at submission validation time |
+| Cancellation request | HTTP caller | Empty body; `job_id` in path | `POST /v1/jobs/{job_id}/cancel` |
+| Status poll request | HTTP caller | `job_id` in path | `GET /v1/jobs/{job_id}`; read-only |
+| Report discovery request | HTTP caller | `job_id` in path | `GET /v1/jobs/{job_id}/report`; read-only |
+| Scheduler configuration retrieval request | HTTP caller | `scheduler_config_id` in path (single) or no body (list) | `GET /v1/scheduler-configs/{id}` and `GET /v1/scheduler-configs`; read-only |
+| Report retrieval request | HTTP caller | `report_id` in path | `GET /v1/reports/{report_id}`; read-only |
+
+**Externally-owned data artifacts read at runtime:**
+
+| Input | Source | Authoritative Owner | Format | Used By | Notes |
+|---|---|---|---|---|---|
+| Job record | PostgreSQL | SPEC-006 FR-4.2 (schema); ODR-6 | `job_id`, `problem_id`, `scheduler_config_id`, `status`, `cancellation_requested`, `created_at`, `updated_at`, `completed_at`, `failed_at` | FR-3 (config validation), FR-8 (status response), FR-11 (terminal state check) | Created by API; `status`, `updated_at`, `completed_at`, `failed_at` updated by Worker (SPEC-005) |
+| Solver run record | PostgreSQL | SPEC-006 FR-6.2 | `solver_outcome` and associated fields | FR-8 (status response — `solver_outcome` field for `Completed` jobs) | Written by Worker (SPEC-005); absent for `Failed` and non-terminal jobs |
+| Failure record | PostgreSQL | SPEC-006 FR-8 | Failure classification fields including `failure_reason` | FR-8 (status response — `failure_reason` field for `Failed` jobs) | Written by Worker (SPEC-005); absent for `Completed` and non-terminal jobs |
+| Report metadata record | PostgreSQL | SPEC-006 FR-9.2 | `report_id`, `job_id`, `report_format`, `generated_at`, `generation_status` | FR-8 (existence check for `report_available`), FR-12 (report discovery response), FR-13 (file path lookup for report serving) | Written by Worker (SPEC-005 FR-17); may be absent if report generation failed or job is not yet terminal |
+| Scheduler configuration record | PostgreSQL | SPEC-003 FR-13 | Objective mode and mode parameters | FR-3 (existence check at submission validation), FR-10 (configuration retrieval endpoints) | Written by API at creation time (FR-10) and seeded at startup (SPEC-003 FR-14) |
+| Report file | Report volume | Report Generator Specification (pending) | HTML | FR-13 (report retrieval response body) | Written by Report Generator; located via report metadata record lookup — not by direct path construction from caller input |
 
 ---
 
@@ -1028,7 +1041,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - **SPEC-005 FR-12**: The cancellation delivery mechanism is resolved (ODR-5). SPEC-008 FR-11 (API writes `cancellation_requested`) and SPEC-005 FR-12 (Worker reads flag at pre-execution check) are consistent. No further cross-spec updates required for cancellation.
 - **SPEC-006 FR-4 (Job Record Persistence Schema)**: Resolved by ODR-6. SPEC-006 FR-4.2 has been updated to add `scheduler_config_id` and `cancellation_requested`, and SPEC-008 FR-4 and FR-8 have been aligned to SPEC-006's authoritative field names (`created_at`, `updated_at`, `completed_at`, `failed_at`). Engineering Review findings B-2 and B-3 are resolved. SPEC-006 is the authoritative schema owner per ODR-6; future job record field additions require a SPEC-006 revision.
 - **CLI Specification (pending)**: The Daedalus CLI (README.md) submits jobs through the API. The CLI specification must reference SPEC-008 for the HTTP contract it wraps.
-- **Report Generator Specification (pending)**: SPEC-008 FR-13 serves files written by the Report Generator. The report file naming and location convention must be consistent between the Report Generator Specification and SPEC-008 FR-13.
+- **Report Generator Specification (pending)**: SPEC-008 FR-13 serves files written by the Report Generator to the shared report volume. The API is a consumer of the report storage contract; the Report Generator Specification is the owner. The Report Generator Specification must define the following before SPEC-008 FR-13 can be fully implemented: (1) the file naming convention and storage structure on the report volume; and (2) the mechanism by which the API locates the physical file — specifically, whether the report metadata record (SPEC-006 FR-9) stores an explicit `file_path` field, or whether `report_id` is sufficient to derive the file location via a naming convention owned by the Report Generator Specification.
 
 ---
 
@@ -1076,17 +1089,11 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 
 ---
 
-### OQ-5: Scheduler Configuration List Pagination
+### OQ-5: Scheduler Configuration List Pagination — RESOLVED
 
-**Question:** Does `GET /v1/scheduler-configs` require pagination at MVP scope?
+**Resolution:** No pagination for scheduler configuration list endpoints at MVP scope. The Non-Requirements section of this specification is the authoritative answer: "The API does not implement pagination for list endpoints at MVP scope (OQ-5)." The question is answered within this specification and requires no further action.
 
-**Why it matters:** If callers create many configurations, an unbounded list response may become large. At MVP scale with a small number of configurations, pagination is likely unnecessary.
-
-**Recommendation:** No pagination at MVP scope. A configuration count threshold that would warrant pagination is not expected to be reached.
-
-**Owner:** Implementation planning — applies when the list endpoint is implemented. The Non-Requirements section explicitly states pagination is not required at MVP scope, which informs the implementation default. Revisit if configuration count grows unexpectedly.
-
-**Blocking:** Not blocking.
+**No further action required.**
 
 ---
 
@@ -1137,7 +1144,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [x] OQ-2 resolved — Pending-state cancellation: soft-cancel model; Pending jobs remain in queue; Worker cancels at pre-execution check (ODR-5)
 - [ ] OQ-3 resolved — API versioning strategy (non-blocking)
 - [ ] OQ-4 resolved — scheduler configuration mutability (non-blocking; read-only assumed)
-- [ ] OQ-5 resolved — configuration list pagination (non-blocking)
+- [x] OQ-5 resolved — configuration list pagination: no pagination at MVP scope (Non-Requirements)
 - [ ] OQ-6 resolved — trace context propagation mechanism (blocking for observability chain)
 
 ---
