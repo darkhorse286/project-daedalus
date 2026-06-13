@@ -20,7 +20,7 @@
 
 **Related ADRs:** ADR-001, ADR-004, ADR-006, ADR-010, ADR-011
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, SPEC-007, SPEC-008
+**Related Specs:** SPEC-001, SPEC-002, SPEC-003, SPEC-004, SPEC-005, SPEC-006, SPEC-007, SPEC-008
 
 ---
 
@@ -139,7 +139,7 @@ The Report Generator returns a structured result to the Worker:
 | `generation_status` | Always | `Completed` or `Failed` |
 | `report_id` | On success | UUID assigned to this report artifact |
 | `file_path` | On success | Absolute path of the written report file on the report volume |
-| `failure_stage` | On failure | Where in the lifecycle the failure occurred: `invocation_contract_violation`, `rendering_error`, `file_write`, `metadata_return_error` |
+| `failure_stage` | On failure | Where in the lifecycle the failure occurred: `invocation_contract_violation`, `rendering_error`, `file_write` |
 
 The Worker uses `report_id` and `file_path` from the successful result to populate the report metadata record it persists to PostgreSQL (SPEC-006 FR-9).
 
@@ -147,7 +147,7 @@ The Worker uses `report_id` and `file_path` from the successful result to popula
 - The Report Generator receives all required inputs on every invocation
 - A null `quality_evaluation_record` is not an invocation contract violation; it is the expected input for solver outcomes without a route plan
 - The Report Generator does not re-read evidence artifacts from PostgreSQL; it operates exclusively on the inputs passed by the Worker
-- The Worker uses the returned `report_id` and `file_path` to write the report metadata record to PostgreSQL
+- The Worker uses the returned `report_id`, `file_path`, and `generated_at` to write the report metadata record to PostgreSQL
 
 ---
 
@@ -297,6 +297,8 @@ The Report Generator produces a complete, meaningful HTML document for every job
 | `ContractViolation` | No | Null | "No route plan produced (contract violation). Quality evaluation was not performed." | Omitted |
 | Any outcome | Attempted | Partial (`Failed`) | Partial: input-derived `actual_outcome` fields rendered; simulation-derived fields shown as "Evaluation failed — route simulation could not be completed" | Partial regret analysis (latency fields only) |
 
+**Row precedence:** The final row ("Any outcome | Attempted | Partial (`Failed`)") takes precedence over all solver-outcome-specific rows above it when `quality_evaluation_record.evaluation_status = Failed` (infrastructure failure per SPEC-007 FR-13). For example, a job with `solver_outcome = Succeeded` where quality evaluation experienced an infrastructure failure renders Section 5 with partial content and Section 6 with latency fields only — not full quality metrics or full regret analysis.
+
 Sections 1, 2, 3, 4, and 7 are always rendered in full regardless of solver outcome.
 
 **Acceptance Criteria:**
@@ -401,14 +403,14 @@ The Report Generator executes the following stages in order on every invocation.
 
 4. **File write** — Write the rendered HTML to `{report_volume_root}/{report_id}.html`. This is the only I/O operation in the lifecycle. A file write failure returns a structured `file_write` failure. No metadata record is written if this stage fails.
 
-5. **Return result** — Return a structured success result to the Worker containing `report_id` and `file_path`. The Worker is responsible for persisting the report metadata record to PostgreSQL using this result.
+5. **Return result** — Return a structured success result to the Worker containing `report_id`, `file_path`, and `generated_at` (wall-clock UTC timestamp captured at the moment stage 4 completes). The Worker is responsible for persisting the report metadata record to PostgreSQL using this result.
 
 **Ordering constraint:**
 The file write (stage 4) must complete successfully before the Worker writes the metadata record (stage 5 is the Worker's action). A failure at stage 4 means no metadata record is written for this attempt.
 
 **Acceptance Criteria:**
 - The lifecycle stages execute in order; the Report Generator never returns a `file_path` for a file that was not written
-- A successful invocation always returns both `report_id` and `file_path`
+- A successful invocation always returns `report_id`, `file_path`, and `generated_at`
 - A failed invocation always returns a structured failure with `failure_stage` identifying where in the lifecycle the failure occurred
 
 ---
@@ -455,20 +457,21 @@ The report metadata record carries a `report_schema_version` field identifying t
 **Version 1 defines:**
 - The seven sections enumerated in FR-4
 - The content rendering rules in FR-4 and FR-5
-- The file naming convention in FR-6
-- The storage structure in FR-7
 
 **Breaking changes (MUST increment `report_schema_version`):**
 - Removing a section
 - Renaming a section
 - Changing which persisted field populates a rendered field
-- Changing the file naming convention or storage structure
+- Changing the interpretation semantics of any rendered field or calculation
 
 **Non-breaking changes (do NOT increment `report_schema_version`):**
 - Adding a new section
 - Adding new rendered fields within an existing section
 - Adjusting decimal precision or timestamp formatting in backward-compatible ways
 - Adding fields to the report metadata record (FR-10 extension fields)
+
+**Naming convention and storage structure changes:**
+The file naming convention (FR-6) and storage structure (FR-7) are not content model concerns and do not affect `report_schema_version`. Changes to either require a SPEC-009 revision and implementation coordination but do not increment `report_schema_version`. Existing `file_path` values in metadata records remain valid for files written under the prior convention; the Report Generator does not retroactively update or move existing files.
 
 **Breaking change procedure:**
 1. `report_schema_version` is incremented.
@@ -544,7 +547,7 @@ On message redelivery, the Worker re-executes the job and passes the newly produ
 # Constraints
 
 1. The Report Generator must be implemented in C++ (ADR-001).
-2. The file naming convention (FR-6) and storage structure (FR-7) are frozen once this specification is Accepted. Changes require a SPEC-009 revision and a `report_schema_version` increment (FR-11).
+2. The file naming convention (FR-6) and storage structure (FR-7) are frozen once this specification is Accepted. Changes require a SPEC-009 revision and implementation coordination but do not increment `report_schema_version`, which tracks the content model only (FR-11).
 3. `execution_seed` must not appear in any report output (SPEC-005 Security Considerations; SPEC-006 FR-6.4).
 4. `violated_stop_ids` must not appear in any report output (SPEC-007 Security Considerations).
 5. The Report Generator must not perform any network calls or external data access during the rendering stage (FR-12 determinism requirement).
@@ -569,7 +572,7 @@ On message redelivery, the Worker re-executes the job and passes the newly produ
 | Output | Consumer | Format | Notes |
 |---|---|---|---|
 | HTML report file | Report volume (read by API, served per SPEC-008 FR-13) | `text/html` | Written to `{report_volume_root}/{report_id}.html`; deterministic from evidence |
-| Structured result | Worker (SPEC-005 FR-17) | `{generation_status, report_id, file_path}` on success; `{generation_status, failure_stage}` on failure | Used by Worker to write report metadata record to PostgreSQL |
+| Structured result | Worker (SPEC-005 FR-17) | `{generation_status, report_id, file_path, generated_at}` on success; `{generation_status, failure_stage}` on failure | Used by Worker to write report metadata record to PostgreSQL |
 
 ---
 
@@ -649,7 +652,7 @@ On message redelivery, the Worker re-executes the job and passes the newly produ
 
 7. **Unit: File naming convention** — Given a Report Generator invocation that succeeds, verify the written file is named `{report_id}.html` at `{report_volume_root}/{report_id}.html`.
 
-8. **Unit: Metadata result fields** — Verify that the Report Generator's success result contains `report_id` (a valid UUID), `file_path` (the absolute path of the written file), and `generation_status = Completed`.
+8. **Unit: Metadata result fields** — Verify that the Report Generator's success result contains `report_id` (a valid UUID), `file_path` (the absolute path of the written file), `generated_at` (a valid UTC timestamp), and `generation_status = Completed`.
 
 9. **Unit: Idempotency — re-invocation produces new report_id** — Given a prior successful invocation for `job_id = X` that produced `report_id = R1`, invoke the Report Generator again for the same `job_id = X`. Verify: a new `report_id = R2` is returned; a new file `{R2}.html` exists on the volume; the file `{R1}.html` also still exists on the volume (not deleted).
 
@@ -750,7 +753,9 @@ The `report.generate` span captures the complete Report Generator invocation dur
 
 - **SPEC-008 FR-13 (Accepted):** The file naming convention (SPEC-009 FR-6), storage structure (SPEC-009 FR-7), and `file_path` field in the metadata record (SPEC-009 FR-7, FR-10) resolve the open dependency stated in SPEC-008 Documentation Updates Required: "(1) the file naming convention and storage structure on the report volume; and (2) the mechanism by which the API locates the physical file." The mechanism is explicit `file_path` in the report metadata record. SPEC-008 FR-13 implementation is unblocked.
 
-- **SPEC-005 FR-17 (Accepted):** The Worker-invocable interface (SPEC-009 FR-3), report generation lifecycle (SPEC-009 FR-9), and failure handling are defined. SPEC-005 FR-17's note that "The report content and format are defined by the Report Generator component specification (not yet authored)" is satisfied. SPEC-005 FR-17 implementation is unblocked.
+- **SPEC-005 FR-17 (Accepted):** The Worker-invocable interface (SPEC-009 FR-3), report generation lifecycle (SPEC-009 FR-9), and failure handling are defined. SPEC-005 FR-17's note that "The report content and format are defined by the Report Generator component specification (not yet authored)" is satisfied. SPEC-005 FR-17 implementation is unblocked. SPEC-005 FR-17 must also be revised to update its invocation input list to explicitly include `job_record` as a required Report Generator invocation input, consistent with SPEC-009 FR-3. The current SPEC-005 FR-17 text lists "job_id, decision record, solver run record, quality evaluation result" and omits `job_record`, which is required for rendering Section 1 content (`job_record.created_at`, `job_record.completed_at`, `job_record.status`, `job_record.scheduler_config_id`). The invocation contract is authoritative in SPEC-009 FR-3; SPEC-005 FR-17 must align with it.
+
+- **SPEC-002 (pending):** Section 2 of the report (FR-4) derives the "Problem size class" label from stop count using SPEC-002 size class boundaries (SPEC-009 Assumption 7). When SPEC-002 is accepted, or if its size class boundaries subsequently change, the rendered output of Section 2 changes. Changes to SPEC-002 size class boundaries must be evaluated for impact on `report_schema_version` at the time of the SPEC-002 revision. SPEC-002 must be stable before Report Generator implementation of Section 2 begins.
 
 - **docs/architecture.md:** The System Components section lists "Daedalus Report Generator" as a component. SPEC-009 is the authoritative specification for that component. No changes to architecture.md are required. The `report volume` in the container topology diagram is consistent with SPEC-009 FR-7.
 
