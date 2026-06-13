@@ -6,7 +6,7 @@
 
 **Title:** Report Generator
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
