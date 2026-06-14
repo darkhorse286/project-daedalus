@@ -6,7 +6,7 @@
 
 **Title:** Core Feature Extraction
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
