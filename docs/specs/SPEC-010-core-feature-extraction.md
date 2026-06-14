@@ -475,7 +475,7 @@ Core Feature Extraction produces the `WorkloadFeatures` structure that the Sched
 2. Core passes this structure to the Scheduler as part of the Scheduler invocation (SPEC-003 FR-2)
 3. The Scheduler treats the received values as authoritative; it does not modify or recompute them
 
-**Scheduler use of new features:** The Scheduler currently uses four of the six features for eligibility filtering (SPEC-003 FR-5) and scoring (SPEC-003 FR-7). The two features defined in SPEC-010 — `geographic_compactness` and `service_time_pressure_ratio` — are present in the `WorkloadFeatures` input received by the Scheduler but are not currently referenced in SPEC-003 eligibility or scoring logic. They are captured in the `workload_features_snapshot` of the decision record. Future Scheduler policy revisions may use them.
+**Scheduler use of new features:** SPEC-003 FR-5 Phase 1 eligibility filtering references three features from the `WorkloadFeatures` input: `problem_size_class` (SizeClassMismatch condition), `time_window_density` (TimeWindowUnsupported condition), and `capacity_utilization_ratio` (CapacityConstraintUnsupported condition). The SPEC-003 FR-7 scoring formula is deferred to SPEC-003 OQ-4 and does not constitute a current accepted policy reference. All six features are available to the Scheduler through the `WorkloadFeatures` contract (FR-4). The two features introduced in SPEC-010 — `geographic_compactness` and `service_time_pressure_ratio` — are not currently referenced in any accepted SPEC-003 FR-5 eligibility condition. They are captured in the `workload_features_snapshot` of the decision record.
 
 **Required follow-on update to SPEC-003:** The `workload_features_snapshot` field in SPEC-003 FR-10 must be updated to include `geographic_compactness` and `service_time_pressure_ratio`. The Scheduler must receive a `WorkloadFeatures` structure containing all six fields. SPEC-003 FR-3 must be updated to reference SPEC-010 as the authoritative owner of feature computation formulas. These updates are required before SPEC-010 is implemented but do not modify SPEC-003's eligibility or scoring requirements.
 
@@ -623,11 +623,11 @@ On failure, Core returns a `FeatureExtractionError` to the Worker (instead of a 
 
 **Condition:** One or more computed feature values are outside their declared valid range (FR-6).
 
-**Behavior:** Core Feature Extraction returns a `FeatureExtractionError` to Core. Core returns this failure to the Worker without invoking the Scheduler. The Worker marks the job `Failed`, persists a structured failure record with `failure_stage = Schedule` (because the failure occurred within Core before Scheduler invocation), and dead-letters the message per SPEC-005 FR-13.
+**Behavior:** Core Feature Extraction returns a structured `FeatureExtractionError` to Core. Core does not invoke the Scheduler. Core propagates the failure to the Worker. Worker handling is governed by SPEC-005 FR-5.
 
-**Fallback:** None. An out-of-range feature value is a Core internal consistency violation, not a recoverable condition at runtime. Investigation is required to identify the source of the invalid value.
+**Fallback:** None at the Core Feature Extraction level. An out-of-range feature value is a Core internal consistency violation, not a recoverable condition at runtime. Investigation is required to identify the source of the invalid value.
 
-**Caller-visible result:** Job status transitions to `Failed`. A failure record is persisted identifying the offending feature(s) and their computed values. The `features.extract` span status is `Error`.
+**Core-observable result:** The `features.extract` span status is `Error` and the `core.features.extraction.failed` log event is emitted with the offending feature names and their computed values (FR-11).
 
 ---
 
@@ -635,11 +635,11 @@ On failure, Core returns a `FeatureExtractionError` to the Worker (instead of a 
 
 **Condition:** A required raw property from SPEC-001 FR-10 is inaccessible from the C++ domain representation (for example, the stop list is absent, or the property is in an unexpected state).
 
-**Behavior:** Core Feature Extraction returns a structured error before any feature computation begins. Core propagates this as a permanent failure to the Worker.
+**Behavior:** Core Feature Extraction returns a structured `IncompleteProblemRepresentation` error before any feature computation begins. The Scheduler is not invoked. Core propagates the failure to the Worker. Worker handling is governed by SPEC-005 FR-5.
 
-**Fallback:** None. This indicates a Core validation or representation construction error. Investigation is required.
+**Fallback:** None at the Core Feature Extraction level. This condition indicates a Core validation or representation construction error. Investigation is required.
 
-**Caller-visible result:** Same as FeatureExtractionError (job `Failed`, structured failure record, dead-letter).
+**Core-observable result:** The `features.extract` span status is `Error` and the `core.features.extraction.failed` log event is emitted.
 
 ---
 
@@ -716,6 +716,8 @@ On failure, Core returns a `FeatureExtractionError` to the Worker (instead of a 
 
 23. **Retrieval — features from Evidence Log:** Given a `job_id`, the `workload_features_snapshot` is retrievable from the Evidence Log via the decision record and contains all six feature values.
 
+24. **Unit: IncompleteProblemRepresentation:** Inject a mock routing problem where a required SPEC-001 FR-10 raw property (for example, the stop list is null or absent from the C++ domain representation). Verify that Core Feature Extraction returns a structured `IncompleteProblemRepresentation` error before any feature computation begins. Verify that no `WorkloadFeatures` value is produced. Verify that the Scheduler is not invoked.
+
 ---
 
 # Observability Requirements
@@ -778,6 +780,9 @@ The following updates are required before SPEC-010 can be implemented. SPEC-010 
 
 **docs/architecture.md (Daedalus Core responsibilities):**
 - Update the Core responsibilities list to explicitly include "workload feature extraction per SPEC-010" alongside the existing "workload feature extraction" entry.
+
+**SPEC-005 FR-5 (Worker Execution Lifecycle — Core invocation):**
+- Must be updated to define Worker handling of two failure types returned by Core Feature Extraction: `FeatureExtractionError` (one or more feature values outside declared valid range) and `IncompleteProblemRepresentation` (a required SPEC-001 FR-10 raw property inaccessible from the C++ domain representation). For each failure type, SPEC-005 FR-5 must specify: the failure stage classification, the evidence record population behavior, and whether the job is dead-lettered. SPEC-010 owns Core Feature Extraction's contract (what Core returns); SPEC-005 owns Worker handling.
 
 ---
 
