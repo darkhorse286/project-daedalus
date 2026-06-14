@@ -255,6 +255,8 @@ Else:
 **Inputs from SPEC-001 FR-10:**
 - Per-stop latitude and longitude (SPEC-001 FR-4, FR-5)
 
+**Depot scope (ODR-6):** The depot location is excluded from the `geographic_compactness` computation. The feature measures inter-stop spatial concentration. Including the depot would conflate stop distribution with depot placement. Depot-relative routing characteristics may be represented by future workload features if evidence demonstrates scheduling value.
+
 **Formula:**
 
 Let P = the set of all unordered pairs (i, j) with i ≠ j across all stops.
@@ -783,20 +785,25 @@ The following updates are required before SPEC-010 can be implemented. SPEC-010 
 
 **SPEC-005 FR-5 (Worker Execution Lifecycle — Core invocation):**
 - Must be updated to define Worker handling of two failure types returned by Core Feature Extraction: `FeatureExtractionError` (one or more feature values outside declared valid range) and `IncompleteProblemRepresentation` (a required SPEC-001 FR-10 raw property inaccessible from the C++ domain representation). For each failure type, SPEC-005 FR-5 must specify: the failure stage classification, the evidence record population behavior, and whether the job is dead-lettered. SPEC-010 owns Core Feature Extraction's contract (what Core returns); SPEC-005 owns Worker handling.
+- **Terminology alignment (A-001):** SPEC-005 FR-5 currently uses `OutOfRangeFeaturesError` and `IncompleteFeaturesError` in its Core response table. These names must be replaced with `FeatureExtractionError` and `IncompleteProblemRepresentation` respectively to match the authoritative names defined in SPEC-010 FR-6 and FR-7. This is a contract alignment update only. No behavior changes to SPEC-005 FR-5 are required.
+- **Failure artifact clarification (A-002):** `FeatureExtractionError` and `IncompleteProblemRepresentation` occur before Scheduler invocation (SPEC-010 FR-7, steps 4–5). These failure paths do not produce a Scheduler decision record. SPEC-005 FR-5 must be updated to reflect that the Worker persists a structured failure record — not a decision record — for these conditions. The existing SPEC-005 FR-5 language "persists the decision record" applies only to failure types where the Scheduler ran and produced a decision record (such as `NoEligibleSolver` and `InvalidConfiguration`). It does not apply to feature extraction failure paths where Scheduler invocation did not occur.
+
+**SPEC-005 FR-13 (Worker Execution Lifecycle — Retry and Dead-Letter Behavior):**
+- Must be updated to add `FeatureExtractionError` and `IncompleteProblemRepresentation` as named permanent failure conditions in the permanent failures table. For each condition, SPEC-005 FR-13 must define: the handling behavior (including dead-letter determination) and the evidence artifact the Worker persists. These are permanent failures because re-executing the same job with the same routing problem will produce the same failure. SPEC-010 owns the definitions of these failure types (what they mean and when they occur); SPEC-005 FR-13 owns the Worker's handling obligations and evidence artifact obligations for those types.
 
 ---
 
 # Open Questions
 
-### OQ-1: geographic_compactness — Depot Inclusion in Spatial Analysis
+### OQ-1: geographic_compactness — Depot Inclusion in Spatial Analysis — RESOLVED (ODR-6)
 
-**Question:** Should the depot location be included in the geographic_compactness computation alongside stops? The current definition (FR-3.5) uses only stop coordinates. Including the depot would shift the centroid and pairwise calculation toward the depot.
+**Decision:** The depot location is excluded from the `geographic_compactness` computation. The feature uses customer stop coordinates only. The formula in FR-3.5 is correct as defined; no formula change is required.
 
-**Why it matters:** For routing analysis, the depot's location relative to stops affects route structure. Including the depot would make `geographic_compactness` sensitive to whether stops are clustered near or far from the depot. Excluding the depot keeps the feature focused on stop-to-stop structure.
+**Rationale:** `geographic_compactness` is intended to measure workload spatial concentration — the degree to which customer stops are clustered relative to each other. Including the depot would conflate stop distribution with depot placement, changing what the feature measures without improving its utility as a workload characterization signal.
 
-**Classification:** Project Owner decision. Changing the formula after acceptance would be a breaking change requiring a `feature_schema_version` increment (FR-5).
+**Future consideration:** Depot-relative routing characteristics may be represented by future workload features if evidence demonstrates scheduling value. Any such addition would be a breaking change requiring a `feature_schema_version` increment (FR-5).
 
-**Blocking:** Not blocking Draft status. Should be resolved before Proposed status.
+**Incorporated in:** FR-3.5 (depot scope made explicit via ODR-6 reference; formula and inputs unchanged).
 
 ---
 
@@ -844,7 +851,7 @@ The following updates are required before SPEC-010 can be implemented. SPEC-010 
 - [x] Security considerations exist
 - [x] Performance considerations are identified
 - [x] Documentation updates are identified
-- [ ] OQ-1 resolved — depot inclusion in geographic_compactness (Project Owner decision; blocking for Proposed status)
+- [x] OQ-1 resolved — depot inclusion in geographic_compactness: depot excluded; customer stops only (ODR-6)
 - [ ] OQ-2 resolved — service_time_pressure_ratio scope (implementation planning; non-blocking)
 - [ ] OQ-3 resolved — feature_schema_version metric coverage (implementation planning; non-blocking)
 
@@ -854,7 +861,7 @@ The following updates are required before SPEC-010 can be implemented. SPEC-010 
 
 This feature is complete when:
 
-- OQ-1 (geographic_compactness depot inclusion) is resolved by the Project Owner and incorporated in FR-3.5 if applicable
+- OQ-1 (geographic_compactness depot inclusion) is resolved: depot excluded, customer stops only (ODR-6); no formula change required
 - All functional requirements (FR-1 through FR-11) are implemented and acceptance criteria pass
 - All six features produce correct values verified against the formulas in FR-3 on representative test problems
 - All unit tests defined in the Testability section pass
