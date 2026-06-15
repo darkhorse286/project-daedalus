@@ -233,7 +233,7 @@ Each individual solver specification must state the basis for its declared `late
 
 **3.4.3 Capability profile registration:**
 
-The mechanism by which capability profiles are registered at runtime (static configuration file, startup registration code, compile-time registration, or runtime service) is an open question in SPEC-003 OQ-2 and is not resolved by SPEC-011. Each individual solver specification must document its complete capability profile field values. The registration mechanism is SPEC-003's responsibility to resolve before any backend proceeds to implementation.
+The mechanism by which capability profiles are registered at runtime (static configuration file, startup registration code, compile-time registration, or runtime service) is an open question in SPEC-003 OQ-2 and is not resolved by SPEC-011. Each individual solver specification must document its complete capability profile field values. The registration mechanism is SPEC-003's responsibility to resolve before any backend capability profile is registered (Prerequisite 7 from FR-10.1).
 
 **Acceptance Criteria:**
 - Every individual solver specification contains a capability profile table with all nine fields from FR-4.1
@@ -562,7 +562,7 @@ SPEC-011 does not define and must not be extended to include:
 
 1. All MVP backends are implemented in C++ and accessed through the SolverContract C++ interface directly. No adapter transport layer is required for MVP in-process backends. The Python adapter backend (ADR-005) is deferred past MVP.
 
-2. The Scheduler capability profile registration mechanism (SPEC-003 OQ-2) will be resolved before any backend proceeds to implementation. SPEC-011 FR-4 documents the capability profile values that must be declared; how they enter the system is SPEC-003's responsibility.
+2. The Scheduler capability profile registration mechanism (SPEC-003 OQ-2) will be resolved before any backend capability profile is registered (Prerequisite 7 from FR-10.1). SPEC-011 FR-4 documents the capability profile values that must be declared; how they enter the system is SPEC-003's responsibility.
 
 3. No MVP backend requires proving infeasibility. The problem sizes and structure in scope for MVP are addressable by construction and stochastic heuristics.
 
@@ -693,7 +693,7 @@ Each specification is a child of SPEC-011 and must conform to FR-12. These speci
 
 **Context:** SPEC-003 OQ-2 is open. SPEC-011 FR-4 defines what must be declared in a capability profile; it does not define how that profile enters the Scheduler's registry. The registration mechanism determines how a new backend is "installed" and how the Scheduler discovers available backends at startup.
 
-**Blocking:** Does not block SPEC-011 acceptance. Blocks all backend implementations from proceeding until SPEC-003 OQ-2 is resolved.
+**Blocking:** Does not block SPEC-011 acceptance. Blocks all backend capability profile registrations until SPEC-003 OQ-2 is resolved. Does not block implementation of the SolverContract (Prerequisite 6 from FR-10.1).
 
 ---
 
