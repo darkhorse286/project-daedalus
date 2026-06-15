@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-06-07
 
@@ -33,7 +33,7 @@ All solver backends in Project DAEDALUS are accessed through a normalized solver
 The contract principles are:
 
 1. A solver accepts a routing problem and an execution configuration as inputs.
-2. A solver returns a result that includes a route plan, solution quality metrics, execution duration, and execution cost.
+2. A solver returns a route plan, execution duration, and execution statistics. Quality metrics are computed by Core from the normalized route plan output and are not returned directly by solver backends.
 3. A solver produces evidence of its execution suitable for persistence to the evidence log.
 4. No solver backend bypasses the contract. The scheduler operates exclusively on normalized candidates.
 5. The scheduler evaluates eligibility, scores candidates, and selects a backend using only information available through the contract. It does not inspect backend internals.
