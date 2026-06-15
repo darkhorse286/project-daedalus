@@ -4,7 +4,7 @@
 
 **Feature ID:** SPEC-011
 **Title:** Backend Solver Specifications
-**Status:** Draft
+**Status:** Accepted
 **Author:** Darkhorse286
 **Created:** 2026-06-14
 **Last Modified:** 2026-06-14
