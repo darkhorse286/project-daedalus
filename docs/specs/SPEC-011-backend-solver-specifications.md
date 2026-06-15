@@ -290,7 +290,7 @@ ADR-010 governs deterministic randomness policy for all Project DAEDALUS compone
 
 - All `quantum_inspired_stochastic` backends must use PCG64 as their PRNG for reproducibility-critical paths (ADR-010 Decision 1).
 - No other PRNG algorithm is permitted in reproducibility-critical paths for MVP `quantum_inspired_stochastic` backends.
-- Each individual stochastic solver specification must document its **PCG64 stream constant** (increment). The stream constant is frozen once the individual solver specification is Accepted; changing it is a specification-level breaking change requiring a `specification_version` increment and an explicit change record in the affected specification.
+- Each individual stochastic solver specification must document its **PCG64 stream constant** (increment). The stream constant is frozen once the individual solver specification is Accepted. Changing a stream constant requires the full ADR-010 Decision 5 breaking change procedure, which includes updating ADR-010 with an explicit change record documenting the previous and replacement value. A `specification_version` increment is one component of that procedure, not a substitute for it.
 - Each individual stochastic solver specification must document its **PRNG draw ordering** — the fixed sequence in which PCG64 draws are consumed during a solver execution (ADR-010 Limitations).
 
 **3.6.3 Distribution Sampling:**
@@ -476,7 +476,7 @@ A backend may be removed from the Scheduler's eligible pool by marking `is_provi
 **Acceptance Criteria:**
 - No backend proceeds to implementation without an Accepted individual solver specification (Prerequisite 1 from FR-10.1)
 - Every Accepted individual solver specification satisfies Prerequisites 2–5 from FR-10.1
-- SPEC-003 OQ-2 is resolved before any backend implementation is authorized
+- SPEC-003 OQ-2 is resolved before any backend capability profile is registered (Prerequisite 7 from FR-10.1)
 
 ---
 
@@ -622,7 +622,7 @@ SPEC-011 is a framework specification; its testability requirements are expresse
 | Determinism (deterministic backends) | Given two SolverRequests with identical routing problem, the backend returns structurally identical SolverResponses regardless of `execution_seed` value. |
 | Outcome compliance | The backend never returns `Infeasible` (for heuristic backends). The backend never returns a route plan under `Failed` or `Infeasible`. |
 | RoutePlan structural validity (`Succeeded`) | All stops assigned exactly once. Route count ≤ vehicle_count. Capacity per route ≤ capacity_per_vehicle. Depot not present. |
-| Timeout behavior | The backend returns `Timeout` before `execution_timeout_ms` is significantly exceeded. Partial progress is returned when available. |
+| Timeout behavior | The backend returns `Timeout` before `execution_timeout_ms` is significantly exceeded. If a complete RoutePlan satisfying all SPEC-004 FR-5 structural validity requirements was found before the deadline, it is present in the response. If no complete solution was found before the deadline, route plan is absent. |
 | Extension metadata | All documented `extension_metadata` keys are present in the SolverResponse when expected conditions are met. |
 | Capability profile accuracy | Empirical execution duration on representative problems falls within the declared `latency_profile` bounds. |
 
@@ -658,6 +658,9 @@ Framework-level performance obligations:
 
 **SPEC-003 FR-4 (Scheduler — Backend Capability Profile):**
 - SPEC-003 FR-4 defines the Backend Capability Profile schema consumed by the Scheduler. SPEC-011 FR-4 defines the obligation on solver specifications to declare complete and accurate capability profiles. No structural change to SPEC-003 FR-4 is required.
+
+**ADR-008 (Solver Contract and Backend Neutrality):**
+- ADR-008 must be advanced to Accepted status before SPEC-011 advances to Accepted. SPEC-004 (Accepted) identified ADR-008 advancement as a follow-on action following SPEC-004 acceptance (see SPEC-004 Documentation Updates Required). This is a governance prerequisite — ADR-008's Backend Neutrality principle is architecturally operative and is the authoritative basis for FR-1.2, FR-12, and the Constraints section of this specification. The required action is a status change to ADR-008; no content change to SPEC-011 is required.
 
 **Individual backend solver specifications (to be created per FR-11, FR-12):**
 - `docs/specs/SPEC-012-nearest-neighbor-solver.md` — `nearest_neighbor` backend
@@ -752,7 +755,7 @@ Each specification is a child of SPEC-011 and must conform to FR-12. These speci
 ## Definition of Done
 
 - SPEC-011 is Accepted
-- SPEC-003 OQ-2 (capability profile registration mechanism) is resolved before any backend implementation is authorized
+- SPEC-003 OQ-2 (capability profile registration mechanism) is resolved before any backend capability profile is registered (Prerequisite 7 from FR-10.1)
 - Three individual backend solver specifications conforming to FR-12 are written and Accepted:
   - `nearest_neighbor` (`classical_deterministic`)
   - `greedy_insertion` (`classical_deterministic`)
