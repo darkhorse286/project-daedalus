@@ -9,7 +9,7 @@
 **Created:** 2026-06-14
 **Last Modified:** 2026-06-14
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, ADR-008, ADR-010
-**Blocks:** Individual backend solver specifications (SPEC-012, SPEC-013, SPEC-014)
+**Blocks:** Individual backend solver specifications (SPEC-013, SPEC-014, SPEC-015)
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-010, ADR-011
 
 ---
@@ -33,7 +33,7 @@ Without SPEC-011:
 - No single document would define what "adding a new backend" requires. The prerequisites are currently scattered across SPEC-003 FR-4, SPEC-004 FR-1, SPEC-004 FR-11, and ADR-010.
 - The seed usage policy documentation obligation in SPEC-004 FR-1 would have no unified home, and individual solver specifications would duplicate or inconsistently represent ADR-010 requirements.
 
-SPEC-011 is the framework specification. It defines what every backend must be, declare, and satisfy. Individual backend specifications (SPEC-012, SPEC-013, SPEC-014) conform to this framework. SPEC-011 does not define any backend's algorithm.
+SPEC-011 is the framework specification. It defines what every backend must be, declare, and satisfy. Individual backend specifications (SPEC-013, SPEC-014, SPEC-015) conform to this framework. SPEC-011 does not define any backend's algorithm.
 
 ---
 
@@ -663,9 +663,9 @@ Framework-level performance obligations:
 - ADR-008 must be advanced to Accepted status before SPEC-011 advances to Accepted. SPEC-004 (Accepted) identified ADR-008 advancement as a follow-on action following SPEC-004 acceptance (see SPEC-004 Documentation Updates Required). This is a governance prerequisite — ADR-008's Backend Neutrality principle is architecturally operative and is the authoritative basis for FR-1.2, FR-12, and the Constraints section of this specification. The required action is a status change to ADR-008; no content change to SPEC-011 is required.
 
 **Individual backend solver specifications (to be created per FR-11, FR-12):**
-- `docs/specs/SPEC-012-nearest-neighbor-solver.md` — `nearest_neighbor` backend
-- `docs/specs/SPEC-013-greedy-insertion-solver.md` — `greedy_insertion` backend
-- `docs/specs/SPEC-014-qubo-simulated-annealing-solver.md` — `qubo_simulated_annealing` backend
+- `docs/specs/SPEC-013-nearest-neighbor-solver.md` — `nearest_neighbor` backend
+- `docs/specs/SPEC-014-greedy-insertion-solver.md` — `greedy_insertion` backend
+- `docs/specs/SPEC-015-qubo-simulated-annealing-solver.md` — `qubo_simulated_annealing` backend
 
 Each specification is a child of SPEC-011 and must conform to FR-12. These specifications must be Accepted before implementation of the corresponding backend begins (FR-10).
 
@@ -705,7 +705,7 @@ Each specification is a child of SPEC-011 and must conform to FR-12. These speci
 
 **Context:** FR-8.1 states that a backend should self-terminate before or at the `execution_timeout_ms` deadline (consistent with SPEC-004 FR-10, which is advisory). The Worker enforces an external timeout as the authoritative backstop (SPEC-005). For construction heuristics (`nearest_neighbor`, `greedy_insertion`), the algorithm processes stops sequentially or in a priority structure. If a complete solution is found before the deadline, it may be included in the `Timeout` response (satisfying SPEC-004 FR-5 structural validity). If no complete solution was found when the deadline arrives, the route plan is absent. The specific self-termination approach — whether to poll elapsed time, whether to attempt early completion when time is short, or to rely entirely on the Worker backstop — is an implementation planning concern for each backend specification.
 
-**Blocking:** Does not block SPEC-011 acceptance. Each classical deterministic backend specification (SPEC-012, SPEC-013) should address its specific self-termination approach.
+**Blocking:** Does not block SPEC-011 acceptance. Each classical deterministic backend specification (SPEC-013, SPEC-014) should address its specific self-termination approach.
 
 ---
 
