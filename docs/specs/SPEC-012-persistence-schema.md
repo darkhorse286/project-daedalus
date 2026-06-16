@@ -521,7 +521,7 @@ SPEC-006 FR-6.2 defines `execution_statistics` as a single field whose value is 
 
 Rationale:
 - `ExecutionStatistics` has exactly two fields (SPEC-004 FR-6); a nested JSONB wrapper adds no structural benefit over two scalar columns.
-- `execution_duration_ms` is referenced directly by observability queries (FR-17.4) and benchmarking comparisons (SPEC-006 FR-14.3); scalar columns avoid JSONB path operators on a hot analytical field.
+- `execution_duration_ms` is referenced directly by observability queries (FR-17.4) and benchmarking comparisons across backends (SPEC-004 Observability Requirements); scalar columns avoid JSONB path operators on a hot analytical field.
 - Flattening is consistent with how the rest of the reproducibility tuple (`problem_id`, `execution_seed`, `backend_id`, `contract_version`) is represented as individual scalar columns rather than a nested structure.
 
 This is a SPEC-012 physical realization decision under the FR-1 authority boundary: SPEC-006 FR-6.2 and SPEC-004 FR-6 remain authoritative for the field semantics and the fact that `solution_count` is optional; SPEC-012 owns the decomposition into columns.
@@ -1339,32 +1339,32 @@ No specific latency targets are defined for persistence operations at this stage
 
 # Acceptance Checklist
 
-- [ ] Problem is clearly defined
-- [ ] Domain concept is defined
-- [ ] Persistence authority boundary between SPEC-006 and SPEC-012 is explicit (FR-1)
-- [ ] Backend capability profile persistence determination is made and justified (FR-2)
-- [ ] Workload feature snapshot storage determination is made and justified (FR-3)
-- [ ] `routing_problems` table is fully defined with columns, types, constraints, and normalization rationale (FR-4)
-- [ ] `scheduler_configs` table is fully defined (FR-5)
-- [ ] `jobs` table is fully defined including status transitions, terminal state CHECK, and `cancellation_requested` write ownership (FR-6)
-- [ ] `decision_records` table is fully defined including two-phase write contract and `workload_features_snapshot` JSONB schema (FR-7)
-- [ ] `solver_run_records` table is fully defined including reproducibility tuple, uint64 convention, and `execution_seed` security obligation (FR-8)
-- [ ] `quality_evaluation_records` table is fully defined including intentional `actual_outcome` duplication and `violated_stop_ids` storage boundary (FR-9)
-- [ ] `failure_records` table is fully defined including distinction from solver-level failure and rationale for no FK to `decision_records` (FR-10)
-- [ ] `report_metadata_records` table is fully defined including dual-PK rationale, `file_path` safety, and upsert-on-redelivery behavior (FR-11)
-- [ ] Upsert semantics and idempotency are defined for all Worker-written tables (FR-12)
-- [ ] Record lifecycle and mutability rules are defined per table (FR-13)
-- [ ] Schema initialization requirements are defined including table creation order (FR-14)
-- [ ] Read/write ownership map is defined per table and per component (FR-15)
-- [ ] Retention policy and deletion order are defined with no CASCADE DELETE (FR-16)
-- [ ] Persistence observability requirements are defined (FR-17)
-- [ ] Data integrity constraints are defined (FR-18)
-- [ ] Non-requirements are documented
-- [ ] Assumptions are explicit
-- [ ] Failure modes are defined
-- [ ] Security considerations address `execution_seed`, `violated_stop_ids`, raw problem data, `file_path`, and `extension_metadata`
-- [ ] Performance considerations are documented
-- [ ] Documentation updates are identified
+- [x] Problem is clearly defined
+- [x] Domain concept is defined
+- [x] Persistence authority boundary between SPEC-006 and SPEC-012 is explicit (FR-1)
+- [x] Backend capability profile persistence determination is made and justified (FR-2)
+- [x] Workload feature snapshot storage determination is made and justified (FR-3)
+- [x] `routing_problems` table is fully defined with columns, types, constraints, and normalization rationale (FR-4)
+- [x] `scheduler_configs` table is fully defined (FR-5)
+- [x] `jobs` table is fully defined including status transitions, terminal state CHECK, and `cancellation_requested` write ownership (FR-6)
+- [x] `decision_records` table is fully defined including two-phase write contract and `workload_features_snapshot` JSONB schema (FR-7)
+- [x] `solver_run_records` table is fully defined including reproducibility tuple, uint64 convention, and `execution_seed` security obligation (FR-8)
+- [x] `quality_evaluation_records` table is fully defined including intentional `actual_outcome` duplication and `violated_stop_ids` storage boundary (FR-9)
+- [x] `failure_records` table is fully defined including distinction from solver-level failure and rationale for no FK to `decision_records` (FR-10)
+- [x] `report_metadata_records` table is fully defined including dual-PK rationale, `file_path` safety, and upsert-on-redelivery behavior (FR-11)
+- [x] Upsert semantics and idempotency are defined for all Worker-written tables (FR-12)
+- [x] Record lifecycle and mutability rules are defined per table (FR-13)
+- [x] Schema initialization requirements are defined including table creation order (FR-14)
+- [x] Read/write ownership map is defined per table and per component (FR-15)
+- [x] Retention policy and deletion order are defined with no CASCADE DELETE (FR-16)
+- [x] Persistence observability requirements are defined (FR-17)
+- [x] Data integrity constraints are defined (FR-18)
+- [x] Non-requirements are documented
+- [x] Assumptions are explicit
+- [x] Failure modes are defined
+- [x] Security considerations address `execution_seed`, `violated_stop_ids`, raw problem data, `file_path`, and `extension_metadata`
+- [x] Performance considerations are documented
+- [x] Documentation updates are identified
 - [ ] OQ-1 (default config UUID stability) classified as Implementation Planning Decision, blocking for implementation
 - [ ] OQ-2 (schema migration tooling) classified as ADR Candidate, not blocking for Draft
 - [ ] OQ-3 (Phase 2 incomplete write detection) classified as Implementation Planning Decision, not blocking
