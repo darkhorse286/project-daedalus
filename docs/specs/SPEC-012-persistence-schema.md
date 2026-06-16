@@ -1,4 +1,4 @@
-# Feature Specification
+# SPEC-012 Persistence Schema
 
 ## Metadata
 
@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-15
 
-**Last Updated:** 2026-06-15
+**Last Updated:** 2026-06-16
 
 **Supersedes:** None
 
@@ -147,6 +147,8 @@ SPEC-010 FR-10 states that workload features are not persisted as standalone evi
 
 **Determination: Workload feature snapshots are embedded in `decision_records` as a JSONB column. No standalone feature evidence table exists.**
 
+**Current SPEC-003 FR-10 dependency status:** SPEC-003 FR-10 (Accepted, current text) describes `workload_features_snapshot` as a "snapshot of all four workload features at invocation time." SPEC-010 FR-9 requires a future SPEC-003 FR-10 revision to enumerate all six SPEC-010 features plus `feature_schema_version`. That SPEC-003 revision has not yet occurred — it is tracked as a pending action item in SPEC-010 Documentation Updates Required (and restated in SPEC-012 Documentation Updates Required below). The JSONB structure defined below in this FR-3 is SPEC-012's anticipated physical realization of the six-feature-plus-version snapshot; it is not yet a realization of SPEC-003 FR-10's current accepted text, which still names four features. SPEC-012 does not present this as an already-completed alignment with SPEC-003; it is realizing the schema ahead of the pending SPEC-003 update, consistent with SPEC-010 FR-9's resolved direction.
+
 Rationale (from SPEC-010 FR-10):
 - Feature values are deterministically recoverable by re-running feature extraction on the routing problem identified by `problem_id`
 - The `workload_features_snapshot` in the decision record already preserves feature values at decision time for auditability and scheduler effectiveness analysis
@@ -169,6 +171,7 @@ Rationale (from SPEC-010 FR-10):
 - `decision_records.workload_features_snapshot` is `jsonb NOT NULL`
 - The JSONB object includes all six SPEC-010 features and `feature_schema_version`
 - Feature values in the snapshot are queryable via PostgreSQL JSONB operators without schema migration
+- SPEC-012 does not represent this six-feature-plus-version structure as an already-completed alignment with SPEC-003 FR-10's current accepted text; the pending SPEC-003 revision (SPEC-010 FR-9) is identified as an open upstream dependency
 
 ---
 
@@ -203,13 +206,15 @@ Stores the persisted representation of every routing problem submitted to the sy
 
 PostgreSQL has no native unsigned 64-bit integer type. `seed` (SPEC-001 FR-6) and `execution_seed` (SPEC-006 FR-6.2) are both `uint64` values. Both are stored as `bigint` (int64) using two's complement bit-identical storage. This convention applies to every `uint64` value in the schema.
 
+**Architectural requirement:** The application layer at every read and write boundary is responsible for converting between `uint64` and the `bigint` two's complement representation. This conversion obligation applies uniformly across every component and language that reads or writes a `uint64`-backed column (the Worker and the API, regardless of implementation language). No PostgreSQL-side transformation is performed; the bit pattern stored is identical to the `uint64` bit pattern.
+
 | Property | Behavior |
 |---|---|
 | Values 0 through 2^63-1 | Stored and retrieved without transformation |
 | Values 2^63 through 2^64-1 | Stored as negative `bigint`; bit pattern is identical; application layer must cast to `uint64` on read |
 | SQL ordering and comparison | Range queries on `seed` or `execution_seed` are not meaningful for values crossing the int64 boundary; these columns are identity values, not range-filterable |
-| Npgsql (.NET) | `NpgsqlDbType.Bigint` with `ulong` mapping handles conversion correctly |
-| libpqxx (C++) | Application must cast `uint64` to `int64` on write and `int64` to `uint64` on read |
+
+**Implementation Planning Note (non-normative):** The conversion obligation above is an architectural requirement; the specific client library mechanism used to satisfy it is an implementation planning concern, not a SPEC-012 requirement. At the time of writing, the anticipated mechanisms are: for the C# control plane, Npgsql's `NpgsqlDbType.Bigint` with `ulong` mapping; for the C++ Worker, an explicit `uint64`-to-`int64` cast on write and `int64`-to-`uint64` cast on read via libpqxx. These are illustrative, not prescriptive — implementers may use any driver mechanism that satisfies the bit-identical conversion requirement above. This note must not be read as weakening that requirement.
 
 **FR-4.4: `stops` as `jsonb` (normalization decision):**
 
@@ -311,7 +316,7 @@ The central job lifecycle record. Created by the API at submission time. Updated
 | `scheduler_config_id` | `uuid` | NOT NULL | FK → `scheduler_configs(scheduler_config_id)` | SPEC-008 FR-4 |
 | `status` | `text` | NOT NULL | CHECK (see FR-6.2) | SPEC-005; SPEC-006 FR-4.2 |
 | `cancellation_requested` | `boolean` | NOT NULL | DEFAULT `false` | SPEC-005 FR-12; SPEC-008 FR-11 |
-| `created_at` | `timestamptz` | NOT NULL | | Set by API; immutable after creation (SPEC-006 FR-4.2) |
+| `created_at` | `timestamptz` | NOT NULL | | Set by API; immutable after creation (SPEC-006 FR-4.3) |
 | `updated_at` | `timestamptz` | NOT NULL | | Set by API at creation; updated by Worker on each status transition |
 | `completed_at` | `timestamptz` | NULL | | Set by Worker when transitioning to `Completed`; null otherwise |
 | `failed_at` | `timestamptz` | NULL | | Set by Worker when transitioning to `Failed`; null otherwise |
@@ -461,7 +466,7 @@ Stores the evidence record for one solver execution attempt. Captures the reprod
 | `route_plan` | `jsonb` | NULL | | SPEC-004 FR-5; null when no solution produced |
 | `failure_detail` | `jsonb` | NULL | | SPEC-004 FR-8; null when no solver failure detail |
 | `extension_metadata` | `jsonb` | NOT NULL | DEFAULT `'{}'::jsonb` | SPEC-004 FR-13 |
-| `created_at` | `timestamptz` | NOT NULL | | Written by Worker |
+| `persisted_at` | `timestamptz` | NOT NULL | | SPEC-006 FR-6.2; written by Worker; see FR-8.6 |
 
 **Primary key:** `solver_run_id`
 
@@ -485,7 +490,11 @@ CHECK (solver_outcome IN (
 ))
 ```
 
-`ContractViolation` is the Worker's classification for SolverResponses that fail post-receipt structural validation (SPEC-005 FR-11, SPEC-008 FR-9).
+**Attribution:** This column stores values from two distinct authoritative sources, not one:
+- `Succeeded`, `Infeasible`, `Timeout`, `Cancelled`, `Failed` are the `SolverOutcome` enumeration values defined by SPEC-004 FR-4. These are backend-reported (Solver-level) classifications: the solver backend itself determines and reports which of these five values applies.
+- `ContractViolation` is not a SPEC-004 `SolverOutcome` value and is never reported by a solver backend. It is the Worker's own (Worker-level) classification, assigned when a SolverResponse fails the Worker's post-receipt structural validation (SPEC-005 FR-11, SPEC-008 FR-9), overriding whatever outcome the backend reported.
+
+The column is realized as a single `text` field for query simplicity, but a reader must not assume all six values share the same authoritative source. Five are Solver-authoritative (SPEC-004); one is Worker-authoritative (SPEC-005). This specification does not change the SPEC-004 `SolverOutcome` enumeration or the SPEC-005 `ContractViolation` classification; it only clarifies which source each stored value traces back to.
 
 **FR-8.3: `execution_seed` security obligation:**
 
@@ -506,6 +515,19 @@ Access to this column is restricted to the Worker's evidence persistence path an
 
 `failure_detail` stores a `SolverFailureDetail` per SPEC-004 FR-8, with `failure_code` and `failure_message`. Null when `solver_outcome = Succeeded`. May be present under `Failed`, `Timeout`, and `Cancelled` for diagnostic purposes.
 
+**FR-8.6: `execution_statistics` realization decision:**
+
+SPEC-006 FR-6.2 defines `execution_statistics` as a single field whose value is the `ExecutionStatistics` object defined by SPEC-004 FR-6 (`execution_duration_ms`, `solution_count`). SPEC-012 does not realize `execution_statistics` as a nested JSONB column. Instead it decomposes the object into two individual scalar columns on `solver_run_records`: `execution_duration_ms` (`bigint`, nullable) and `solution_count` (`integer`, nullable).
+
+Rationale:
+- `ExecutionStatistics` has exactly two fields (SPEC-004 FR-6); a nested JSONB wrapper adds no structural benefit over two scalar columns.
+- `execution_duration_ms` is referenced directly by observability queries (FR-17.4) and benchmarking comparisons (SPEC-006 FR-14.3); scalar columns avoid JSONB path operators on a hot analytical field.
+- Flattening is consistent with how the rest of the reproducibility tuple (`problem_id`, `execution_seed`, `backend_id`, `contract_version`) is represented as individual scalar columns rather than a nested structure.
+
+This is a SPEC-012 physical realization decision under the FR-1 authority boundary: SPEC-006 FR-6.2 and SPEC-004 FR-6 remain authoritative for the field semantics and the fact that `solution_count` is optional; SPEC-012 owns the decomposition into columns.
+
+**`persisted_at` naming reconciliation:** SPEC-006 FR-6.2 names the Worker-written persistence timestamp `persisted_at`. An earlier draft of this table used `created_at` for the same column. Per FR-1 ("A field named differently in SPEC-006 and SPEC-012 is a defect requiring correction"), the column is named `persisted_at` to match SPEC-006 FR-6.2 exactly; this is not treated as an independent realization decision.
+
 **Immutability:** `solver_run_records` rows are written via upsert and are immutable after the job reaches terminal state.
 
 **Acceptance Criteria:**
@@ -514,6 +536,9 @@ Access to this column is restricted to the Worker's evidence persistence path an
 - `solver_outcome` is constrained to the six values in FR-8.2
 - `route_plan` and `failure_detail` are nullable JSONB columns
 - The full reproducibility tuple `(problem_id, execution_seed, backend_id, contract_version)` is represented by columns in this table
+- `execution_duration_ms` and `solution_count` are realized as individual scalar columns, not a nested `execution_statistics` JSONB object (FR-8.6)
+- The persistence timestamp column is named `persisted_at`, matching SPEC-006 FR-6.2
+- `solver_outcome = 'ContractViolation'` is documented as a Worker-level (SPEC-005) classification distinct from the five Solver-level (SPEC-004) `SolverOutcome` values sharing the same column (FR-8.2)
 
 ---
 
@@ -566,6 +591,15 @@ CHECK (evaluation_status IN ('Completed', 'Skipped', 'Failed'))
 
 When non-null, `quality_metrics` contains a `QualityMetrics` object per SPEC-007 FR-6. This includes the `violated_stop_ids` field (a list of stop ID integers). `violated_stop_ids` is stored in `quality_metrics` within PostgreSQL. It must not appear in log events, API responses, or report content (SPEC-007 Security Considerations). Storage in the database is authorized; application-layer output is not.
 
+**FR-9.5: `decision_id` and `route_simulation_performed` realization decisions:**
+
+Two columns in `quality_evaluation_records` are not named in SPEC-006 FR-7.3's minimum field table and are documented here as SPEC-012 physical realization decisions, per FR-1.
+
+- **`decision_id`** (`uuid NOT NULL`, FK → `decision_records(decision_id)`): SPEC-006 FR-7.3 does not name a `decision_id` field on the quality evaluation record. SPEC-007 FR-3 establishes that Core quality evaluation is invoked with the `scheduler_decision` (the decision record) as an input, and SPEC-007 FR-8 `RegretAnalysis` is computed from that decision record's predicted fields. SPEC-012 adds `decision_id` as an explicit foreign key so that the correlation between a quality evaluation record and the decision record it was evaluated against — already implied by SPEC-007's invocation contract — is enforceable and joinable without relying on a transitive join through `jobs`. SPEC-007 remains authoritative for why the decision record is an evaluation input; SPEC-012 owns the decision to expose that linkage as a direct FK column.
+- **`route_simulation_performed`** (`boolean NOT NULL`): SPEC-007 FR-12 defines `route_simulation_performed` as a field of `EvaluationMetadata`, which SPEC-006 FR-7.3 persists as part of `evaluation_metadata`. SPEC-012 promotes this single field out of the `evaluation_metadata` JSONB object into a standalone top-level column, in addition to its presence within `evaluation_metadata`. Rationale: `route_simulation_performed` is needed to directly answer observability questions (e.g., what fraction of evaluations actually ran simulation, FR-17.4) without a JSONB path extraction on every query. SPEC-007 FR-12 remains authoritative for the field's semantics and origin within `EvaluationMetadata`; SPEC-012 owns the decision to duplicate it as a standalone column for queryability.
+
+Both additions preserve the SPEC-006/SPEC-007 ownership boundary: neither column changes the meaning of any SPEC-006- or SPEC-007-defined field; both are additive physical realizations that make existing semantic relationships directly queryable.
+
 **Immutability:** `quality_evaluation_records` rows are written via upsert and are immutable after the job reaches terminal state.
 
 **Acceptance Criteria:**
@@ -574,6 +608,7 @@ When non-null, `quality_metrics` contains a `QualityMetrics` object per SPEC-007
 - `quality_metrics` and `hindsight_quality` are nullable; null when simulation was not performed
 - `regret_analysis` and `evaluation_metadata` are `jsonb NOT NULL`
 - `evaluation_schema_version` is present and `>= 1`
+- `decision_id` and `route_simulation_performed` are documented as SPEC-012 realization decisions with traceability to SPEC-007 (FR-9.5)
 
 ---
 
@@ -617,6 +652,18 @@ CHECK (failure_stage IN ('Load', 'Schedule', 'Invocation'))
 | `Schedule` | NoEligibleSolver; Scheduler configuration error | Yes (with terminal decision_status) |
 | `Invocation` | Unrecoverable pre-solver failure not covered by Load or Schedule stages | Depends on failure point |
 
+**FR-10.2a: Mapping to SPEC-005 Worker-internal lifecycle stages:**
+
+`failure_stage` values (`Load`, `Schedule`, `Invocation`) are the classification vocabulary defined by SPEC-006 FR-8.2/FR-8.3; SPEC-012 realizes them as the `failure_stage` column. SPEC-006's three-value vocabulary does not use the same names as SPEC-005 FR-2's nine named Worker-internal execution stages (Loading, Scheduling, Persisting-Decision, Executing, Validating-Response, Evaluating, Persisting-Results, Reporting, Completing). The table below maps each `failure_stage` value to the specific SPEC-005 stage(s) and FR-13 permanent-failure conditions it covers, so that a reviewer can verify any persisted `failure_stage` value against the authoritative SPEC-005 Worker lifecycle model without interpretation.
+
+| `failure_stage` value | SPEC-005 Worker-internal stage(s) (FR-2) | SPEC-005 FR-13 permanent-failure conditions covered |
+|---|---|---|
+| `Load` | Loading (FR-4); also covers malformed-message rejection (FR-3), which precedes Loading | Routing problem record not found; scheduler configuration record not found; corrupt routing problem record; malformed job message |
+| `Schedule` | Scheduling (FR-5) | Core validation rejection (ADR-009); `NoEligibleSolver`; `InvalidConfiguration` |
+| `Invocation` | Between Persisting-Decision (FR-6) and Executing (FR-9) — i.e., the pre-dispatch contract version check (FR-8), which has no dedicated named stage in SPEC-005 FR-2 | Pre-dispatch contract version mismatch (FR-8) |
+
+This mapping is additive: it does not change the `failure_stage` vocabulary defined by SPEC-006, and it does not redefine SPEC-005's named execution stages. It only establishes the correspondence between the two vocabularies for verification purposes.
+
 **FR-10.3: `Failed` vs `Completed` with failed solver outcome:**
 
 | Terminal state | Where failure is captured | Table |
@@ -632,6 +679,7 @@ This distinction preserves the SPEC-005 lifecycle invariant: `Completed` means t
 - `UNIQUE (job_id)` ensures exactly one failure record per Failed job
 - No `failure_records` row exists for a job whose `jobs.status = Completed`
 - `failure_stage` is constrained to the three values in FR-10.2
+- Every `failure_stage` value is traceable to a specific SPEC-005 Worker-internal lifecycle stage without interpretation, per the mapping in FR-10.2a
 - No FK to `decision_records` is enforced
 
 ---
@@ -845,7 +893,8 @@ Rows must be deleted in reverse FK dependency order:
 4. `solver_run_records` (FKs: `jobs`, `decision_records`, `routing_problems`)
 5. `decision_records` (FKs: `jobs`, `routing_problems`)
 6. `jobs` (FKs: `routing_problems`, `scheduler_configs`)
-7. `routing_problems` (no FK dependencies; safe to delete after all referencing rows are removed)
+
+This deletion order satisfies retention-compliant deletion for the six evidence tables described above. It terminates at `jobs`. `routing_problems` is excluded from this order (see FR-16.4).
 
 **FR-16.2: `scheduler_configs` retention:**
 
@@ -855,10 +904,21 @@ Rows must be deleted in reverse FK dependency order:
 
 FK constraints must not use CASCADE DELETE. Retention deletion must be explicit and ordered. CASCADE DELETE would allow a single DELETE on `jobs` to silently remove all associated evidence records, which is incompatible with the deliberate, auditable deletion model required for a 90-day evidence store.
 
+**FR-16.4: `routing_problems` is excluded from evidence-retention lifecycle processing:**
+
+`routing_problems` rows are not deleted as part of the FR-16.1 retention-compliant deletion order, and the SPEC-006 ODR-3 90-day minimum retention policy does not apply to them.
+
+SPEC-006 FR-15.4 is explicit that "the routing problem referenced by `problem_id` has independent retention semantics defined by SPEC-001. Evidence Log retention does not imply routing problem retention." SPEC-006 FR-15.5 further notes that the routing problem persists independently of evidence record deletion. The Evidence Log (SPEC-006) is not the retention authority for `routing_problems`; SPEC-012, as the physical schema owner, does not assign itself that authority either.
+
+SPEC-001 Non-Requirements is the authoritative source for routing problem retention: "No routing problem deletion or archiving. A routing problem is retained indefinitely after submission. No deletion, expiry, or archiving mechanism exists in the MVP." There is no gap to resolve: SPEC-001 already defines the answer (indefinite retention, no deletion mechanism at MVP scope). SPEC-012 conforms to this by omitting `routing_problems` from the evidence-retention deletion order in FR-16.1.
+
+Because `routing_problems` rows are never deleted at MVP scope, `jobs.problem_id` and `decision_records.problem_id` foreign keys to `routing_problems` never face a retention-driven deletion ordering concern. If a future SPEC-001 revision introduces routing problem deletion or archiving, SPEC-012 FR-16.1 must be revised to incorporate `routing_problems` into the deletion order at that time.
+
 **Acceptance Criteria:**
 - FK constraints do not use CASCADE DELETE
 - Retention-compliant deletion is executable in the order defined in FR-16.1 without FK violations
 - `scheduler_configs` is excluded from evidence retention lifecycle
+- `routing_problems` is excluded from the FR-16.1 evidence-retention deletion order; its retention is governed exclusively by SPEC-001 (indefinite retention, no deletion mechanism at MVP scope)
 
 ---
 
@@ -957,6 +1017,7 @@ No application component constructs `file_path` values from caller-supplied inpu
 - SPEC-012 does not define the RabbitMQ queue message format (owned by SPEC-008 FR-5 and ADR-003)
 - SPEC-012 does not define the report volume directory structure beyond noting that `file_path` is the authoritative reference (SPEC-009 FR-7 owns that definition)
 - SPEC-012 does not define evidence record semantics; those remain owned by SPEC-006
+- SPEC-012 does not define retention or deletion semantics for `routing_problems`; that authority belongs exclusively to SPEC-001 (FR-16.4)
 - SPEC-012 does not resolve SPEC-003 OQ-2 (capability profile registration mechanism)
 
 ---
@@ -972,6 +1033,7 @@ No application component constructs `file_path` values from caller-supplied inpu
 7. SPEC-003 OQ-2 (capability profile registration mechanism) will be resolved before any backend is registered and before Worker implementation begins. SPEC-012 FR-2's determination (no PostgreSQL table for capability profiles) does not depend on which mechanism SPEC-003 OQ-2 selects.
 8. `stops` JSONB in `routing_problems` is not queried at the individual stop level at MVP scope. Future analytics requirements may require normalization into a `routing_problem_stops` table; that is post-MVP work.
 9. `problem_size_class` thresholds (SPEC-001 FR-7: Small = 1-25 stops, Medium = 26-75, Large = 76+) are stable within MVP scope. Changes to these thresholds do not require a SPEC-012 schema change; they affect feature computation (SPEC-010) and JSONB values stored in `workload_features_snapshot`.
+10. `routing_problems` rows are retained indefinitely with no deletion or archiving mechanism at MVP scope, per SPEC-001 Non-Requirements. SPEC-012 FR-16.1's evidence-retention deletion order does not include `routing_problems` on this basis.
 
 ---
 
@@ -982,7 +1044,7 @@ No application component constructs `file_path` values from caller-supplied inpu
 3. `execution_seed` must be stored only in `solver_run_records` and must never appear in log events, API responses, report content, or trace span attributes (SPEC-005 Security Considerations; SPEC-006 FR-6.4; ADR-010).
 4. All Worker-written tables must support `job_id`-keyed upsert for idempotency under at-least-once delivery (SPEC-006 FR-2.2, SPEC-005 FR-14).
 5. FK constraints must not use CASCADE DELETE; deletion must be explicit and ordered per FR-16.1.
-6. `uint64` values (`seed`, `execution_seed`) are stored as `bigint` using two's complement bit-identical representation per FR-4.3. This convention must be applied consistently across all driver implementations (Npgsql and libpqxx).
+6. `uint64` values (`seed`, `execution_seed`) are stored as `bigint` using two's complement bit-identical representation per FR-4.3. This convention must be applied consistently by every component performing the conversion (the API and the Worker), regardless of which database client library each uses. Specific driver mechanisms are an implementation planning concern (FR-4.3 Implementation Planning Note).
 7. `stops` JSONB in `routing_problems` is the only denormalized stop representation at MVP scope (FR-4.4). Individual stop normalization is deferred to post-MVP.
 8. Backend capability profiles are not persisted in PostgreSQL (FR-2). If SPEC-003 OQ-2 resolves to a database-backed registry, SPEC-012 must be revised.
 
@@ -1106,7 +1168,7 @@ No application component constructs `file_path` values from caller-supplied inpu
 
 14. **JSONB: stops** -- Insert a `routing_problems` row with a multi-stop `stops` array. Query a specific stop's demand using JSONB path operators. Verify the returned value matches the inserted value.
 
-15. **Retention deletion order** -- Given a complete evidence record set for `job_id = X` (rows in all eight tables), delete rows in the order defined in FR-16.1. Verify no FK violation occurs at any step.
+15. **Retention deletion order** -- Given a complete evidence record set for `job_id = X` (rows in the six evidence tables covered by FR-16.1: `report_metadata_records`, `failure_records`, `quality_evaluation_records`, `solver_run_records`, `decision_records`, `jobs`), delete rows in the order defined in FR-16.1. Verify no FK violation occurs at any step. Verify the `routing_problems` row for the referenced `problem_id` is not deleted and remains queryable (FR-16.4).
 
 16. **`execution_seed` isolation** -- Query the schema definition (information_schema or pg_catalog). Verify that `execution_seed` appears as a column name only in `solver_run_records` and in no other table.
 
@@ -1206,7 +1268,7 @@ No specific latency targets are defined for persistence operations at this stage
 
 - **SPEC-006 FR-9 (Report Metadata Schema):** SPEC-006 FR-9.3 defers schema extension to the Report Generator Specification. SPEC-009 FR-10 defines the extended schema. SPEC-012 FR-11 provides the physical realization. SPEC-006 FR-9 should reference SPEC-012 FR-11 as the authoritative physical schema.
 
-- **SPEC-003 FR-10 (`workload_features_snapshot` field):** SPEC-010 FR-9 requires SPEC-003 FR-10 to be updated to include all six features and `feature_schema_version` in the snapshot definition. SPEC-012 FR-3 defines the physical JSONB structure reflecting this complete set. The SPEC-003 FR-10 follow-on update is the responsibility of the action items in SPEC-010 Documentation Updates Required.
+- **SPEC-003 FR-10 (`workload_features_snapshot` field) — pending, not yet completed:** SPEC-003 FR-10's current accepted text describes `workload_features_snapshot` as a snapshot of four workload features. SPEC-010 FR-9 requires a future SPEC-003 FR-10 revision to include all six SPEC-010 features and `feature_schema_version` in the snapshot definition. That revision has not occurred as of this document. SPEC-012 FR-3 defines the physical JSONB structure anticipating this six-feature-plus-version set (see FR-3's dependency status note) and depends on the pending SPEC-003 revision landing before the schema and SPEC-003 FR-10 are fully consistent. The SPEC-003 FR-10 follow-on update remains the responsibility of the action items in SPEC-010 Documentation Updates Required; SPEC-012 does not perform that update.
 
 - **SPEC-011 `Blocks` field:** SPEC-011 metadata lists SPEC-012, SPEC-013, and SPEC-014 as the blocked individual backend solver specifications. SPEC-012 is now the Persistence Schema specification. SPEC-011's `Blocks` field should be updated to reference the correct spec IDs for the three backend solver specifications (to be determined when those specs are assigned IDs).
 
