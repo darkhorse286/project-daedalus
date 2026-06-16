@@ -6,7 +6,7 @@
 
 **Title:** Persistence Schema
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
