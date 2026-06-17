@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-16
 
-**Last Updated:** 2026-06-16
+**Last Updated:** 2026-06-16 (Revision 1 — Engineering Review)
 
 **Supersedes:** None
 
@@ -82,9 +82,9 @@ The nearest-neighbor heuristic is a polynomial-time greedy construction algorith
 
 Classification is consistent with SPEC-011 FR-2.1 and FR-2.2. This classification is a property of the algorithm, not a runtime configuration parameter.
 
-**Timeout behavior:** The algorithm completes in O(S * N) time where S is vehicle count and N is stop count. At MVP problem sizes (Large class: 76+ stops), execution completes in sub-millisecond wall-clock time. The Worker's external timeout backstop (SPEC-005) is the operative enforcement mechanism. The backend does not implement periodic deadline polling. The Worker enforced timeout is the authoritative backstop per SPEC-004 FR-10.
+**Timeout behavior:** The algorithm executes in two phases: O(N²) distance precomputation and O(S * N²) worst-case route construction, where N is stop count and S is vehicle count. At MVP problem sizes (Large class: 76+ stops), total execution completes in sub-millisecond wall-clock time. The Worker's external timeout backstop (SPEC-005) is the operative enforcement mechanism. The backend does not implement periodic deadline polling. When the Worker externally enforces the timeout, the Worker constructs the Timeout response on the backend's behalf per SPEC-004 FR-10.
 
-**Supported SolverOutcome values:** See FR-7.
+**Supported SolverOutcome values:** See FR-6.
 
 ---
 
@@ -102,7 +102,7 @@ The nearest-neighbor heuristic constructs a set of vehicle routes by greedily ex
 
 **Distance metric:** Haversine great-circle distance in kilometers (SPEC-001 FR-5). The same formula used throughout the domain. No alternative metric is used during construction.
 
-**Tie-breaking behavior:** When two or more candidate stops have identical Haversine distance from the current position (within the precision of IEEE 754 double arithmetic), the algorithm selects the candidate with the lowest stop_id value. This produces a fully deterministic ordering with no stochastic component.
+**Tie-breaking behavior:** When two or more candidate stops have computed Haversine distances that are equal as IEEE 754 double values, the algorithm selects the candidate with the lowest stop_id value. This produces a fully deterministic ordering with no stochastic component.
 
 **Stop visitation behavior:** The selected candidate is added to the current vehicle's route in the order selected. The algorithm then advances the current position to the selected stop and reduces the vehicle's remaining capacity by the stop's demand. The stop is marked assigned and removed from all future candidate sets.
 
@@ -114,7 +114,7 @@ The nearest-neighbor heuristic constructs a set of vehicle routes by greedily ex
 
 **Acceptance Criteria:**
 - Given a routing problem with N stops, V vehicles, and capacity C per vehicle, the algorithm evaluates candidates exclusively from unassigned stops with demand <= remaining vehicle capacity
-- The algorithm selects the minimum-distance candidate at each step; when distances are equal, the lowest stop_id wins
+- The algorithm selects the minimum-distance candidate at each step; when distances are equal as IEEE 754 double values, the lowest stop_id wins
 - Service duration values and time window fields are not used during construction
 - The resulting route plan never places the depot in any route sequence
 - The route at index i in the RoutePlan corresponds to vehicle i
@@ -135,7 +135,7 @@ SPEC-001 FR-2 supports multiple vehicles with identical capacity. The nearest-ne
 
 **Behavior when stops remain after a vehicle exhausts candidates:** When no candidate stop fits the current vehicle's remaining capacity, the vehicle's route is finalized. Construction continues with the next vehicle. Stops that could not fit in an earlier vehicle's route remain available as candidates for subsequent vehicles.
 
-**Behavior when all vehicles are exhausted before all stops are assigned:** If unassigned stops remain after vehicle vehicle_count - 1 has finalized its route, the algorithm has failed to produce a complete RoutePlan. This is a failure condition defined in FR-5. This outcome can occur for problems where the total stop demand does not exceed total fleet capacity but the greedy assignment order prevents complete allocation. The algorithm does not backtrack or retry with alternative assignments.
+**Behavior when all vehicles are exhausted before all stops are assigned:** If unassigned stops remain after vehicle vehicle_count - 1 has finalized its route, the algorithm has failed to produce a complete RoutePlan. This is a failure condition defined in FR-9. This outcome can occur for problems where the total stop demand does not exceed total fleet capacity but the greedy assignment order prevents complete allocation. The algorithm does not backtrack or retry with alternative assignments.
 
 **Behavior when all stops are assigned before all vehicles are used:** Remaining vehicles have empty routes. Empty routes are valid per SPEC-004 FR-5. No additional stops are assigned to vehicles after all stops are assigned.
 
@@ -145,7 +145,7 @@ SPEC-001 FR-2 supports multiple vehicles with identical capacity. The nearest-ne
 - Once a stop is assigned, it is unavailable to all subsequent vehicles
 - Empty vehicle routes are present in the RoutePlan for unused vehicles
 - Stops that exceed one vehicle's capacity can be assigned to a subsequent vehicle if that vehicle has sufficient capacity
-- When stops remain unassigned after all vehicles are exhausted, the outcome is Failed (see FR-5)
+- When stops remain unassigned after all vehicles are exhausted, the outcome is Failed (see FR-9)
 
 ---
 
@@ -163,11 +163,11 @@ The nearest-neighbor algorithm enforces some constraints during route constructi
 
 **Unreachable stops:** The algorithm does not detect or handle unreachable stops. If a stop has coordinates that produce an extreme Haversine distance from all other locations, it remains reachable in principle. The algorithm assigns it like any other stop. Haversine distances are finite for all valid coordinate pairs (SPEC-001 FR-5).
 
-**Infeasibility detection:** This backend does not detect or prove infeasibility. It is not authorized to return `Infeasible` (SPEC-011 FR-5.2). The only failure condition resulting from problem characteristics is the degenerate capacity assignment case described in FR-2 and FR-5, which produces `Failed` with `failure_code = InternalError`, not `Infeasible`.
+**Infeasibility detection:** This backend does not detect or prove infeasibility. It is not authorized to return `Infeasible` (SPEC-011 FR-5.2). The only failure condition resulting from problem characteristics is the degenerate capacity assignment case described in FR-2 and FR-9, which produces `Failed` with `failure_code = InternalError`, not `Infeasible`.
 
 **Explicitly documented limitations:**
 
-1. The algorithm does not guarantee a complete assignment even when total stop demand does not exceed total fleet capacity. Greedy sequential construction can produce capacity binding that leaves stops unassigned. The algorithm fails (see FR-5) rather than backtracking.
+1. The algorithm does not guarantee a complete assignment even when total stop demand does not exceed total fleet capacity. Greedy sequential construction can produce capacity binding that leaves stops unassigned. The algorithm fails (see FR-9) rather than backtracking.
 
 2. The algorithm does not account for time window feasibility. The produced route plan may violate time windows on problems where the Scheduler incorrectly selects this backend despite `supports_time_windows = false`.
 
@@ -190,16 +190,16 @@ The following capability profile is the registration artifact consumed by the Sc
 | Field | Value | Rationale and Accuracy Basis |
 |---|---|---|
 | `backend_id` | `nearest-neighbor` | Stable unique identifier per SPEC-011 FR-3. See OQ-1 for naming convention clarification. |
-| `supported_size_classes` | `{Small, Medium, Large}` | The algorithm is O(S * N) in vehicle count S and stop count N. For Large problems (76+ stops), execution completes in sub-millisecond time. All three size classes are supported with no practical upper bound at MVP scale. |
+| `supported_size_classes` | `{Small, Medium, Large}` | The algorithm executes in O(N²) precomputation plus O(S * N²) worst-case construction. For Large problems (76+ stops), total execution completes in sub-millisecond time. All three size classes are supported with no practical upper bound at MVP scale. |
 | `supports_time_windows` | `false` | The algorithm does not incorporate time window constraints during route construction. Candidate selection is based exclusively on Haversine distance. Declaring `true` would misrepresent the algorithm's construction behavior and cause the Scheduler to route time-windowed problems to a backend that cannot respect them. |
-| `supports_capacity_constraints` | `true` | Capacity is enforced during candidate selection. A stop is excluded from the candidate set when its demand exceeds the vehicle's remaining capacity. Capacity validity is verified before returning Succeeded. |
-| `latency_profile` | Small: < 1ms, Medium: < 5ms, Large: < 50ms | Algorithmic estimate based on O(S * N) construction with O(N^2) distance precomputation. Values are pre-implementation estimates. Empirical measurement on representative benchmark problems of each size class is required before `is_provisional` can be set to false. |
+| `supports_capacity_constraints` | `true` | Capacity is enforced during candidate selection. A stop is excluded from the candidate set when its demand exceeds the vehicle's remaining capacity. Capacity validity is guaranteed by the construction rule. |
+| `latency_profile` | Small: < 0.001s, Medium: < 0.005s, Large: < 0.050s | Values are expressed in seconds per SPEC-003 FR-4 (equivalent to < 1ms, < 5ms, < 50ms). Algorithmic estimate based on O(N²) distance precomputation and O(S * N²) worst-case route construction. Values are pre-implementation estimates. Empirical measurement on representative benchmark problems of each size class is required before `is_provisional` can be set to false. |
 | `quality_profile` | `Baseline` | The nearest-neighbor heuristic produces solutions that are consistently above optimal for CVRP. The algorithm's greedy, non-backtracking construction prevents it from achieving competitive or near-optimal quality. It serves as a lower-quality reference baseline, which is its intended role in the evidence system. Basis: well-established CVRP literature; empirical measurement during benchmarking will confirm this classification. |
 | `cost_profile` | `1` | The algorithm runs in-process in C++ with no external dependencies, no network calls, and no paid compute. The cost per invocation is negligible. A value of 1 represents the minimum relative cost unit. |
 | `is_provisional` | `true` | Latency and quality profile values are pre-implementation estimates. This backend must declare `is_provisional = true` until empirical measurement validates the declared values per SPEC-011 FR-4.2. |
 | `supported_contract_version` | `1` | Targets SPEC-004 contract version 1. |
 
-**Accuracy basis:** Latency estimates are derived from algorithmic analysis of O(S * N) route construction and O(N^2) pairwise distance precomputation, not from empirical measurement. Quality classification as `Baseline` is consistent with established CVRP heuristic benchmarks in the literature. Both values require empirical validation against the SPEC-002 synthetic workload before `is_provisional = false` can be declared.
+**Accuracy basis:** Latency estimates are derived from algorithmic analysis of O(N²) pairwise distance precomputation and O(S * N²) worst-case route construction, not from empirical measurement. Capability profile latency values are registered in seconds per SPEC-003 FR-4. Quality classification as `Baseline` is consistent with established CVRP heuristic benchmarks in the literature. Both values require empirical validation against the SPEC-002 synthetic workload before `is_provisional = false` can be declared.
 
 **Acceptance Criteria:**
 - All nine fields from the SPEC-011 FR-4.1 table are present
@@ -207,6 +207,7 @@ The following capability profile is the registration artifact consumed by the Sc
 - `supported_contract_version` equals 1
 - `is_provisional = true` is declared and remains true until empirical validation is complete
 - The accuracy basis for `latency_profile` and `quality_profile` is stated
+- `latency_profile` values are expressed in seconds per SPEC-003 FR-4
 
 ---
 
@@ -220,7 +221,9 @@ The nearest-neighbor heuristic is a deterministic construction algorithm. It con
 
 **Execution seed usage:** The `execution_seed` field in the SolverRequest (SPEC-004 FR-2) is accepted without error, as required by SPEC-004 FR-11.5 for all backends regardless of classification. The field is not used in any computation. The algorithm's output is determined entirely by the routing problem's coordinates, demands, vehicle count, and capacity per vehicle.
 
-**Unconditional determinism:** This backend produces identical route plans for identical routing problem inputs on every invocation, regardless of `execution_seed` value, invocation count, process state, or system environment. The tie-breaking rule (lowest stop_id on distance equality) and the sequential vehicle ordering are the only sources of ordering in the algorithm, both of which are fully determined by the problem's stop identifiers.
+**Determinism within a conforming execution environment:** This backend produces identical route plans for identical routing problem inputs on every invocation within a given conforming C++17 execution environment, regardless of `execution_seed` value, invocation count, or process state. The tie-breaking rule (lowest stop_id when computed Haversine distances are equal as IEEE 754 double values) and the sequential vehicle ordering are the only sources of ordering in the algorithm, both of which are fully determined by the problem's stop identifiers and vehicle count.
+
+**Cross-platform reproducibility:** Route plans produced from identical inputs are semantically equivalent across conforming C++17 toolchains per ADR-010 Decision 2. Haversine distance computation uses transcendental functions (sin, cos, asin, sqrt). Per ADR-010 Decision 2, values derived from transcendental functions satisfy semantic equivalence within IEEE 754 double precision but are not required to be bitwise identical across platforms. The reproducibility guarantee for this backend follows ADR-010's semantic equivalence scope.
 
 **Prohibited entropy sources:** No entropy source is used in any part of this backend's execution. System time, process ID, OS random sources, and hardware entropy are not consulted during route construction, candidate selection, tie-breaking, or any other algorithmic step.
 
@@ -242,12 +245,12 @@ This backend is classified `classical_deterministic`. Per SPEC-011 FR-5.1, it mu
 | Outcome | Supported | Trigger Condition |
 |---|---|---|
 | `Succeeded` | Yes | All stops assigned to vehicles; RoutePlan satisfies all SPEC-004 FR-5 structural validity requirements |
-| `Timeout` | Yes | Execution exceeds `execution_timeout_ms`; Worker terminates the backend (expected to be rare given O(S * N) completion) |
+| `Timeout` | Yes | Execution exceeds `execution_timeout_ms`; Worker enforces the timeout externally and constructs the Timeout response on the backend's behalf (SPEC-004 FR-10); expected to be rare given sub-millisecond completion at MVP problem sizes |
 | `Cancelled` | Yes | Worker signals cancellation before route construction completes |
 | `Failed` | Yes | Contract version mismatch; or all vehicles exhausted before all stops are assigned (degenerate capacity case); or any internal error preventing route plan production |
 | `Infeasible` | **Not Supported** | This backend cannot prove infeasibility. Prohibited per SPEC-011 FR-5.2. |
 
-**Notes on Timeout:** Given O(S * N) construction time, the algorithm is expected to complete in sub-millisecond wall-clock time for all MVP problem sizes. Timeout is listed as supported because all heuristic backends must support it per the contract (SPEC-011 FR-5.1), and because the Worker's external backstop may terminate the backend if it is invoked in a degraded environment. If the backend is terminated mid-construction with no complete route plan, it returns Timeout with no solution.
+**Notes on Timeout:** Given O(N²) precomputation plus O(S * N²) worst-case construction, the algorithm is expected to complete in sub-millisecond wall-clock time for all MVP problem sizes. Timeout is listed as supported because all heuristic backends must support it per the contract (SPEC-011 FR-5.1), and because the Worker's external backstop may terminate the backend if it is invoked in a degraded environment. When the Worker externally terminates the backend, the Worker constructs the Timeout response on the backend's behalf per SPEC-004 FR-10; the backend produces no response in that case. The Timeout response constructed by the Worker contains no solution.
 
 **Notes on Cancelled:** If cancellation arrives before route construction is complete, the backend returns Cancelled with no solution. If construction has already produced a complete RoutePlan satisfying SPEC-004 FR-5 at the time of cancellation, the backend returns Cancelled with the complete RoutePlan included.
 
@@ -277,15 +280,17 @@ The nearest-neighbor algorithm produces a RoutePlan conforming to SPEC-004 FR-5.
 | `Failed` | Absent | Never present |
 | `Infeasible` | Not Applicable | Outcome not supported |
 
-**Capacity validity guarantee on Succeeded:** The algorithm's construction rule (excluding candidates that exceed remaining capacity) ensures that the total demand of stops in each route never exceeds `capacity_per_vehicle`. This is verified by the algorithm before returning `Succeeded`. The Worker also validates this condition post-receipt (SPEC-004 FR-5).
+**Capacity validity guarantee on Succeeded:** The algorithm's construction rule guarantees that the total demand of stops in each route never exceeds `capacity_per_vehicle` — no stop is added to a route unless its demand fits within the vehicle's remaining capacity at the time of selection. This invariant holds by construction; no separate post-construction verification pass is performed by the backend. The Worker validates this condition post-receipt per SPEC-004 FR-5.
 
-**Stop assignment completeness guarantee on Succeeded:** A Succeeded response guarantees that every stop in the routing problem appears in exactly one route. This is verified by the algorithm before returning `Succeeded`.
+**Stop assignment completeness guarantee on Succeeded:** A Succeeded response guarantees that every stop in the routing problem appears in exactly one route. This is guaranteed by the algorithm's construction: the algorithm transitions to Succeeded only when all stops have been assigned to vehicles.
 
 **Vehicle count guarantee:** The RoutePlan always contains exactly `vehicle_count` route entries. Unused vehicles have empty route sequences. No route entry is omitted.
 
+_Note: SPEC-011 FR-7.1 specifies "Route count ≤ vehicle_count" for Succeeded outcomes. SPEC-013 follows the stricter SPEC-004 FR-5 condition 1 (exact equality: `routes.size()` equals `vehicle_count`). The inconsistency is a SPEC-011 documentation defect tracked in the Documentation Updates Required section and does not affect SPEC-013 behavior._
+
 **Time window non-guarantee:** A Succeeded response does not guarantee time window feasibility. This backend does not enforce time window constraints during construction. Time window feasibility is evaluated by Core Quality Evaluation (SPEC-007) after the Worker receives the SolverResponse. Given that this backend declares `supports_time_windows = false`, the Scheduler should not route time-windowed problems here. A Succeeded response from this backend on a time-windowed problem (if the Scheduler incorrectly routes one) may produce time-infeasible routes; this is a solver quality defect, not a contract violation (SPEC-004 FR-7).
 
-`execution_duration_ms` is always populated. It reflects wall-clock execution time from route construction start to RoutePlan finalization. It excludes SolverRequest deserialization and SolverResponse serialization per SPEC-011 performance obligations.
+`execution_duration_ms` is always populated. It reflects wall-clock execution time from backend execution start — including distance matrix precomputation — to RoutePlan finalization. This is consistent with SPEC-011 performance obligations ("from the start of optimization"). It excludes SolverRequest deserialization and SolverResponse serialization.
 
 **Acceptance Criteria:**
 - Every Succeeded response contains a RoutePlan with `routes.size()` = `vehicle_count`
@@ -306,7 +311,7 @@ The nearest-neighbor backend produces the following `extension_metadata` keys in
 |---|---|---|---|
 | `nn.total_distance_km` | float64 | Succeeded | Sum of Haversine distances across all vehicle routes, including each vehicle's return leg from its last stop to the depot. Units: kilometers. This is the solver's internal distance objective, not the normalized quality metric used by Core (SPEC-007). |
 | `nn.routes_used` | uint32 | Succeeded | Number of vehicles with at least one assigned stop. Vehicles with empty routes are not counted. |
-| `nn.capacity_rejections` | uint32 | Succeeded | Total number of candidate stops skipped during construction because their demand exceeded the current vehicle's remaining capacity. A higher value indicates that capacity constraints caused more vehicle transitions than a purely distance-optimal construction would require. |
+| `nn.capacity_rejections` | uint32 | Succeeded | Total number of candidate stop exclusion events during construction where a stop was excluded because its demand exceeded the current vehicle's remaining capacity. Counting semantics: each time a stop is evaluated and excluded due to capacity at a given construction step, this count is incremented by one. A stop that is excluded at three separate steps (whether for the same vehicle across multiple steps or for different vehicles) contributes three to this count. A higher value indicates that capacity constraints caused more evaluation overhead and vehicle transitions than a purely distance-optimal construction would require. |
 
 Extension metadata is not produced on `Failed`, `Timeout`, or `Cancelled` outcomes.
 
@@ -352,9 +357,9 @@ This section defines all failure conditions specific to the nearest-neighbor bac
 
 **Timeout:**
 
-- **Trigger:** Worker-enforced external timeout. Given O(S * N) construction time, this is expected to be extremely rare for MVP problem sizes.
+- **Trigger:** Worker-enforced external timeout. Given O(N²) precomputation plus O(S * N²) worst-case construction, this is expected to be extremely rare for MVP problem sizes.
 - **Outcome:** `Timeout`, `failure_code = ExecutionTimeout`
-- **Behavior:** If a complete RoutePlan satisfying SPEC-004 FR-5 was produced before termination, it may be included. Otherwise, the response contains no solution.
+- **Behavior:** The Worker enforces the timeout externally and constructs the Timeout response on the backend's behalf per SPEC-004 FR-10. The Worker-constructed response contains no solution. The backend does not self-terminate (no periodic deadline polling is implemented per Assumption 6); the Worker's external backstop is the operative enforcement mechanism.
 
 **Cancellation:**
 
@@ -376,21 +381,21 @@ All `Failed` responses include a `SolverFailureDetail` with both `failure_code` 
 
 The nearest-neighbor heuristic executes in two phases: distance matrix precomputation and route construction.
 
-**Distance matrix precomputation:** The backend computes pairwise Haversine distances from all geographic coordinates (depot + N stops) before route construction begins. This is O(N^2) Haversine calculations. For N = 76 (Large class lower bound), this produces approximately 2,926 distance calculations. For N = 100 (mid-Large class), approximately 5,050. Haversine is a transcendental-function-heavy computation; this phase dominates execution time at larger problem sizes.
+**Distance matrix precomputation:** The backend computes pairwise Haversine distances from all geographic coordinates (depot + N stops) before route construction begins. This is O(N²) Haversine calculations. For N = 76 (Large class lower bound), this produces approximately 2,926 distance calculations. For N = 100 (mid-Large class), approximately 5,050. Haversine is a transcendental-function-heavy computation; this phase dominates execution time at larger problem sizes.
 
-**Route construction:** O(S * N) candidate evaluations where S is vehicle count and N is stop count. For each of the S vehicles, the algorithm examines at most N candidates per step and takes at most N steps (one per stop). Construction is bounded by O(S * N^2) in the worst case, but is typically closer to O(S * N) in practice because the candidate set shrinks with each assignment.
+**Route construction:** O(S * N²) worst-case candidate evaluations where S is vehicle count and N is stop count. For each of the S vehicles, the algorithm examines at most N candidates per step and takes at most N steps (one per stop). Construction is bounded by O(S * N²) in the worst case, but is typically closer to O(S * N) in practice because the candidate set shrinks with each assignment.
 
 **Expected execution duration per size class:**
 
 | Size Class | Stop Range | Expected Duration | Basis |
 |---|---|---|---|
-| Small | 1-25 stops | < 1ms | Algorithmic analysis; O(N^2) precomputation trivial |
-| Medium | 26-75 stops | < 5ms | Algorithmic analysis; O(N^2) Haversine dominates |
+| Small | 1-25 stops | < 1ms | Algorithmic analysis; O(N²) precomputation trivial |
+| Medium | 26-75 stops | < 5ms | Algorithmic analysis; O(N²) Haversine dominates |
 | Large | 76+ stops | < 50ms | Algorithmic analysis; empirical validation required |
 
-All values are pre-implementation estimates. Empirical measurement on SPEC-002 synthetic workload problems of each size class is required before `is_provisional` is set to false.
+These durations correspond to the `latency_profile` values registered in the capability profile (FR-4), which are expressed in seconds (< 0.001s, < 0.005s, < 0.050s) per SPEC-003 FR-4. All values are pre-implementation estimates. Empirical measurement on SPEC-002 synthetic workload problems of each size class is required before `is_provisional` is set to false.
 
-**Memory:** The dominant memory allocation is the pairwise distance matrix, O(N^2) doubles. For N = 100 stops, this is approximately 80 KB. No practical constraint at MVP scale.
+**Memory:** The dominant memory allocation is the pairwise distance matrix, O(N²) doubles. For N = 100 stops, this is approximately 80 KB. No practical constraint at MVP scale.
 
 **Expected solution quality:**
 
@@ -445,7 +450,7 @@ The nearest-neighbor heuristic is well-documented in the CVRP literature as a fa
 
 3. Haversine great-circle distance is an acceptable construction metric for synthetic workloads. For real-world problems, route quality would differ from road-network optimized routes, but this is a known limitation of the routing problem model (SPEC-001 FR-5), not the algorithm.
 
-4. The pairwise distance matrix can be computed once before route construction begins and cached for the duration of the algorithm's execution. This is the expected implementation approach and is consistent with the algorithm's O(N^2) precomputation overhead.
+4. Computing pairwise Haversine distances for all geographic coordinates involves O(N²) distance calculations and is a dominant contributor to backend execution time at larger problem sizes. The internal approach to distance computation is an implementation planning decision.
 
 5. The degenerate capacity assignment failure (stops remaining after all vehicles exhausted) is rare in the SPEC-002 synthetic workload at typical capacity utilization ratios. The SPEC-002 generator produces problems where total demand does not exceed total fleet capacity; whether the greedy assignment avoids degenerate binding depends on problem structure.
 
@@ -467,7 +472,7 @@ The nearest-neighbor heuristic is well-documented in the CVRP literature as a fa
 
 6. The backend must not write to stdout or stderr (SPEC-011 FR-9.2).
 
-7. `execution_duration_ms` must reflect actual wall-clock execution time within the backend from construction start to RoutePlan finalization, excluding SolverRequest deserialization and SolverResponse serialization (SPEC-011 performance obligations).
+7. `execution_duration_ms` must reflect actual wall-clock execution time within the backend from backend execution start (including distance matrix precomputation) to RoutePlan finalization, excluding SolverRequest deserialization and SolverResponse serialization (SPEC-011 performance obligations).
 
 8. The algorithm must not return `Infeasible` under any condition (SPEC-011 FR-5.2).
 
@@ -499,7 +504,7 @@ Fields not used in construction: `routing_problem.time_window_open`, `routing_pr
 On `Succeeded`:
 - `outcome = Succeeded`
 - `solution`: RoutePlan with `vehicle_count` routes, all stops assigned, capacity valid
-- `statistics.execution_duration_ms`: Wall-clock construction time in milliseconds
+- `statistics.execution_duration_ms`: Wall-clock backend execution time in milliseconds, including distance matrix precomputation
 - `extension_metadata`: Keys `nn.total_distance_km`, `nn.routes_used`, `nn.capacity_rejections`
 - `failure`: Absent
 
@@ -513,7 +518,7 @@ On `Failed`:
 On `Timeout` or `Cancelled`:
 - `outcome`: `Timeout` or `Cancelled`
 - `failure`: Present with corresponding failure code
-- `solution`: Present only if a complete RoutePlan satisfying SPEC-004 FR-5 was produced
+- `solution`: Present only if a complete RoutePlan satisfying SPEC-004 FR-5 was produced (not applicable for Worker-enforced external Timeout)
 - `extension_metadata`: Absent
 
 Consumer: The Worker receives the SolverResponse, validates structural requirements (SPEC-004 FR-5), and persists it to the evidence log. Core evaluates route quality from the RoutePlan (SPEC-007). The `extension_metadata` passes through to the evidence record.
@@ -563,7 +568,7 @@ The following behaviors must be verified. Specific test implementations are dete
 
 7. **Nearest-neighbor selection:** On a problem with multiple unassigned stops, the stop assigned at each construction step is the nearest candidate from the current position (verified by checking all distances against the selected stop's distance).
 
-8. **Tie-breaking:** On a problem constructed with two stops at identical distance from the current position, the stop with the lower stop_id is selected.
+8. **Tie-breaking:** On a problem constructed with two stops at identical computed Haversine distance from the current position, the stop with the lower stop_id is selected.
 
 9. **Capacity enforcement:** No Succeeded response contains a route where total stop demand exceeds `capacity_per_vehicle`. Verified across all SPEC-002 synthetic workload sizes and constraint configurations.
 
@@ -573,7 +578,7 @@ The following behaviors must be verified. Specific test implementations are dete
 
 **Capability profile accuracy:**
 
-12. **Latency profile validation:** Empirical execution duration on representative SPEC-002 problems of each size class is within the declared `latency_profile` bounds. Required before `is_provisional` is set to false.
+12. **Latency profile validation:** Empirical execution duration on representative SPEC-002 problems of each size class — measured from backend execution start (including distance matrix precomputation) to RoutePlan finalization — is within the declared `latency_profile` bounds (< 0.001s, < 0.005s, < 0.050s per size class). Required before `is_provisional` is set to false.
 
 13. **Quality classification:** Route quality (measured by Core's normalized metric, SPEC-007) on SPEC-002 benchmark problems is consistent with `Baseline` classification. Required before `is_provisional` is set to false.
 
@@ -585,7 +590,7 @@ The following behaviors must be verified. Specific test implementations are dete
 
 16. **nn.routes_used accuracy:** The reported value equals the count of routes in the RoutePlan with at least one stop.
 
-17. **nn.capacity_rejections accuracy:** The reported value equals the total number of candidate stops excluded due to capacity constraint during construction.
+17. **nn.capacity_rejections accuracy:** The reported value equals the total number of individual candidate stop exclusion events due to capacity constraint during construction. Each time a stop is evaluated and excluded because its demand exceeds the current vehicle's remaining capacity at that step, the count is incremented by one. A stop excluded at three separate construction steps contributes three to this count.
 
 **Observability:**
 
@@ -608,7 +613,7 @@ All other `solver.execute` span attributes are available to the Worker from the 
 
 1. What was the total route distance produced by the nearest-neighbor construction? (`nn.total_distance_km`)
 2. How many vehicles were actually used? (`nn.routes_used`)
-3. How many candidate stops were excluded by capacity constraints during construction? (`nn.capacity_rejections`)
+3. How many candidate stop exclusion events were caused by capacity constraints during construction? (`nn.capacity_rejections`)
 
 These values pass through the Worker to the evidence log, where they are available for backend-specific reporting and comparison.
 
@@ -634,11 +639,11 @@ The backend does not write to stdout or stderr.
 
 # Performance Considerations
 
-**Distance computation overhead:** Haversine computation is trigonometric and transcendental-function-heavy. For N stops + 1 depot, the pairwise distance precomputation requires N(N+1)/2 Haversine calculations (exploiting distance symmetry). For Large-class problems (76+ stops), this number of computations should be measured empirically and its contribution to `execution_duration_ms` should be noted in benchmark evidence.
+**Distance computation overhead:** Haversine computation is trigonometric and transcendental-function-heavy. For N stops + 1 depot, the pairwise distance precomputation requires N(N+1)/2 Haversine calculations (exploiting distance symmetry). For Large-class problems (76+ stops), this number of computations should be measured empirically and its contribution to `execution_duration_ms` should be noted in benchmark evidence. Because `execution_duration_ms` includes precomputation time (FR-7), this phase's contribution is visible in the reported timing.
 
-**Construction overhead:** O(S * N) candidate evaluations, where S is vehicle count and N is stop count. For MVP problem sizes (maximum 100+ stops, typical vehicle count < 20), this is negligible relative to distance precomputation.
+**Construction overhead:** O(S * N²) worst-case candidate evaluations, where S is vehicle count and N is stop count. For MVP problem sizes (maximum 100+ stops, typical vehicle count < 20), this is negligible relative to distance precomputation.
 
-**Memory overhead:** The pairwise distance matrix is O(N^2) doubles. For N = 100, this is approximately 80 KB. No practical constraint at MVP scale.
+**Memory overhead:** The pairwise distance matrix is O(N²) doubles. For N = 100, this is approximately 80 KB. No practical constraint at MVP scale.
 
 **Timeout practical risk:** Given sub-millisecond completion for MVP problem sizes, timeout is not a practical concern. The Worker external backstop (SPEC-005) is the theoretical safety mechanism for degenerate environments.
 
@@ -655,7 +660,8 @@ The following follow-on updates are required as a result of this specification. 
 
 **SPEC-011:**
 - FR-11.1 MVP backend inventory: Update the `nearest_neighbor` row's "Solver Specification Status" from "Required; not yet written" to reflect SPEC-013's Draft status, and ultimately to Accepted when SPEC-013 is accepted.
-- OQ-3 (Classical Deterministic Backend Timeout Self-Termination Strategy): SPEC-013 resolves this question for the nearest-neighbor backend by deferring to the Worker external backstop given O(S * N) construction time. The OQ remains relevant for SPEC-014 (Greedy Insertion) if that backend has different timing characteristics.
+- FR-7.1 route count inconsistency: SPEC-011 FR-7.1 specifies "Route count ≤ vehicle_count" for Succeeded outcomes, which conflicts with SPEC-004 FR-5 condition 1 (strict equality). SPEC-013 follows SPEC-004's strict equality requirement. SPEC-011 FR-7.1 should be corrected to read "Route count = vehicle_count" in a future SPEC-011 revision. This is a documentation defect and does not require a SPEC-011 behavioral change or `specification_version` increment.
+- OQ-3 (Classical Deterministic Backend Timeout Self-Termination Strategy): SPEC-013 resolves this question for the nearest-neighbor backend by deferring to the Worker external backstop given sub-millisecond construction time at MVP scale. The OQ remains relevant for SPEC-014 (Greedy Insertion) if that backend has different timing characteristics.
 
 **SPEC-012:**
 - No schema changes are required. `extension_metadata` for `nearest-neighbor` passes through the existing JSONB column structure in `solver_run_records`. The three extension metadata keys defined in FR-8 are stored within the existing schema.
@@ -669,15 +675,15 @@ The following follow-on updates are required as a result of this specification. 
 
 ### OQ-1: backend_id Naming Convention Conflict
 
-**Classification:** Implementation Planning Decision
+**Classification:** Resolve in SPEC-011 (upstream documentation conflict)
 
 **Question:** Should the backend_id be `nearest-neighbor` (kebab-case per SPEC-011 FR-3.1) or `nearest_neighbor` (snake_case per SPEC-011 FR-2.2 inventory table)?
 
-**Context:** SPEC-011 FR-3.1 defines `backend_id` as "Kebab-case, lowercase." The SPEC-011 FR-2.2 inventory table uses `nearest_neighbor`, `greedy_insertion`, and `qubo_simulated_annealing` — all snake_case identifiers. These are in conflict. This specification uses `nearest-neighbor` per the literal FR-3.1 definition.
+**Context:** SPEC-011 FR-3.1 defines `backend_id` as "Kebab-case, lowercase." The SPEC-011 FR-2.2 inventory table uses `nearest_neighbor`, `greedy_insertion`, and `qubo_simulated_annealing` — all snake_case identifiers. This is a conflict internal to SPEC-011 between its normative definition (FR-3.1) and its documentation artifact (FR-2.2 inventory table). SPEC-013 follows the normative FR-3.1 definition and uses `nearest-neighbor`. SPEC-013 has no authority to resolve the inconsistency; the fix belongs in SPEC-011, where the FR-2.2 inventory table should be updated to use kebab-case identifiers consistent with FR-3.1. This correction does not constitute a behavioral change to SPEC-011 and does not require a SPEC-011 `specification_version` increment.
 
 The `backend_id` value appears in: the `solver.execute` span attribute, the evidence log `solver_run_records`, the capability profile registration, and all trace correlation. The value must be stable once this specification is accepted (SPEC-011 FR-3.2).
 
-**Resolution required before:** Capability profile registration (SPEC-011 FR-10.1 Prerequisite 7). The conflict must be resolved before the backend_id is registered in any persistent system.
+**Resolution required before:** Capability profile registration (SPEC-011 FR-10.1 Prerequisite 7). The conflict must be corrected in SPEC-011 before the backend_id is registered in any persistent system.
 
 **Blocking:** Does not block SPEC-013 draft. Blocks capability profile registration and any persistent reference to this backend_id.
 
@@ -689,7 +695,7 @@ The `backend_id` value appears in: the `solver.execute` span attribute, the evid
 
 **Question:** What are the empirically measured latency values per size class and confirmed quality classification for the nearest-neighbor backend?
 
-**Context:** FR-4 declares `is_provisional = true` with pre-implementation latency estimates and a literature-based quality classification. Empirical measurement against the SPEC-002 synthetic workload is required before `is_provisional` can be set to false. The specific benchmark methodology, number of representative problems per size class, and statistical confidence requirements are implementation planning decisions.
+**Context:** FR-4 declares `is_provisional = true` with pre-implementation latency estimates and a literature-based quality classification. Empirical measurement against the SPEC-002 synthetic workload is required before `is_provisional` can be set to false. The specific benchmark methodology, number of representative problems per size class, and statistical confidence requirements are implementation planning decisions. Latency measurements must use the execution_duration_ms metric as defined in FR-7 (including distance matrix precomputation).
 
 **Resolution required before:** Setting `is_provisional = false` in the capability profile. This affects whether the backend is excluded from certain Scheduler eligibility phases (SPEC-003 FR-5 Phase 2).
 
@@ -699,13 +705,13 @@ The `backend_id` value appears in: the `solver.execute` span attribute, the evid
 
 ### OQ-3: Degenerate Capacity Failure Frequency in Synthetic Workload
 
-**Classification:** Future Specification
+**Classification:** Implementation Planning Decision
 
 **Question:** How frequently does the degenerate capacity assignment failure (stops remaining after all vehicles exhausted) occur across the SPEC-002 synthetic workload, and should the specification be updated to address it?
 
-**Context:** FR-5 documents the failure condition and defines it as `Failed` with `InternalError`. The algorithm does not backtrack. Whether this failure condition is common or rare on SPEC-002-generated problems depends on the workload generator's capacity utilization distribution. If the failure is frequent, it may indicate that pure nearest-neighbor is insufficient as a baseline and a lightweight fallback (such as a round-robin redistribution pass for unassigned stops) should be added to the algorithm specification.
+**Context:** FR-9 documents the failure condition and defines it as `Failed` with `InternalError`. The algorithm does not backtrack. Whether this failure condition is common or rare on SPEC-002-generated problems depends on the workload generator's capacity utilization distribution. If the failure is frequent, it may indicate that pure nearest-neighbor is insufficient as a baseline and a lightweight fallback (such as a round-robin redistribution pass for unassigned stops) should be added to the algorithm specification.
 
-**Resolution:** Determine failure frequency empirically during initial implementation testing. If the failure rate is above a threshold acceptable for a baseline solver, escalate to specification revision (which would increment `specification_version`).
+**Resolution:** Determine failure frequency empirically during initial implementation testing. If the failure rate is above an acceptable threshold, escalate to specification revision (which would increment `specification_version`). Any acceptance threshold — the specific failure rate percentage above which a specification revision is required — requires Project Owner approval based on benchmark evidence from the SPEC-002 synthetic workload. No threshold is defined in this specification.
 
 **Blocking:** Does not block SPEC-013 acceptance. Informs whether SPEC-013 requires a revision after initial implementation testing.
 
@@ -721,23 +727,23 @@ The `backend_id` value appears in: the `solver.execute` span attribute, the evid
 - [ ] Algorithm Description (FR-1): Starting location, candidate selection, distance metric, tie-breaking, stop visitation, route completion, and depot return defined with sufficient precision for independent implementation
 - [ ] Multi-Vehicle Behavior (FR-2): Vehicle assignment strategy, route construction strategy, capacity handling, behavior on exhausted vehicles, and behavior on unused vehicles all defined
 - [ ] Constraint Handling (FR-3): Actively enforced and ignored constraints documented; limitations explicitly stated
-- [ ] Capability Profile Declaration (FR-4): All nine fields from SPEC-011 FR-4.1 present; accuracy basis for latency_profile and quality_profile stated; is_provisional = true declared
-- [ ] Seed Usage Policy (FR-5): Deterministic classification stated; execution_seed acceptance documented; unconditional determinism stated; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5
+- [ ] Capability Profile Declaration (FR-4): All nine fields from SPEC-011 FR-4.1 present; accuracy basis for latency_profile and quality_profile stated; is_provisional = true declared; latency_profile values expressed in seconds per SPEC-003 FR-4
+- [ ] Seed Usage Policy (FR-5): Deterministic classification stated; execution_seed acceptance documented; determinism within conforming execution environment stated; cross-platform semantic equivalence per ADR-010 Decision 2 stated; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5
 - [ ] Supported SolverOutcome Values (FR-6): Explicit table of supported outcomes; Infeasible listed as Not Supported; satisfies SPEC-011 FR-5.3
-- [ ] RoutePlan Output Requirements (FR-7): Presence per outcome; capacity validity guarantee; stop completeness guarantee; time window non-guarantee; execution_duration_ms obligation confirmed
-- [ ] Extension Metadata (FR-8): All three keys documented; raw-data prohibition confirmed; absence on non-Succeeded outcomes stated; satisfies SPEC-011 FR-7.4
+- [ ] RoutePlan Output Requirements (FR-7): Presence per outcome; capacity validity guarantee; stop completeness guarantee; time window non-guarantee; execution_duration_ms obligation confirmed; measurement includes distance precomputation
+- [ ] Extension Metadata (FR-8): All three keys documented with explicit counting semantics for nn.capacity_rejections; raw-data prohibition confirmed; absence on non-Succeeded outcomes stated; satisfies SPEC-011 FR-7.4
 - [ ] Failure Model (FR-9): ContractVersionMismatch, degenerate capacity failure, internal error, timeout, and cancellation all defined with trigger conditions and required metadata
-- [ ] Performance Characteristics: Expected behavior per size class; basis for estimates stated
+- [ ] Performance Characteristics: Expected behavior per size class; basis for estimates stated; relationship to seconds-based capability profile values noted
 - [ ] Testability: Correctness, determinism, outcome compliance, capability profile accuracy, and extension metadata coverage all addressed
 - [ ] Open Questions: All three open questions classified; blocking status stated; no open questions with unknown classification remain
 - [ ] No individual solver specification obligation contradicts a framework requirement from SPEC-011 FR-1 through FR-11
 
 **Backend-Specific Acceptance Criteria:**
 
-- [ ] The algorithm definition is sufficiently precise that two independent C++ implementations would produce identical route plans for identical inputs
+- [ ] The algorithm definition is sufficiently precise that two independent C++ implementations would produce semantically equivalent route plans for identical inputs within a conforming C++17 execution environment
 - [ ] The capability profile accurately reflects algorithm behavior (supports_time_windows = false, supports_capacity_constraints = true)
 - [ ] The degenerate capacity failure condition is explicitly defined
-- [ ] The extension metadata keys are defined and their absence on non-Succeeded outcomes is stated
+- [ ] The extension metadata keys are defined with explicit counting semantics, and their absence on non-Succeeded outcomes is stated
 - [ ] The specification does not define any Scheduler, Worker, or Core behavior (owned by SPEC-003, SPEC-005, SPEC-004)
 
 ---
@@ -747,12 +753,12 @@ The `backend_id` value appears in: the `solver.execute` span attribute, the evid
 This backend is complete when:
 
 - SPEC-013 is in Accepted status (this specification)
-- OQ-1 (backend_id naming convention) is resolved
+- OQ-1 (backend_id naming convention) is resolved in SPEC-011
 - The backend is implemented as a C++ SolverContract conforming to SPEC-004
 - All acceptance criteria in the Testability section pass
 - The `solver.execute` span is emitted for every invocation and verifiable in the test environment
 - Extension metadata keys `nn.total_distance_km`, `nn.routes_used`, and `nn.capacity_rejections` are present in every Succeeded SolverResponse
-- Empirical latency and quality values are measured from the SPEC-002 synthetic workload
+- Empirical latency and quality values are measured from the SPEC-002 synthetic workload; measurements use execution_duration_ms as defined in FR-7 (including precomputation)
 - `is_provisional` is set to false (requires OQ-2 resolution)
 - The capability profile is registered through the mechanism resolved by SPEC-003 OQ-2
 - Engineering review passes
