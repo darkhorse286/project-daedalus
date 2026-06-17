@@ -6,7 +6,7 @@
 
 **Title:** Nearest Neighbor Solver
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
