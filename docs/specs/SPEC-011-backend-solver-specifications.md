@@ -7,7 +7,7 @@
 **Status:** Accepted
 **Author:** Darkhorse286
 **Created:** 2026-06-14
-**Last Modified:** 2026-06-14
+**Last Modified:** 2026-06-16
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, ADR-008, ADR-010
 **Blocks:** Individual backend solver specifications (SPEC-013, SPEC-014, SPEC-015)
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-010, ADR-011
@@ -156,9 +156,9 @@ The following backends are in scope for the MVP. Each is categorized here; imple
 
 | Backend ID | Display Name | Category |
 |---|---|---|
-| `nearest_neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` |
-| `greedy_insertion` | Greedy Insertion Heuristic | `classical_deterministic` |
-| `qubo_simulated_annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` |
+| `nearest-neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` |
+| `greedy-insertion` | Greedy Insertion Heuristic | `classical_deterministic` |
+| `qubo-simulated-annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` |
 
 **3.2.3 Classification determination:**
 
@@ -340,7 +340,7 @@ All backends must produce outputs conforming to the SolverResponse schema define
 
 | Outcome | Route Plan Presence | Structural Requirements |
 |---|---|---|
-| `Succeeded` | Required | Every customer stop assigned exactly once. Route count ≤ vehicle_count. Capacity per route ≤ capacity_per_vehicle. Depot not included in any route (SPEC-004 FR-5). |
+| `Succeeded` | Required | Every customer stop assigned exactly once. Route count = vehicle_count (empty routes are valid and represent unused vehicles, per SPEC-004 FR-5). Capacity per route ≤ capacity_per_vehicle. Depot not included in any route (SPEC-004 FR-5). |
 | `Timeout` | Optional | A complete RoutePlan satisfying all SPEC-004 FR-5 structural validity requirements may be present if the backend found a complete solution before the deadline. If no complete solution was found, route plan is absent. |
 | `Cancelled` | Optional | A complete RoutePlan satisfying all SPEC-004 FR-5 structural validity requirements may be present if the backend found a complete solution before cancellation. If no complete solution was found, route plan is absent. |
 | `Infeasible` | Absent | No route plan. |
@@ -348,7 +348,7 @@ All backends must produce outputs conforming to the SolverResponse schema define
 
 **3.7.2 Success semantics:**
 
-`Succeeded` means the backend produced a complete, capacity-valid solution. It does not guarantee that time window constraints are satisfied. Time window feasibility is evaluated by Core quality evaluation after the Worker receives the SolverResponse (SPEC-004 FR-7, SPEC-007). A backend must not return `Succeeded` unless every customer stop is assigned exactly once and no route exceeds capacity_per_vehicle.
+`Succeeded` means the backend produced a complete, capacity-valid solution. It does not guarantee that time window constraints are satisfied. Time window feasibility is evaluated by Core quality evaluation after the Worker receives the SolverResponse (SPEC-004 FR-7, SPEC-007). A backend must not return `Succeeded` unless every customer stop is assigned exactly once, routes.size() equals vehicle_count (empty routes are valid), and no route exceeds capacity_per_vehicle.
 
 **3.7.3 ExecutionStatistics obligations:**
 
@@ -489,9 +489,9 @@ The following backends are in scope for the MVP. This inventory is authoritative
 
 | Backend ID | Display Name | Category | Solver Specification Status |
 |---|---|---|---|
-| `nearest_neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` | Required; not yet written |
-| `greedy_insertion` | Greedy Insertion Heuristic | `classical_deterministic` | Required; not yet written |
-| `qubo_simulated_annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` | Required; not yet written |
+| `nearest-neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` | Required; not yet written |
+| `greedy-insertion` | Greedy Insertion Heuristic | `classical_deterministic` | Required; not yet written |
+| `qubo-simulated-annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` | Required; not yet written |
 
 **3.11.2 Deferred backends:**
 
@@ -621,7 +621,7 @@ SPEC-011 is a framework specification; its testability requirements are expresse
 | Reproducibility (stochastic backends) | Given two SolverRequests with identical routing problem and identical `execution_seed`, the backend returns structurally identical SolverResponses (same `outcome`, same route assignment). |
 | Determinism (deterministic backends) | Given two SolverRequests with identical routing problem, the backend returns structurally identical SolverResponses regardless of `execution_seed` value. |
 | Outcome compliance | The backend never returns `Infeasible` (for heuristic backends). The backend never returns a route plan under `Failed` or `Infeasible`. |
-| RoutePlan structural validity (`Succeeded`) | All stops assigned exactly once. Route count ≤ vehicle_count. Capacity per route ≤ capacity_per_vehicle. Depot not present. |
+| RoutePlan structural validity (`Succeeded`) | All stops assigned exactly once. Route count = vehicle_count (empty routes are valid). Capacity per route ≤ capacity_per_vehicle. Depot not present. |
 | Timeout behavior | The backend returns `Timeout` before `execution_timeout_ms` is significantly exceeded. If a complete RoutePlan satisfying all SPEC-004 FR-5 structural validity requirements was found before the deadline, it is present in the response. If no complete solution was found before the deadline, route plan is absent. |
 | Extension metadata | All documented `extension_metadata` keys are present in the SolverResponse when expected conditions are met. |
 | Capability profile accuracy | Empirical execution duration on representative problems falls within the declared `latency_profile` bounds. |
@@ -663,9 +663,9 @@ Framework-level performance obligations:
 - ADR-008 must be advanced to Accepted status before SPEC-011 advances to Accepted. SPEC-004 (Accepted) identified ADR-008 advancement as a follow-on action following SPEC-004 acceptance (see SPEC-004 Documentation Updates Required). This is a governance prerequisite — ADR-008's Backend Neutrality principle is architecturally operative and is the authoritative basis for FR-1.2, FR-12, and the Constraints section of this specification. The required action is a status change to ADR-008; no content change to SPEC-011 is required.
 
 **Individual backend solver specifications (to be created per FR-11, FR-12):**
-- `docs/specs/SPEC-013-nearest-neighbor-solver.md` — `nearest_neighbor` backend
-- `docs/specs/SPEC-014-greedy-insertion-solver.md` — `greedy_insertion` backend
-- `docs/specs/SPEC-015-qubo-simulated-annealing-solver.md` — `qubo_simulated_annealing` backend
+- `docs/specs/SPEC-013-nearest-neighbor-solver.md` — `nearest-neighbor` backend
+- `docs/specs/SPEC-014-greedy-insertion-solver.md` — `greedy-insertion` backend
+- `docs/specs/SPEC-015-qubo-simulated-annealing-solver.md` — `qubo-simulated-annealing` backend
 
 Each specification is a child of SPEC-011 and must conform to FR-12. These specifications must be Accepted before implementation of the corresponding backend begins (FR-10).
 
@@ -677,7 +677,7 @@ Each specification is a child of SPEC-011 and must conform to FR-12. These speci
 
 **Classification:** Implementation Planning Decision (per-backend)
 
-**Question:** What PCG64 stream constants (increment values) should be assigned to the `qubo_simulated_annealing` backend and any future stochastic backends?
+**Question:** What PCG64 stream constants (increment values) should be assigned to the `qubo-simulated-annealing` backend and any future stochastic backends?
 
 **Context:** ADR-010 Decision 1 requires that stream constants be documented in each stochastic component specification and treated as frozen once the specification is Accepted. Stream constants must be selected with statistical independence in mind; if future development runs multiple stochastic backends simultaneously or in sequence on the same problem seed, distinct stream constants prevent correlation in their PRNG output sequences. The specific value for each backend is an individual solver specification concern, not a SPEC-011 concern.
 
@@ -703,7 +703,7 @@ Each specification is a child of SPEC-011 and must conform to FR-12. These speci
 
 **Question:** How should classical deterministic heuristics self-terminate before the `execution_timeout_ms` deadline, given that construction heuristics typically have no natural checkpoint loop?
 
-**Context:** FR-8.1 states that a backend should self-terminate before or at the `execution_timeout_ms` deadline (consistent with SPEC-004 FR-10, which is advisory). The Worker enforces an external timeout as the authoritative backstop (SPEC-005). For construction heuristics (`nearest_neighbor`, `greedy_insertion`), the algorithm processes stops sequentially or in a priority structure. If a complete solution is found before the deadline, it may be included in the `Timeout` response (satisfying SPEC-004 FR-5 structural validity). If no complete solution was found when the deadline arrives, the route plan is absent. The specific self-termination approach — whether to poll elapsed time, whether to attempt early completion when time is short, or to rely entirely on the Worker backstop — is an implementation planning concern for each backend specification.
+**Context:** FR-8.1 states that a backend should self-terminate before or at the `execution_timeout_ms` deadline (consistent with SPEC-004 FR-10, which is advisory). The Worker enforces an external timeout as the authoritative backstop (SPEC-005). For construction heuristics (`nearest-neighbor`, `greedy-insertion`), the algorithm processes stops sequentially or in a priority structure. If a complete solution is found before the deadline, it may be included in the `Timeout` response (satisfying SPEC-004 FR-5 structural validity). If no complete solution was found when the deadline arrives, the route plan is absent. The specific self-termination approach — whether to poll elapsed time, whether to attempt early completion when time is short, or to rely entirely on the Worker backstop — is an implementation planning concern for each backend specification.
 
 **Blocking:** Does not block SPEC-011 acceptance. Each classical deterministic backend specification (SPEC-013, SPEC-014) should address its specific self-termination approach.
 
@@ -757,8 +757,8 @@ Each specification is a child of SPEC-011 and must conform to FR-12. These speci
 - SPEC-011 is Accepted
 - SPEC-003 OQ-2 (capability profile registration mechanism) is resolved before any backend capability profile is registered (Prerequisite 7 from FR-10.1)
 - Three individual backend solver specifications conforming to FR-12 are written and Accepted:
-  - `nearest_neighbor` (`classical_deterministic`)
-  - `greedy_insertion` (`classical_deterministic`)
-  - `qubo_simulated_annealing` (`quantum_inspired_stochastic`)
+  - `nearest-neighbor` (`classical_deterministic`)
+  - `greedy-insertion` (`classical_deterministic`)
+  - `qubo-simulated-annealing` (`quantum_inspired_stochastic`)
 - Each MVP backend's individual solver specification is Accepted before implementation of that backend begins
 - OQ-4 (backend qualification criteria for `is_provisional = false`) is resolved by Project Owner Decision before any backend declares `is_provisional = false` in its capability profile
