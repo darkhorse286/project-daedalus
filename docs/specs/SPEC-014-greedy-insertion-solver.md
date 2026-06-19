@@ -6,7 +6,7 @@
 
 **Title:** Greedy Insertion Solver
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
@@ -313,7 +313,7 @@ The greedy insertion heuristic is a deterministic construction algorithm. It con
 
 **Determinism class:** Deterministic
 
-**Execution seed usage:** The `execution_seed` field in the SolverRequest (SPEC-004 FR-2) is accepted without error, as required by SPEC-004 FR-11.5 for all backends regardless of classification. The field is not used in any computation. The algorithm's output is determined entirely by the routing problem's coordinates, demands, vehicle count, capacity per vehicle, and the deterministic tie-breaking rule defined in FR-4.
+**Execution seed usage:** The `execution_seed` field in the SolverRequest (SPEC-004 FR-2) is accepted without error, as required by SPEC-004 FR-11.5 for all backends regardless of classification. The field is not used in any computation. The algorithm's output is determined entirely by the routing problem's coordinates, demands, vehicle count, capacity per vehicle, and the four-level deterministic selection rule defined in FR-4.
 
 **Determinism within a conforming execution environment:** This backend produces identical route plans for identical routing problem inputs on every invocation within a given conforming C++17 execution environment, regardless of `execution_seed` value, invocation count, or process state.
 
@@ -381,7 +381,7 @@ The greedy insertion algorithm produces a RoutePlan conforming to SPEC-004 FR-5.
 
 **Stop assignment completeness guarantee on Succeeded:** A Succeeded response guarantees that every stop in the routing problem appears in exactly one route. The algorithm transitions to Succeeded only when all stops have been inserted into routes.
 
-**Vehicle count guarantee:** The RoutePlan always contains exactly `vehicle_count` route entries. Unused vehicles have empty route sequences. No route entry is omitted.
+**Vehicle count guarantee:** When a RoutePlan is present, it contains exactly `vehicle_count` route entries. Unused vehicles have empty route sequences. No route entry is omitted.
 
 **Route sequence semantics:** Each vehicle's route sequence represents the travel order — the sequence of stops visited between depot departure and depot return. Because greedy insertion may insert stops at any valid position within a route (not exclusively appending to the end), the stop ordering within each route reflects accumulated position insertions, not insertion step order.
 
@@ -746,7 +746,7 @@ Do not invent specific latency targets. The areas above require measurement duri
 - The capability profile for `greedy-insertion` must be registered through the mechanism resolved by SPEC-003 OQ-2 before this backend becomes eligible for Scheduler selection. No SPEC-003 schema change is required.
 
 **SPEC-011:**
-- FR-11.1 MVP backend inventory: Update the `greedy-insertion` row from "Required; not yet written" to reflect SPEC-014 Draft status, and ultimately Accepted when SPEC-014 is accepted.
+- FR-11.1 MVP backend inventory: Update the `greedy-insertion` row from "Required; not yet written" to reflect SPEC-014 current status.
 - FR-2.2 inventory table: The backend_id naming convention conflict identified in SPEC-013 OQ-1 (snake_case vs. kebab-case) also affects the `greedy_insertion` entry. SPEC-014 follows the normative FR-3.1 definition (`greedy-insertion`, kebab-case). SPEC-011 FR-2.2 should be updated to use kebab-case identifiers when SPEC-013 OQ-1 is resolved.
 - OQ-3 (Classical Deterministic Backend Timeout Self-Termination Strategy): SPEC-014 partially informs this question by noting that GI may implement deadline polling at insertion step boundaries due to its O(N³) evaluation growth. However, the obligation level for self-termination (whether the backend MUST, SHOULD, or MAY poll) is a specification-level behavioral decision that has not been established in SPEC-014; it remains deferred to implementation planning. SPEC-011 OQ-3 should be updated to reflect SPEC-014's partial contribution but remains open as an Implementation Planning Decision pending obligation-level determination for both classical deterministic backends.
 
