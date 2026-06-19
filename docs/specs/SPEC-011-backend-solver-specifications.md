@@ -490,7 +490,7 @@ The following backends are in scope for the MVP. This inventory is authoritative
 | Backend ID | Display Name | Category | Solver Specification Status |
 |---|---|---|---|
 | `nearest-neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` | Required; not yet written |
-| `greedy-insertion` | Greedy Insertion Heuristic | `classical_deterministic` | Required; not yet written |
+| `greedy-insertion` | Greedy Insertion Heuristic | `classical_deterministic` | Accepted — SPEC-014 |
 | `qubo-simulated-annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` | Required; not yet written |
 
 **3.11.2 Deferred backends:**
