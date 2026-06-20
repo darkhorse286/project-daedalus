@@ -6,13 +6,13 @@
 
 **Title:** Python Solver Adapter
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Revision 2 — Architecture Review governance and documentation alignment)
+**Last Updated:** 2026-06-20 (Accepted — Engineering Review, Owner Decision Review, Architecture Review, and Acceptance Review complete; all blocking findings resolved; ADR-005 advanced to Accepted; OQ-4 resolved)
 
 **Supersedes:** None
 
@@ -927,30 +927,39 @@ The selected Python-language stream isolation mechanism is `numpy.random.SeedSeq
 
 # Acceptance Checklist
 
-- [ ] Problem is clearly defined
-- [ ] Domain concept is defined
-- [ ] Responsibility scope and component boundaries are defined (FR-1)
-- [ ] Transport protocol is decided and ADR-005 OQ-1 is resolved (FR-2)
-- [ ] JSON wire format for SolverRequest is defined (FR-3)
-- [ ] JSON wire format for SolverResponse is defined (FR-4)
-- [ ] Timeout behavior is defined, including both self-termination and Worker HTTP client timeout (FR-5)
-- [ ] Cancellation behavior is defined for pre-execution and in-execution paths (FR-6)
-- [ ] Adapter statelessness is defined (FR-7)
-- [ ] Python environment management is defined (FR-8)
-- [ ] Reproducibility and seed propagation are defined, including NumPy PCG64 policy and Qiskit obligation (FR-9)
-- [ ] Contract version handling is defined (FR-10)
-- [ ] Backend routing is defined (FR-11)
-- [ ] Adapter-level error handling and HTTP status code semantics are defined (FR-12)
-- [ ] Observability is defined including required log events, correlation fields, and log safety (FR-13)
-- [ ] Health checking is defined (FR-14)
-- [ ] Security considerations are defined (FR-15)
-- [ ] Non-requirements are documented
-- [ ] Assumptions are explicit
-- [ ] Failure modes are defined for all identified conditions
-- [ ] Observability requirements exist
-- [ ] Security considerations exist
-- [ ] Documentation updates are identified
-- [ ] OQ-1, OQ-2, OQ-3A, OQ-3B, and OQ-4 acknowledged with blocking status
+- [x] Problem is clearly defined
+- [x] Domain concept is defined
+- [x] Responsibility scope and component boundaries are defined (FR-1)
+- [x] Transport protocol is decided and ADR-005 OQ-1 is resolved (FR-2)
+- [x] JSON wire format for SolverRequest is defined (FR-3)
+- [x] JSON wire format for SolverResponse is defined (FR-4)
+- [x] Timeout behavior is defined, including both self-termination and Worker HTTP client timeout (FR-5)
+- [x] Cancellation behavior is defined for pre-execution and in-execution paths (FR-6)
+- [x] Adapter statelessness is defined (FR-7)
+- [x] Python environment management is defined (FR-8)
+- [x] Reproducibility and seed propagation are defined, including NumPy PCG64 policy and Qiskit obligation (FR-9)
+- [x] Contract version handling is defined (FR-10)
+- [x] Backend routing is defined (FR-11)
+- [x] Adapter-level error handling and HTTP status code semantics are defined (FR-12)
+- [x] Observability is defined including required log events, correlation fields, and log safety (FR-13)
+- [x] Health checking is defined (FR-14)
+- [x] Security considerations are defined (FR-15)
+- [x] Non-requirements are documented
+- [x] Assumptions are explicit
+- [x] Failure modes are defined for all identified conditions
+- [x] Observability requirements exist
+- [x] Security considerations exist
+- [x] Documentation updates are identified
+- [x] OQ-1, OQ-2, OQ-3A, OQ-3B, and OQ-4 acknowledged with blocking status
+- [x] Engineering Review complete — all blocking findings (F-001, F-002, F-003) and non-blocking findings (NB-001 through NB-008) resolved
+- [x] Owner Decision Review complete — OQ-4 resolved; SeedSequence/spawn_key selected and applied in FR-9
+- [x] Architecture Review complete — AR-001 tracked; AR-002, AR-003, AR-004 applied
+- [x] Acceptance Review complete — no blocking issues; Ready for Acceptance verdict (2026-06-20)
+- [x] ADR-005 advanced to Accepted (2026-06-20); Transport Contract section updated to Resolved — SPEC-017
+- [ ] OQ-1 (`transport_overhead_buffer_ms`) resolved — blocks Worker HTTP client implementation; not blocking acceptance
+- [ ] OQ-2 (concurrent request behavior) resolved — must decide before implementation; not blocking acceptance
+- [ ] OQ-3A (adapter disconnect detection bound) resolved — implementation planning; not blocking acceptance
+- [ ] OQ-3B (backend interrupt compliance bound) resolved — per SPEC-018+ backend specifications; not blocking acceptance
 
 ---
 
@@ -959,12 +968,12 @@ The selected Python-language stream isolation mechanism is `numpy.random.SeedSeq
 This feature is complete when:
 
 - All functional requirements (FR-1 through FR-15) are implemented and acceptance criteria pass
-- ADR-005 is updated to Accepted status referencing SPEC-017
-- SPEC-004 OQ-1 is closed referencing SPEC-017
+- ADR-005 is at Accepted status referencing SPEC-017 *(complete — 2026-06-20)*
+- SPEC-004 OQ-1 is closed referencing SPEC-017 *(deferred follow-on — see Documentation Updates Required)*
 - OQ-1 (`transport_overhead_buffer_ms`) is resolved and the Worker HTTP client timeout is configured
 - At least one individual Python backend specification (SPEC-018) conforming to SPEC-017 is Accepted
 - The `python-adapter` Docker Compose service is operational with health checking
 - The Worker successfully dispatches SolverRequests to and receives SolverResponses from the adapter across all test contracts in the Testability section
 - All required adapter structured log events are emitted and correlatable by `job_id` and `decision_id`
-- Engineering review passes
+- Engineering Review, Architecture Review, and Acceptance Review complete *(complete — 2026-06-20)*
 - Specification status is updated to Verified
