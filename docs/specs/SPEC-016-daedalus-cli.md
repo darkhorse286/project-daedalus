@@ -6,13 +6,13 @@
 
 **Title:** Daedalus Command Line Interface
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Revised post-architecture-review: NB-1 OQ-1 ownership clarification, NB-2 generator embedding migration note)
+**Last Updated:** 2026-06-20 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified)
 
 **Supersedes:** None
 
@@ -268,7 +268,7 @@ The generation manifest JSON contains all of these fields per SPEC-002 FR-8.
 
 **Description:** `daedalus problem run <config_file>` combines FR-4 (generate) and FR-3 (submit) in a single command. The caller provides a generation configuration file; the CLI generates the routing problem and immediately submits it to the API.
 
-**Flags:** All flags from FR-3 (submit) and FR-4 (generate) apply, with one disambiguation: in this combined command, `--save-manifest` retains its FR-3 meaning (write the API submission response body) and a distinct flag is provided for the generation manifest. Additionally:
+**Flags:** All flags from FR-3 (submit) apply. All flags from FR-4 (generate) apply except `--manifest`, which is superseded by `--save-generation-manifest` in this combined command (see below). `--save-manifest` retains its FR-3 meaning (write the API submission response body). Additionally:
 
 | Flag | Default | Description |
 |---|---|---|
@@ -426,7 +426,7 @@ c3d4e5f6-...                         Processing  —               2026-06-20T10
 1. Fetch report metadata from `GET /v1/jobs/{job_id}/report`.
 2. On HTTP 200: fetch the report file from `report_url`.
 3. Write the HTML content to `--output`.
-4. If `--open`: open the file in the system default browser.
+4. If `--open` and output was written to a file: open the file in the system default browser. If output was written to stdout (default or `--output -`), `--open` has no effect; a warning is written to stderr.
 
 **Output destination rules:**
 - When `--output <file>` names a file: the HTML is written to that file. Progress summary goes to stdout.
@@ -449,7 +449,8 @@ The metadata summary ("Report found. ...") is written to stderr. Stdout contains
 - For a job that has no report (still executing, report generation failed, or `Failed` job): HTTP 404 is received; a message informs the caller that no report is available and exits with code 1.
 - When output goes to stdout (either by default or via `--output -`), no text other than the HTML content appears on stdout. All progress messages and metadata go to stderr.
 - When `--output <file>` names a file, the metadata summary and "Saved to:" line are written to stdout.
-- `--open` does not fail the command if the system browser cannot be located; the file is saved regardless and a warning is printed to stderr.
+- `--open` does not fail the command if the system browser cannot be located; the file is saved and a warning is printed to stderr.
+- When output is written to stdout (default or `--output -`), `--open` has no effect and a warning is written to stderr.
 - The CLI does not transform or modify the HTML content.
 
 ---
@@ -592,7 +593,7 @@ d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       ava
 **`json` format:**
 - Primary output is a single JSON object or array written to stdout.
 - No decorative text, no color codes, no interactive hints.
-- All errors are also written to stdout as a JSON object with `error_code` and `message` fields (consistent with the SPEC-008 error model).
+- All errors are also written to stdout as a JSON object with `error_code`, `message`, `request_id`, and `field_errors` fields (consistent with the SPEC-008 error model; see JSON error schema below).
 - Suitable for piping to `jq` or automation scripts.
 
 **JSON error schema (used when `--output-format json` and an error occurs):**
