@@ -7,7 +7,7 @@
 **Status:** Accepted
 **Author:** Darkhorse286
 **Created:** 2026-06-14
-**Last Modified:** 2026-06-16
+**Last Modified:** 2026-06-19
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, ADR-008, ADR-010
 **Blocks:** Individual backend solver specifications (SPEC-013, SPEC-014, SPEC-015)
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-010, ADR-011
@@ -489,9 +489,9 @@ The following backends are in scope for the MVP. This inventory is authoritative
 
 | Backend ID | Display Name | Category | Solver Specification Status |
 |---|---|---|---|
-| `nearest-neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` | Required; not yet written |
+| `nearest-neighbor` | Nearest Neighbor Heuristic | `classical_deterministic` | Accepted — SPEC-013 |
 | `greedy-insertion` | Greedy Insertion Heuristic | `classical_deterministic` | Accepted — SPEC-014 |
-| `qubo-simulated-annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` | Required; not yet written |
+| `qubo-simulated-annealing` | QUBO Simulated Annealing | `quantum_inspired_stochastic` | Accepted — SPEC-015 |
 
 **3.11.2 Deferred backends:**
 
