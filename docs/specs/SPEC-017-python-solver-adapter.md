@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Revision 1 — Engineering Review and Owner Decision Review findings)
+**Last Updated:** 2026-06-20 (Revision 2 — Architecture Review governance and documentation alignment)
 
 **Supersedes:** None
 
@@ -319,7 +319,7 @@ If `cancellation_requested` is written to PostgreSQL after the HTTP POST is in f
 
 **Adapter obligations on client disconnect:**
 - The adapter must handle client disconnect without crashing or leaving the process in an inconsistent state.
-- The adapter must interrupt active Python solver computation within a bounded time after detecting client disconnect. The bound is an implementation planning concern (OQ-3).
+- The adapter must interrupt active Python solver computation within a bounded time after detecting client disconnect. The time from disconnect detection to signaling the solver to stop is an adapter implementation planning concern (OQ-3A). The time from the adapter's stop signal to the backend actually halting is a per-backend specification concern (OQ-3B).
 - After handling a disconnect, the adapter must return to its ready state and be able to accept the next request.
 - No in-progress solver computation state from a disconnected request is carried into subsequent requests (statelessness, FR-7).
 
@@ -848,14 +848,14 @@ These are answered by:
 
 # Documentation Updates Required
 
-- **ADR-005:** Update to Accepted status. Document that OQ-1 is resolved: JSON over HTTP is the decided transport at MVP scope. Reference SPEC-017 FR-2 for rationale and endpoint contract. Update the "Transport Contract (Unresolved)" section to "Transport Contract (Resolved — SPEC-017)."
+- **ADR-005:** *(Completed — 2026-06-20)* Advanced to Accepted status. OQ-1 resolved: JSON over HTTP is the decided MVP transport. ADR-005 Transport Contract section updated to "Transport Contract (Resolved — SPEC-017)." SPEC-017 FR-2 is the authoritative endpoint and transport definition.
 - **SPEC-004 OQ-1:** Close with reference to SPEC-017. The Python adapter transport realization is defined in SPEC-017. OQ-1 may be marked Resolved once SPEC-017 is Accepted.
 - **SPEC-005:** Update the non-requirements section note: "Python adapter dispatch is out of scope for this specification until ADR-005 is resolved" is now resolved by SPEC-017. FR-9 (Solver Contract Invocation) dispatch mechanism note can reference SPEC-017 for the Python adapter path. A new Worker configuration value `transport_overhead_buffer_ms` is introduced (OQ-1 in SPEC-017).
   - **SPEC-005 FR-10 (timer duration):** FR-10 must be updated to document that the Python adapter dispatch path uses `execution_timeout_ms + transport_overhead_buffer_ms` as the Worker HTTP client timeout. `execution_timeout_ms` alone remains the adapter self-termination deadline enforced by the adapter internally. The dual-timer model applies to the Python adapter dispatch path only; in-process C++ backend execution is unaffected.
   - **SPEC-005 FR-12 (cancellation behavior):** FR-12 must be updated to document differentiated cancellation behavior for the Python adapter dispatch path. For Python adapter dispatch: the Worker monitors `cancellation_requested` while awaiting the HTTP response and aborts the HTTP connection upon detection. The existing statement that the Worker does not poll `cancellation_requested` continuously during solver execution applies to in-process C++ backend execution only; the Python adapter dispatch path requires connection monitoring as the cancellation signaling mechanism.
 - **SPEC-011 FR-11 (MVP Backend Inventory):** The `Python Adapter` deferred backends entry cites "ADR-005 OQ-1 (transport protocol) unresolved." Update to note that SPEC-017 resolves ADR-005 OQ-1 and individual Python backend specifications may now be written, subject to Prerequisite 6 in SPEC-011 FR-10.1 (SolverContract implementation) using the SPEC-017 HTTP transport.
 - **docs/architecture.md:** Python Solver Adapter responsibilities description includes "JSON or gRPC adapter contract." Update to reflect the decision: JSON over HTTP is the MVP transport.
-- **ADR-010:** The Python-side reproducibility policy is established in SPEC-017 FR-9. ADR-010 Architectural Impact section should note that Python backends use `numpy.random.SeedSequence(execution_seed, spawn_key=(k,))` → `numpy.random.PCG64` per SPEC-017 FR-9 as the Python-language realization of ADR-010 Decision 1's per-component stream isolation policy. The backend spawn key carries the same freeze obligation as the C++ stream constant under ADR-010 Decision 5.
+- **ADR-010:** *(Architectural Impact annotation only — ADR-010 Decision text does not change.)* ADR-010 Architectural Impact section should note: (1) Python backends initialize PCG64 via `numpy.random.SeedSequence(execution_seed, spawn_key=(BACKEND_SPAWN_KEY,))` per SPEC-017 FR-9, which is the Python-language realization of ADR-010 Decision 1's per-component stream isolation policy. (2) Python backend spawn keys are subject to the same freeze obligation and breaking-change procedure as C++ PCG64 stream constants under ADR-010 Decision 5: a spawn key is frozen when the backend specification is Accepted, and changing it constitutes a reproducibility-breaking change requiring the full ADR-010 Decision 5 governance process. Spawn keys and C++ stream constants belong to different initialization mechanisms and are not numerically comparable.
 
 ---
 
@@ -887,15 +887,27 @@ These are answered by:
 
 ---
 
-### OQ-3: Adapter Client Disconnect Response Time Bound
+### OQ-3A: Adapter Disconnect Detection Bound
 
-**Question:** What is the maximum time between the Worker aborting the HTTP connection (cancellation signal) and the adapter interrupting the active Python solver computation?
+**Question:** What is the maximum time between the Worker aborting the HTTP connection and the adapter signaling the active Python solver computation to stop?
 
-**Why it matters:** If Python solver computation continues after client disconnect, adapter resources are consumed by orphaned computation. The bound must be short enough that the adapter is ready for the next request in a reasonable time, and short enough that the adapter does not consume resources unboundedly on cancelled requests.
+**Why it matters:** This bound is the adapter's responsibility: the time from detecting a client disconnect to issuing a stop signal to the Python backend. If the adapter is slow to detect or act on a disconnect, adapter resources are consumed by orphaned computation that the backend has not yet been asked to halt. This bound is governed by the adapter's HTTP server model and Python threading or async model; it is independent of how quickly individual Python backends respond to the stop signal.
 
-**Owner:** Python adapter implementation planning; depends on the Python threading or async model used to interrupt solver computation.
+**Owner:** SPEC-017 implementation planning. Defined during Python adapter implementation.
 
-**Blocking:** Does not block SPEC-017 acceptance. Must be defined in individual Python backend specifications (SPEC-018+) that describe their cancellation interrupt mechanism.
+**Blocking:** Does not block SPEC-017 acceptance. Must be decided before Python adapter implementation begins.
+
+---
+
+### OQ-3B: Backend Interrupt Compliance Bound
+
+**Question:** What is the maximum time between the adapter issuing a stop signal to a Python backend and the backend actually halting computation?
+
+**Why it matters:** This bound is per-backend: it depends on the backend's algorithm structure, checkpoint granularity, and cooperative interrupt mechanism. A backend with coarse-grained checkpoints may take longer to halt than one with fine-grained cooperative yield points. If this bound is not defined per backend, the total adapter resource consumption on a cancelled request cannot be bounded.
+
+**Owner:** Individual Python backend specifications (SPEC-018+). Each backend specification must declare its interrupt compliance bound and the mechanism by which it honors the adapter's stop signal.
+
+**Blocking:** Does not block SPEC-017 acceptance. Must be addressed by each individual Python backend specification before that backend can be Accepted.
 
 ---
 
@@ -938,7 +950,7 @@ The selected Python-language stream isolation mechanism is `numpy.random.SeedSeq
 - [ ] Observability requirements exist
 - [ ] Security considerations exist
 - [ ] Documentation updates are identified
-- [ ] OQ-1 through OQ-4 acknowledged with blocking status
+- [ ] OQ-1, OQ-2, OQ-3A, OQ-3B, and OQ-4 acknowledged with blocking status
 
 ---
 
