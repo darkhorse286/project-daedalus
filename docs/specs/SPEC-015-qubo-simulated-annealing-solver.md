@@ -6,7 +6,7 @@
 
 **Title:** QUBO Simulated Annealing Solver
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
@@ -23,6 +23,12 @@
 **Related ADRs:** ADR-001, ADR-005, ADR-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011
 
 **Related Specs:** SPEC-001, SPEC-002, SPEC-003, SPEC-004, SPEC-005, SPEC-006, SPEC-007, SPEC-010, SPEC-011, SPEC-012
+
+**Review History:**
+- Engineering Review: Completed 2026-06-19
+- Architecture Review: Completed 2026-06-19
+- Owner Decision Review: Completed 2026-06-19
+- Acceptance Review: Completed 2026-06-19
 
 ---
 
@@ -135,8 +141,8 @@ The QUBO formulation maps the CVRP routing problem to a binary optimization prob
 
 **SPEC-015 owns:**
 - The observable behavioral contract: given a SolverRequest, the backend must produce a SolverResponse conforming to SPEC-004
-- The reproducibility invariant: identical `execution_seed` values produce identical solutions across invocations (FR-8, ADR-010)
-- The PRNG policy: PCG64 seeded from `execution_seed` with stream constant `0xcbbb9d5dc90c2383` is the exclusive entropy source (FR-8, ADR-010 Decision 1)
+- The reproducibility invariant: identical `execution_seed` values produce identical solutions across invocations (FR-9, ADR-010)
+- The PRNG policy: PCG64 seeded from `execution_seed` with stream constant `0xcbbb9d5dc90c2383` is the exclusive entropy source (FR-9, ADR-010 Decision 1)
 - The anytime contract: best-so-far tracking and its implications for Timeout and Cancelled responses (FR-6)
 - The extension metadata key definitions: what annealing evidence is persisted and how (FR-12)
 - The failure model: what conditions produce each outcome (FR-13)
@@ -159,7 +165,7 @@ The QUBO formulation maps the CVRP routing problem to a binary optimization prob
 - External timeout enforcement: SPEC-005
 
 **Acceptance Criteria:**
-- No implementation planning decision invalidates the reproducibility invariant (FR-8): the PCG64 stream constant, draw ordering, and seeding procedure are frozen once this specification is Accepted
+- No implementation planning decision invalidates the reproducibility invariant (FR-9, ADR-010): the PCG64 stream constant, draw ordering, and seeding procedure are frozen once this specification is Accepted
 - No implementation planning decision causes the backend to return `Infeasible` (prohibited per SPEC-011 FR-5.2)
 - The decoding and repair strategy must ensure that any RoutePlan included in a SolverResponse satisfies all SPEC-004 FR-5 structural validity requirements
 
