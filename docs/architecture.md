@@ -187,7 +187,7 @@ Responsibilities:
 * optional Qiskit experiments
 * optional AI policy experiments
 * optional OR-Tools integration
-* JSON or gRPC adapter contract
+* JSON over HTTP adapter contract (resolved by ADR-005 and SPEC-017)
 
 Constraint:
 
