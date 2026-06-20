@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20
+**Last Updated:** 2026-06-20 (Revised post-engineering-review: MF-1, MF-2, MF-3, SF-1–SF-7)
 
 **Supersedes:** None
 
@@ -268,18 +268,18 @@ The generation manifest JSON contains all of these fields per SPEC-002 FR-8.
 
 **Description:** `daedalus problem run <config_file>` combines FR-4 (generate) and FR-3 (submit) in a single command. The caller provides a generation configuration file; the CLI generates the routing problem and immediately submits it to the API.
 
-**Flags:** All flags from FR-3 (submit) and FR-4 (generate) apply. Additionally:
+**Flags:** All flags from FR-3 (submit) and FR-4 (generate) apply, with one disambiguation: in this combined command, `--save-manifest` retains its FR-3 meaning (write the API submission response body) and a distinct flag is provided for the generation manifest. Additionally:
 
 | Flag | Default | Description |
 |---|---|---|
 | `--save-problem <file>` | Not saved | Write the generated routing problem document to a file before submission. When absent, the document exists only in memory during the generation-submission pipeline. |
-| `--save-manifest <file>` | Not saved | Write the generation manifest to a file. |
+| `--save-generation-manifest <file>` | Not saved | Write the SPEC-002 generation manifest to a file. Equivalent to `--manifest` in FR-4 but renamed to avoid collision with `--save-manifest` (submission response) when both flags apply in this command. |
 
 **Normal behavior:**
 1. Read and parse the generation configuration from `<config_file>`.
 2. Apply `--seed` override if provided.
 3. Invoke the SPEC-002 generator.
-4. If generation succeeds: optionally save the problem document and manifest per `--save-problem` and `--save-manifest`.
+4. If generation succeeds: optionally save the problem document and generation manifest per `--save-problem` and `--save-generation-manifest`.
 5. Submit the routing problem document to `POST /v1/jobs` with the resolved `scheduler_config_id`.
 6. On HTTP 202: print the combined generation summary and submission result.
 7. If `--wait` is provided: enter the job wait loop (FR-7).
@@ -288,7 +288,8 @@ The generation manifest JSON contains all of these fields per SPEC-002 FR-8.
 - A valid generation config file produces a successful submission and prints the `job_id`, `problem_id`, and generation summary.
 - A generation failure (capacity infeasibility, achievability failure) exits before any API call is made, with exit code 3.
 - A submission validation failure (API returns HTTP 400) exits with code 2; the generation is not retried.
-- `--save-problem` and `--save-manifest` write the respective documents independently of whether the submission succeeds.
+- `--save-problem` and `--save-generation-manifest` write the respective generation artifacts independently of whether the submission succeeds.
+- `--save-manifest` (submission response) writes the HTTP 202 response body independently of whether `--save-problem` or `--save-generation-manifest` are present.
 
 ---
 
@@ -399,7 +400,7 @@ b2c3d4e5-...                         Failed      —               2026-06-20T09
 c3d4e5f6-...                         Processing  —               2026-06-20T10:01:00Z
 ```
 
-**JSON output format:** Array of job status objects per SPEC-008 FR-8.
+**JSON output format:** Array of job summary objects. The exact schema is determined by the `GET /v1/jobs` list endpoint definition (OQ-1). The minimum required fields per entry are: `job_id`, `status`, `solver_outcome` (present when `status = Completed`), and `created_at`. The full single-job detail schema (SPEC-008 FR-8) is not required for list entries.
 
 **Note:** This command depends on a `GET /v1/jobs` list endpoint. If no such endpoint exists in the API at implementation time, this command is deferred (see OQ-1).
 
@@ -427,20 +428,28 @@ c3d4e5f6-...                         Processing  —               2026-06-20T10
 3. Write the HTML content to `--output`.
 4. If `--open`: open the file in the system default browser.
 
-**Text output format (summary before saving):**
+**Output destination rules:**
+- When `--output <file>` names a file: the HTML is written to that file. Progress summary goes to stdout.
+- When `--output -` (explicit) or `--output` is absent (default stdout): the HTML is written to stdout. No other text appears on stdout. All progress summary and metadata go to stderr.
+
+**Text output format (when writing to a file — `--output <file>`):**
 ```
 Report found.
   report_id:    r1s2t3u4-...
   generated_at: 2026-06-20T10:00:05Z
   report_format: html
-Saving to: ./report.html
+Saved to: ./report.html
 ```
+
+**Text output format (when writing to stdout — default or `--output -`):**
+The metadata summary ("Report found. ...") is written to stderr. Stdout contains only the HTML content. No "Saved to:" line appears.
 
 **Acceptance Criteria:**
 - For a `Completed` job with `report_available = true`: the HTML report is written to the output destination.
 - For a job that has no report (still executing, report generation failed, or `Failed` job): HTTP 404 is received; a message informs the caller that no report is available and exits with code 1.
-- When `--output` is `-`, the HTML is written to stdout without any other text output on stdout; progress messages go to stderr.
-- `--open` does not fail the command if the system browser cannot be located; the file is saved regardless and a warning is printed.
+- When output goes to stdout (either by default or via `--output -`), no text other than the HTML content appears on stdout. All progress messages and metadata go to stderr.
+- When `--output <file>` names a file, the metadata summary and "Saved to:" line are written to stdout.
+- `--open` does not fail the command if the system browser cannot be located; the file is saved regardless and a warning is printed to stderr.
 - The CLI does not transform or modify the HTML content.
 
 ---
@@ -545,7 +554,7 @@ Prints the resolved CLI configuration (FR-2) and the API's default scheduler con
    c. Capture the `job_id`.
 3. If `wait: true`: wait for all submitted jobs to reach a terminal state (polling FR-7 behavior, bounded by `wait_timeout_seconds`).
 4. Print the experiment summary table.
-5. Write the experiment result to a JSON manifest file (default: `<experiment_name>.result.json`).
+5. Write the experiment result to a JSON manifest file (default: `<experiment_name>.result.json`). If this file already exists, it is overwritten without prompt. To preserve prior results, callers must rename or relocate the existing file before re-running the experiment.
 
 **Text output format (after all jobs complete):**
 ```
@@ -566,6 +575,7 @@ d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       ava
 - If `wait: true` and one or more jobs time out, the summary notes the timed-out jobs and exits with code 4.
 - The experiment result JSON manifest captures all `job_id` values, all `problem_id` values, all `config_id` values, all solver outcomes, and report availability.
 - An experiment with no scheduler configuration entries is rejected with a usage error before any API call.
+- Inline scheduler configuration entries (`inline` key) create new persistent configurations in the system via `POST /v1/scheduler-configs` on each experiment invocation. Duplicate configurations are not detected or prevented (SPEC-008 FR-16: `POST /v1/scheduler-configs` is not idempotent). Accumulation of inline configurations across repeated experiment runs is an accepted MVP limitation. Callers who wish to avoid accumulation should pre-create configurations and reference them by `config_id`.
 
 ---
 
@@ -590,16 +600,21 @@ d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       ava
 {
   "error_code": "string",
   "message": "string",
+  "request_id": "string | null",
   "field_errors": [
     { "field": "string", "message": "string" }
   ]
 }
 ```
 
+`request_id` is present and non-null when the error originates from an API response (SPEC-008 FR-14 error model). It is `null` or absent when the error is CLI-local (file not found, generation failure, local pre-validation, network failure before an API response was received). This preserves the SPEC-008 FR-14 `request_id` for observability correlation (ADR-006, ADR-011) without fabricating a value for non-API errors.
+
 **Acceptance Criteria:**
 - When `--output-format json`, stdout contains only valid JSON. No decorative text appears on stdout.
 - When `--output-format text`, output is human-readable and formatted.
 - All commands produce valid JSON when `--output-format json`, including on error paths.
+- When an API error response is received, the `request_id` from the SPEC-008 FR-14 error body is included in the CLI's JSON error output unchanged. It is not transformed or regenerated by the CLI.
+- When an error is CLI-local (no API response received), `request_id` is `null` in the JSON error output.
 - `--quiet` suppresses non-primary output in both formats. In text mode, only the most essential result line is printed. In JSON mode, `--quiet` has no effect (JSON output is already compact).
 
 ---
@@ -617,14 +632,28 @@ d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       ava
 | 4 | `WAIT_TIMEOUT` | The `job wait` or `problem run --wait` polling timeout expired before the job reached a terminal state. |
 | 5 | `JOB_FAILED` | A waited job reached the terminal state `Failed` (Worker lifecycle failure, not a solver failure). |
 
-**Solver-level non-success outcomes** (`Infeasible`, `Timeout`, `Cancelled`) are not CLI failures: when a waited job completes with these solver outcomes, the CLI exits with code 0. The `solver_outcome` in the output indicates the solver-level result.
+**Solver-level outcomes for `Completed` jobs** do not cause CLI failure. SPEC-008 FR-9 defines the complete set of `solver_outcome` values that a `Completed` job may carry: `Succeeded`, `Infeasible`, `Timeout`, `Cancelled`, `Failed`, `ContractViolation`. All six produce exit code 0 when a waited job reaches `status = Completed`. The CLI distinguishes solver-level outcomes from Worker lifecycle outcomes:
+
+| `status` | `solver_outcome` | CLI exit code | Notes |
+|---|---|---|---|
+| `Completed` | `Succeeded` | 0 | Solver found a valid solution |
+| `Completed` | `Infeasible` | 0 | Solver determined problem has no feasible solution |
+| `Completed` | `Timeout` | 0 | Solver exhausted time budget without finding a solution |
+| `Completed` | `Cancelled` | 0 | Cancellation flag was observed before solver dispatch |
+| `Completed` | `Failed` | 0 | Solver returned an execution failure code (solver-level, not Worker lifecycle) |
+| `Completed` | `ContractViolation` | 0 | Solver returned a structurally invalid response (SPEC-008 FR-9) |
+| `Failed` | _(absent)_ | 5 | Worker could not complete its execution lifecycle; no evidence record produced |
+
+`solver_outcome = Failed` (a solver-level outcome for a `Completed` job) is distinct from `status = Failed` (a Worker lifecycle failure). A job with `status = Completed` and `solver_outcome = Failed` exits the CLI with code 0. Only `status = Failed` produces exit code 5. Callers must inspect `solver_outcome` to determine the optimization result; exit code 0 from a waited job does not imply solver success.
 
 **Acceptance Criteria:**
 - Every command path exits with exactly one of the defined codes.
 - Exit code 0 is used only when the command's primary operation succeeded.
-- Exit code 5 is used when a waited job reaches `status = Failed`; it is not used for solver outcomes of `Infeasible`, `Timeout`, or `Cancelled`.
+- Exit code 5 is used when a waited job reaches `status = Failed` (Worker lifecycle failure). It is not used for any `solver_outcome` value on a `Completed` job.
 - Exit code 2 is used for both local validation errors (bad generation config) and API validation errors (HTTP 400 from SPEC-008).
 - Exit codes are consistent across `text` and `json` output formats.
+- Exit code 0 is produced for a waited job with `solver_outcome = ContractViolation` (a `Completed` job with an invalid solver response).
+- Exit code 0 is produced for a waited job with `solver_outcome = Failed` (a `Completed` job with a solver execution failure).
 
 ---
 
@@ -639,15 +668,26 @@ Error: validation failed (exit 2)
   stops[3].demand: must be non-negative
 ```
 
-**JSON format error:**
+**JSON format error (API validation error — `request_id` propagated from SPEC-008 FR-14 response):**
 ```json
 {
   "error_code": "VALIDATION_ERROR",
   "message": "Routing problem validation failed",
+  "request_id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890",
   "field_errors": [
     { "field": "average_vehicle_speed_kmh", "message": "must be a positive number" },
     { "field": "stops[3].demand", "message": "must be non-negative" }
   ]
+}
+```
+
+**JSON format error (CLI-local error — no API response received, `request_id` is null):**
+```json
+{
+  "error_code": "GENERATION_FAILURE",
+  "message": "Generation failed: total demand (432) exceeds total capacity (400)",
+  "request_id": null,
+  "field_errors": []
 }
 ```
 
@@ -665,7 +705,8 @@ Error: validation failed (exit 2)
 | Timeout | Wait polling timeout | Print the `job_id` and elapsed time; note the job continues executing |
 
 **Acceptance Criteria:**
-- API error responses are surfaced as-is (field errors, codes, messages) without transformation.
+- When an API error response is received, the `error_code`, `message`, `request_id`, and `field_errors` fields from the SPEC-008 FR-14 error body are propagated to CLI output without transformation. No field is removed, added, or renamed.
+- When an error is CLI-local (generation failure, file not found, pre-validation, network failure before an API response was received), `request_id` is `null` in JSON output and absent in text output.
 - Internal details (stack traces, connection strings, PostgreSQL error codes) never appear in CLI output.
 - Network-level errors include the API URL that was attempted, enabling the caller to diagnose misconfigured `--api-url`.
 - All errors are written to stderr in text format. In JSON format, errors are written to stdout so that automation can parse them.
@@ -766,7 +807,7 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 | Command result | Developer, automation | Text or JSON per FR-13 | Written to stdout |
 | Error messages | Developer, automation | Text or JSON per FR-15 | Text: stderr. JSON: stdout |
 | Generated routing problem document | Developer, file system | JSON per SPEC-001 FR-11 | `--output` flag or stdout |
-| Generation manifest | Developer, file system | JSON per SPEC-002 FR-8 | `--manifest` flag |
+| Generation manifest | Developer, file system | JSON per SPEC-002 FR-8 | `--manifest` flag (FR-4); `--save-generation-manifest` flag (FR-5) |
 | Report file | Developer, browser | `text/html` from API | `--output` flag or stdout |
 | Experiment result manifest | Developer, CI | JSON | `<name>.result.json` |
 | Submission manifest | Developer, CI | JSON | `--save-manifest` flag |
@@ -913,7 +954,8 @@ The following behaviors must be proven before this feature is considered complet
 
 - `report show <job_id>` for a job with `report_available = true` writes the HTML file to the specified output.
 - `report show <job_id>` for a job with `report_available = false` exits with code 1.
-- When `--output -`, the HTML is written to stdout and no other text appears on stdout.
+- When output goes to stdout (either by default or via `--output -`), only the HTML content appears on stdout; all progress messages and metadata go to stderr.
+- When `--output <file>` names a file, the metadata summary and "Saved to:" line appear on stdout alongside the file write.
 
 ## Config Command Behaviors
 
@@ -922,6 +964,9 @@ The following behaviors must be proven before this feature is considered complet
 - `config list` includes the default configuration.
 - `config get` with a known `config_id` prints the configuration.
 - `config get` with an unknown `config_id` exits with code 1.
+- `config default` prints the resolved `api_url` and the source that produced it (flag, environment variable, project config file, user config file, or built-in default).
+- `config default` prints the API's default scheduler configuration including its `config_id` and `objective_mode`.
+- `config default` exits with code 1 when the API is unreachable (the resolved `api_url` is always printed before the API call, so the URL source is visible even on failure).
 
 ## Output Format Behaviors
 
@@ -929,13 +974,29 @@ The following behaviors must be proven before this feature is considered complet
 - `--output-format json` produces no decorative text on stdout.
 - In text format, errors appear on stderr. In JSON format, errors appear on stdout.
 - `--quiet` suppresses intermediate polling output in `job wait`.
+- `--no-color` produces text output with no ANSI escape code sequences; status values and headings appear as plain text.
+
+## Debug Log Behaviors
+
+- When `DAEDALUS_LOG=debug` is set, a `cli.command.start` event appears on stderr before any API call is made.
+- When `DAEDALUS_LOG=debug` is set and an HTTP request is issued, a `cli.api.request` event appears on stderr containing `method`, `url`, and `body_size_bytes`.
+- When `DAEDALUS_LOG=debug` is set and an HTTP response is received, a `cli.api.response` event appears on stderr containing `status_code` and `latency_ms`.
+- When `DAEDALUS_LOG=debug` is set, a `cli.command.exit` event appears on stderr after the command exits, containing `exit_code` and `duration_ms`.
+- When `DAEDALUS_LOG` is unset, no debug log events appear on stderr.
+- When `DAEDALUS_LOG` is set to any value other than `debug`, no debug log events appear on stderr.
+- All debug log events are valid JSON, one event per line.
+- Debug log events do not include routing problem coordinate arrays.
 
 ## Exit Code Behaviors
 
 - Every command exits with exactly one of the defined codes (0–5).
 - Exit code 0 for successful submission (no `--wait`).
-- Exit code 0 for a waited job that completes with `solver_outcome = Infeasible` (solver non-success is not a CLI failure).
-- Exit code 5 only for a job that reaches `status = Failed`.
+- Exit code 0 for a waited job that completes with `solver_outcome = Infeasible`.
+- Exit code 0 for a waited job that completes with `solver_outcome = Timeout`.
+- Exit code 0 for a waited job that completes with `solver_outcome = Cancelled`.
+- Exit code 0 for a waited job that completes with `solver_outcome = Failed` (solver-level failure within a `Completed` job; distinct from `status = Failed`).
+- Exit code 0 for a waited job that completes with `solver_outcome = ContractViolation`.
+- Exit code 5 only for a job that reaches `status = Failed` (Worker lifecycle failure).
 - Exit code 2 for any API validation error (HTTP 400).
 - Exit code 3 for any generator construction self-check failure.
 
@@ -945,6 +1006,8 @@ The following behaviors must be proven before this feature is considered complet
 - A generation failure in an experiment exits with code 3 before any job is submitted.
 - An experiment with `wait: true` collects results from all jobs.
 - When one job reaches `Failed` in an experiment, the CLI exits with code 5 and reports all other job outcomes.
+- The experiment result manifest (`<name>.result.json`) contains: the experiment `name`, the generation config or problem file source, all submitted `job_id` values, all resolved `config_id` values, all `solver_outcome` values (for completed jobs), and all `report_available` flags.
+- If `<name>.result.json` already exists from a prior run, the CLI overwrites it without prompting.
 
 ---
 
@@ -956,7 +1019,7 @@ The following questions must be answerable by a developer running the CLI:
 
 1. What API URL is the CLI using for this invocation? (Answered by `config default` command and `--api-url` flag behavior.)
 2. What HTTP requests did the CLI issue and what responses did it receive? (Answered by `DAEDALUS_LOG=debug` output.)
-3. What was the generation configuration for a submitted problem? (Answered by `--save-manifest`, which captures generation parameters.)
+3. What was the generation configuration for a submitted problem? (Answered by `--manifest` in `problem generate` or `--save-generation-manifest` in `problem run`, which capture generation parameters.)
 4. What were the final outcomes for all jobs in an experiment? (Answered by the experiment result manifest and the summary table.)
 
 ---
