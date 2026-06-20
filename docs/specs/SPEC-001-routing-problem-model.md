@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-07
 
-**Last Updated:** 2026-06-07
+**Last Updated:** 2026-06-19
 
 ---
 
@@ -109,6 +109,7 @@ A routing problem in Project DAEDALUS is a description of a fleet-routing task. 
 - A routing problem with zero stops is invalid.
 - A routing problem with duplicate stop identifiers is invalid.
 - A stop with a demand exceeding vehicle capacity in a single-vehicle problem is structurally valid but will produce an infeasible result.
+- In the C++ domain representation, the stop collection is presented in ascending `stop_id` order. This is the canonical iteration order for all Core and solver operations that iterate stops. JSON submission order and PostgreSQL persistence order are not authoritative for iteration; the C++ representation enforces ascending `stop_id` order regardless of submission or storage order.
 
 ---
 
@@ -122,6 +123,7 @@ A routing problem in Project DAEDALUS is a description of a fleet-routing task. 
 - A location with latitude outside -90.0 to 90.0 is invalid.
 - A location with longitude outside -180.0 to 180.0 is invalid.
 - Distance computation uses the Haversine formula. No other distance metric is in scope for the MVP.
+- The Haversine formula uses a mean Earth radius of **6371.0 km**. This constant is authoritative for all Haversine distance computations: C++ Core distance calculations, route simulation in Core Quality Evaluation (SPEC-007), and solver distance calculations. Use of any other Earth radius constant is a specification violation that undermines determinism and reproducibility.
 - The coordinate system is consistent across depot and all stops.
 - Coordinates are stored as double precision (float8) in PostgreSQL.
 - Coordinates are represented as 64-bit floating-point in the C++ domain representation.
@@ -186,6 +188,16 @@ Domain validation authority is defined in ADR-009. The API validates for fast ca
 
 Route start is t=0, defined as the moment vehicles are available to depart the depot. Time window values are non-negative integers representing seconds elapsed from route start. This is a problem-relative time reference requiring no external clock.
 
+**Travel Time Derivation**
+
+Travel time between two locations is derived at simulation time from the Haversine distance and the routing problem's `average_vehicle_speed_kmh` field (FR-17):
+
+```
+travel_time_seconds = (haversine_distance_km / average_vehicle_speed_kmh) × 3600
+```
+
+Travel times are not stored in the routing problem. They are computed during route simulation from geographic coordinates and `average_vehicle_speed_kmh`. All vehicle travel times use this formula uniformly; there is no per-vehicle speed variation in the MVP.
+
 **Capacity (required)**
 
 Every routing problem enforces vehicle capacity constraints. Total stop demand must not exceed total fleet capacity (FR-8). Each vehicle route must not exceed vehicle capacity.
@@ -249,6 +261,7 @@ The following raw properties must be accessible from the routing problem without
 | constraint_types | Set | Active constraint type identifiers: capacity is always present; time_windows is present when any stop carries time window fields |
 | stop_time_windows | Sequence | Per-stop time window fields (open, close) where present |
 | stop_service_durations | Sequence | Per-stop service duration values, defaulting to 0 when absent |
+| average_vehicle_speed_kmh | float64 | Fleet-wide average vehicle speed in km/h. Used to derive travel times from Haversine distances (FR-17). Present as a field value when submitted; carries the configured system default when absent from a problem with no time windows. |
 
 The derived workload features required by the Scheduler — including capacity_utilization_ratio, problem_size_class, time_window_density, and average_time_window_width_seconds — are computed from these raw properties by the Core. Their computation contract is defined in SPEC-003. SPEC-001 ensures the raw data is accessible; SPEC-003 specifies the feature computation and naming contract.
 
@@ -298,10 +311,12 @@ The Python adapter transport format is explicitly excluded from this spec. It is
 **Description:** The C++ Core constructs an authoritative routing problem representation from the data loaded from PostgreSQL. The C++ representation is the form passed to solvers.
 
 **Acceptance Criteria:**
-- The C++ representation contains all fields required by solver execution: geographic coordinates, time window fields, service duration fields, and capacity fields.
+- The C++ representation contains all fields required by solver execution: geographic coordinates, time window fields, service duration fields, capacity fields, and `average_vehicle_speed_kmh`.
+- When `average_vehicle_speed_kmh` is absent from the submission (permitted for problems with no time-windowed stops), the C++ representation carries the configured system default value for that field.
 - A C++ representation constructed from persisted data is semantically equivalent to the original submission.
 - The C++ representation is not the JSON form. The JSON form is the API and persistence form.
 - The solver contract defined in ADR-008 operates on the C++ representation.
+- The stop collection in the C++ representation is ordered by ascending `stop_id`. This canonical order is enforced regardless of submission order or PostgreSQL storage order. It is a determinism requirement per ADR-010.
 
 ---
 
@@ -336,11 +351,32 @@ This is a dependent architectural constraint. It cannot be verified until the co
 
 ---
 
+### FR-17: Vehicle Speed
+
+**Description:** A routing problem specifies the average vehicle speed used to derive travel times from Haversine distances. All vehicles in the fleet operate at the same speed. There is no per-vehicle speed variation in the MVP.
+
+Travel times are derived values, not stored fields. The derivation formula is defined in FR-9 and is used by route simulation during Core Quality Evaluation (SPEC-007 FR-5).
+
+**Acceptance Criteria:**
+- `average_vehicle_speed_kmh` is a float64 field.
+- `average_vehicle_speed_kmh` must be positive and non-zero.
+- A zero, negative, or NaN value for `average_vehicle_speed_kmh` is invalid and rejected at submission.
+- `average_vehicle_speed_kmh` is required when any stop in the problem carries time window fields. A problem with time-windowed stops and no `average_vehicle_speed_kmh` is invalid.
+- `average_vehicle_speed_kmh` is optional when no stop carries time window fields. When absent, a configurable system default applies. The system default must be a positive non-zero value.
+- `average_vehicle_speed_kmh` is persisted with the routing problem.
+- `average_vehicle_speed_kmh` is included in the C++ domain representation. When absent from the submission, the C++ representation carries the configured system default.
+- `average_vehicle_speed_kmh` applies fleet-wide. There is no per-vehicle speed setting in the MVP.
+
+---
+
 # Non-Requirements
 
 - No real geographic routing. Road networks, traffic data, and turn restrictions are not modeled. Distances are Haversine great-circle approximations only.
 - No multi-depot routing. Single depot only. Multi-depot is deferred beyond the MVP.
 - No heterogeneous vehicle fleets. Single-dimension capacity only. Multi-dimensional capacity is deferred beyond the MVP.
+- No heterogeneous fleet extension hooks. No structural provisions for future heterogeneous fleet support are introduced in the MVP.
+- No per-vehicle speed variation. All vehicles in the fleet operate at the same speed defined by `average_vehicle_speed_kmh`. Individual vehicle speed settings are not modeled.
+- No depot service duration. Loading and unloading durations at the depot are not modeled. Route start (t=0) is defined as the moment vehicles are available to depart the depot, with no depot dwell time before or after routes. Depot service duration is a simulation concern deferred beyond the MVP.
 - No dynamic stop insertion or removal after job submission. The routing problem is immutable.
 - No routing problem versioning. A submitted problem cannot be amended.
 - No routing problem deletion or archiving. A routing problem is retained indefinitely after submission. No deletion, expiry, or archiving mechanism exists in the MVP.
@@ -357,6 +393,7 @@ This is a dependent architectural constraint. It cannot be verified until the co
 # Assumptions
 
 - All vehicles in the fleet have identical capacity. Vehicle heterogeneity is not required for the MVP.
+- All vehicles in the fleet travel at the same average speed (`average_vehicle_speed_kmh`). Per-vehicle speed variation is not required for the MVP.
 - A single depot serves the entire fleet.
 - Stop demand is a single non-negative integer. One-dimensional capacity is sufficient for the MVP.
 - Distances are computed using the Haversine formula from geographic coordinates. A precomputed distance matrix is not required as input.
@@ -426,6 +463,15 @@ Each stop:
 
 ```
 integer (non-negative, 64-bit)
+```
+
+**average_vehicle_speed_kmh** (conditionally required)
+
+```
+float64 (positive, non-zero).
+Required when any stop carries time window fields (time_window_open or time_window_close present).
+Optional when no stop carries time window fields; a configurable system default applies when absent.
+Zero, negative, or NaN values are rejected.
 ```
 
 **scheduler_config_id** (optional)
@@ -629,6 +675,9 @@ The following behaviors must be proven before this feature is considered complet
 - A stop with time_window_close present and time_window_open absent.
 - A negative service_duration value.
 - A scheduler_config_id that does not reference an existing scheduler configuration.
+- A problem with time-windowed stops and `average_vehicle_speed_kmh` absent.
+- An `average_vehicle_speed_kmh` value of zero.
+- A negative `average_vehicle_speed_kmh` value.
 
 **Configurability:**
 
@@ -647,6 +696,17 @@ The following behaviors must be proven before this feature is considered complet
 **Distance computation:**
 
 - The Haversine distance between two geographic locations at a known separation, verified against a geographic reference, is within acceptable tolerance for the Haversine formula. This verifies accuracy, not symmetry.
+- The Haversine computation uses an Earth radius of exactly 6371.0 km. Verified by computing a known distance with a known angular separation and confirming the result matches the expected value computed with the 6371.0 km constant.
+
+**Vehicle speed:**
+
+- A problem with time-windowed stops and `average_vehicle_speed_kmh` present is accepted. The value is available in the C++ representation.
+- A problem with no time-windowed stops and `average_vehicle_speed_kmh` absent produces a C++ representation in which the speed field carries the configured system default.
+- The speed value persists through the persistence round-trip without modification.
+
+**Stop iteration order:**
+
+- The C++ representation presents stops in ascending `stop_id` order regardless of the order in which stops were submitted. A problem submitted with stops in non-ascending order produces a C++ representation in which the stop collection is sorted ascending by `stop_id`.
 
 **Time window and service duration:**
 
@@ -659,7 +719,7 @@ The following behaviors must be proven before this feature is considered complet
 
 - A C++ routing problem representation constructed from a PostgreSQL record is semantically equivalent to the original submitted problem.
 - Geographic coordinates (depot and stops) survive the persistence and load cycle without precision loss.
-- Time window fields, service duration values, and capacity fields survive the persistence and load cycle correctly.
+- Time window fields, service duration values, capacity fields, and `average_vehicle_speed_kmh` survive the persistence and load cycle correctly.
 - The seed value survives the persistence and load cycle without modification.
 
 ## API Integration Behaviors
@@ -816,8 +876,12 @@ Do not invent specific latency targets. These areas require measurement during i
 - Architecture documentation: routing problem entity definition, geographic coordinate model with double precision specification, route start definition, time window model, and service duration model
 - ADR-008: concrete solver contract interface is a dependent output of this spec and must be drafted after approval
 - ADR-009: domain validation authority (created alongside this spec update)
-- SPEC-002 (Synthetic Workload Generator): depends on this spec for schema, validation rules, coordinate generation approach, service duration generation, and time window generation parameters
+- SPEC-002 (Synthetic Workload Generator): depends on this spec for schema, validation rules, coordinate generation approach, service duration generation, and time window generation parameters. **Revision required:** SPEC-002 must be updated to generate `average_vehicle_speed_kmh` as part of routing problem instances and must document the speed value used when generating synthetic workloads. If SPEC-002 generates time-windowed problems, it must ensure time windows are achievable under the configured `average_vehicle_speed_kmh`.
 - SPEC-003 (Scheduler Objectives and Policy Engine): depends on this spec for raw problem properties available for workload feature computation; must define derived workload features (capacity_utilization_ratio, problem_size_class, time_window_density, average_time_window_width_seconds) and the default scheduler configuration referenced by FR-13
+- SPEC-007 (Core Quality Evaluation): references `average_vehicle_speed_kmh` as `RoutingProblem.average_vehicle_speed_kmh` per Project Owner Decision ODR-1, noting "pending SPEC-001 revision." That pending status is resolved by this revision. The "pending SPEC-001 revision" dependency note in SPEC-007 FR-3 and SPEC-007 FR-5 may be removed.
+- SPEC-008 (API Control Plane): may require minor update to document `average_vehicle_speed_kmh` in job submission request body documentation.
+- SPEC-012 (Persistence Schema): **Revision required.** Must add `average_vehicle_speed_kmh` as a column to the routing problems table. Type: `DOUBLE PRECISION`. The column must accept NULL for problems submitted without this field (no time windows), with the system default applied by the API layer before persistence or at load time in the C++ representation.
+- SPEC-004 (Solver Contract), SPEC-013 (Nearest-Neighbor Solver), SPEC-014 (Greedy Insertion Solver), SPEC-015 (QUBO Simulated Annealing Solver): no behavioral changes required. The `routing_problem` field in the SolverRequest (SPEC-004 FR-2) carries the complete C++ domain representation, which now includes `average_vehicle_speed_kmh`. Solver specifications reference the C++ domain representation and do not enumerate individual routing problem fields. No solver contract version increment is required.
 
 ---
 
