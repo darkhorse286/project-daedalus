@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-12
 
-**Last Updated:** 2026-06-12
+**Last Updated:** 2026-06-19
 
 **Supersedes:** None
 
@@ -116,7 +116,7 @@ A job submission request is an HTTP POST to the job submission endpoint. The req
 | `seed` | uint64 | Yes | Non-negative 64-bit integer (SPEC-001 FR-6) |
 | `vehicle_count` | positive integer | Yes | ≥ 1 (SPEC-001 FR-2) |
 | `capacity_per_vehicle` | positive integer | Yes | ≥ 1 (SPEC-001 FR-2) |
-| `average_vehicle_speed_kmh` | float64 | Yes | > 0.0; required for route simulation (ODR-1; SPEC-001 revision pending) |
+| `average_vehicle_speed_kmh` | float64 | Yes | > 0.0; required for all routing problem submissions (SPEC-001 FR-17; ODR-1) |
 | `depot` | object | Yes | `{latitude, longitude}` — geographic coordinates (SPEC-001 FR-3, FR-5) |
 | `stops` | array | Yes | One or more stop objects; must not be empty (SPEC-001 FR-4) |
 
@@ -161,7 +161,7 @@ Domain validation rules derived from SPEC-001, applied for fast caller feedback 
 |---|---|---|
 | `vehicle_count` ≥ 1 | FR-2 | `vehicle_count must be a positive integer` |
 | `capacity_per_vehicle` ≥ 1 | FR-2 | `capacity_per_vehicle must be a positive integer` |
-| `average_vehicle_speed_kmh` > 0.0 | ODR-1 | `average_vehicle_speed_kmh must be a positive number` |
+| `average_vehicle_speed_kmh` > 0.0 | FR-17 | `average_vehicle_speed_kmh must be a positive number` |
 | Depot latitude ∈ [−90.0, 90.0] | FR-5 | `depot.latitude is out of range` |
 | Depot longitude ∈ [−180.0, 180.0] | FR-5 | `depot.longitude is out of range` |
 | At least one stop | FR-4 | `stops must contain at least one stop` |
@@ -777,7 +777,7 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 3. The default scheduler configuration (SPEC-003 FR-14: `Balanced` mode, equal weights) is seeded into PostgreSQL at API startup before any requests are processed. The API does not lazily create it.
 4. The report volume defined in the Docker Compose container topology (architecture.md) is mounted and readable by the API container. The API does not write to the report volume.
 5. The routing problem records, job records, and report metadata records written to PostgreSQL by the Worker are readable by the API. Both the API and Worker connect to the same PostgreSQL instance.
-6. The `average_vehicle_speed_kmh` field belongs to the routing problem domain (ODR-1). SPEC-001 will be revised to add this field. Until that revision is accepted, this field is specified here as a required submission field and is persisted with the routing problem record.
+6. The `average_vehicle_speed_kmh` field belongs to the routing problem domain, formally defined in SPEC-001 FR-17 per Project Owner Decision ODR-1. The field is required for all routing problem submissions.
 7. Routing problems in the MVP are primarily synthetic (SPEC-002). Real-world coordinate submissions are architecturally supported but are not explicitly tested.
 8. No authentication or authorization is required at MVP scope. No authentication layer exists at MVP scope — not within the API, and not as an external proxy or gateway sitting in front of it. All API endpoints are accessible without credentials. Multi-tenant security is deferred to post-MVP implementation (README). The MVP is assumed to run in a trusted local development environment.
 
@@ -1041,7 +1041,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 # Documentation Updates Required
 
 - **docs/architecture.md**: The API Responsibilities section accurately describes the API's role at a high level. SPEC-008 is the authoritative binding contract. No architecture.md changes are required.
-- **SPEC-001**: Must be revised to add `average_vehicle_speed_kmh` as a required routing problem field per ODR-1. Until that revision is accepted, SPEC-008 FR-2 and Assumption 6 define the API's treatment of this field.
+- **SPEC-001 (revision complete)**: `average_vehicle_speed_kmh` is formally defined in SPEC-001 FR-17 as a required routing problem field per ODR-1. SPEC-008 FR-2 and FR-3 now reference SPEC-001 FR-17 as the authoritative definition.
 - **SPEC-003**: The scheduler configuration endpoint contract defined in SPEC-008 FR-10 is the API's implementation of the configuration persistence model implied by SPEC-003 FR-13. No SPEC-003 changes are required.
 - **SPEC-005 FR-12**: The cancellation delivery mechanism is resolved (ODR-5). SPEC-008 FR-11 (API writes `cancellation_requested`) and SPEC-005 FR-12 (Worker reads flag at pre-execution check) are consistent. No further cross-spec updates required for cancellation.
 - **SPEC-006 FR-4 (Job Record Persistence Schema)**: Resolved by ODR-6. SPEC-006 FR-4.2 has been updated to add `scheduler_config_id` and `cancellation_requested`, and SPEC-008 FR-4 and FR-8 have been aligned to SPEC-006's authoritative field names (`created_at`, `updated_at`, `completed_at`, `failed_at`). Engineering Review findings B-2 and B-3 are resolved. SPEC-006 is the authoritative schema owner per ODR-6; future job record field additions require a SPEC-006 revision.
@@ -1156,7 +1156,7 @@ This feature is complete when:
 - OQ-6 (trace context propagation) is resolved and incorporated in FR-17
 - All test contracts defined in the Testability section pass
 - The `job.submit` span is emitted and verifiable in the OpenTelemetry Collector on every submission attempt
-- SPEC-001 is revised to include `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 is updated to reference SPEC-001 directly
+- SPEC-001 FR-17 defines `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 references SPEC-001 FR-17
 - Engineering review passes
 - Architecture review passes
 - Specification status is updated to Verified
