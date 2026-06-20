@@ -6,7 +6,7 @@
 
 **Title:** QUBO Simulated Annealing Solver
 
-**Status:** Draft
+**Status:** Proposed
 
 **Author:** Darkhorse286
 
@@ -195,13 +195,19 @@ This section documents the PRNG draw ordering for all PCG64 draws consumed durin
 
 All PCG64 draws consumed to construct the starting state for the annealing process occur in Phase 1. All Phase 1 draws are consumed before the first annealing iteration begins.
 
-The exact ordering of Phase 1 draws depends on the initial solution construction algorithm selected during implementation planning. The construction strategy may be stop-centric (processing stops in a deterministic order), binary-variable-centric (initializing binary state variables in index order), or another approach determined by the QUBO encoding choice (FR-2). Because the QUBO binary encoding is an implementation planning decision, the Phase 1 draw ordering cannot be fixed in this Draft specification. The specific Phase 1 draw ordering must be documented as part of OQ-2 resolution; FR-4 must be updated at that time with the complete Phase 1 draw sequence.
+**Phase 1 draw ordering (stop_id ascending):** Phase 1 draws are organized in stop_id ascending order: all PRNG draws associated with constructing the route assignment for stop 0 are consumed before any draws for stop 1, and so on through stop n−1. This ordering is frozen and applies regardless of the internal QUBO binary encoding or binary variable layout.
 
-The observable constraint is: all Phase 1 draws must be consumed before the first annealing iteration begins, regardless of which construction strategy is chosen.
+**Rationale:** Stop-id ordering decouples the frozen reproducibility obligation from QUBO encoding decisions (FR-2). Stop indices are stable, observable identifiers present in the routing problem document and verifiable without knowledge of QUBO internals. The QUBO variable ordering remains an implementation concern; the implementation is responsible for mapping the stop_id ordered draw sequence to its internal binary variable representation.
+
+**Per-stop draw count:** The complete per-stop draw sequence — number of draws per stop and any sub-ordering within a stop's draws — is determined by the initial solution construction algorithm selected during implementation planning and must be documented there. The stop_id ordering basis is frozen by this specification; the per-stop draw count is an implementation planning decision.
 
 **Phase 2 — Annealing iterations:**
 
-All PCG64 draws consumed during the annealing process occur in Phase 2, after Phase 1 is complete. Within Phase 2, draws are consumed in iteration order: all draws for iteration n are consumed before any draws for iteration n+1. Within each iteration, draws are consumed in a fixed sequence determined by the SA neighborhood structure: first the draws for neighbor proposal, then the draw for Metropolis acceptance (if needed; see FR-5). The exact number of draws per iteration is an implementation planning decision determined by the SA neighborhood structure (FR-2). See OQ-2.
+All PCG64 draws consumed during the annealing process occur in Phase 2, after Phase 1 is complete. Within Phase 2, draws are consumed in iteration order: all draws for iteration n are consumed before any draws for iteration n+1. Within each iteration, draws are consumed in the following fixed sequence determined by the SA neighborhood structure: first the draws for neighbor proposal, then the draw for Metropolis acceptance (if needed; see FR-5).
+
+**Per-iteration draw count:** The exact number of draws consumed per annealing iteration depends on the SA neighborhood structure (FR-2) and is an implementation planning decision. Fixed-k neighborhood operators (consuming exactly k bounded integer draws per neighbor proposal, plus 0 or 1 acceptance draws) and composite neighborhood operators (where the draw count per iteration varies by move type or structure) are both permitted. Seed-deterministic variable draw counts — where the number of draws in an iteration is entirely determined by the values of prior draws from the same `execution_seed` — are acceptable. Draw counts that vary based on wall-clock time, input-structure shortcuts, or any source other than prior PRNG draws are prohibited in reproducibility-critical paths.
+
+**Implementation planning requirement:** All draw consumption per iteration must be completely specified at implementation planning time. Two executions with the same `execution_seed` and the same routing problem must consume identical draws in identical order. Any variable draw count must be entirely seed-determined: two executions with identical seeds must follow the same branch at every conditional draw point.
 
 **Cross-phase ordering:**
 
@@ -209,8 +215,9 @@ Phase 1 draws are always consumed before Phase 2 draws, regardless of implementa
 
 **Acceptance Criteria:**
 - Phase 1 draws are consumed before Phase 2 begins; no Phase 2 draw occurs before Phase 1 is complete
-- Phase 1 draw ordering within the construction strategy is documented in the OQ-2 resolution update to this section
+- Phase 1 draws are organized in stop_id ascending order; all draws for stop 0 precede all draws for stop 1, through stop n−1; the per-stop draw count is determined by the initial solution construction algorithm selected at implementation planning time and must be documented there
 - Phase 2 draws are consumed in iteration order; within each iteration, neighbor proposal draws precede acceptance draws
+- All per-iteration draw consumption is completely specified at implementation planning time; variable draw counts are permitted only when entirely seed-determined
 - Two executions with identical `execution_seed` values and identical routing problems consume draws in the same sequence and produce the same result (ADR-010 reproducibility invariant)
 
 ---
@@ -311,7 +318,7 @@ The following capability profile is the registration artifact consumed by the Sc
 | `latency_profile` | Small: < 1.0s, Medium: < 10.0s, Large: < 60.0s | Pre-implementation estimates based on algorithmic analysis: SA's per-iteration cost scales with the binary state dimension (which scales with stop count and vehicle count). Values expressed in seconds per SPEC-003 FR-4. Empirical measurement on SPEC-002 synthetic workload problems of each size class is required before `is_provisional` can be set to false. |
 | `quality_profile` | `Competitive` | SA's global stochastic search consistently outperforms greedy construction heuristics on CVRP for problems with sufficient iteration budgets. `Competitive` reflects expected performance at or above the `Competitive` tier established by greedy insertion (SPEC-014) and above the `Baseline` tier of nearest-neighbor (SPEC-013). Note: both `greedy-insertion` (SPEC-014) and `qubo-simulated-annealing` declare `Competitive`; the Scheduler cannot differentiate between them on quality alone under this classification. If empirical validation demonstrates SA consistently achieves quality above GI's tier, this classification should be revised to `Near-Optimal` as part of the `is_provisional = false` transition. See OQ-4. |
 | `cost_profile` | `1` | In-process C++ execution with no external dependencies, no network calls, and no paid compute. Cost per invocation is negligible. Value of `1` represents the minimum relative cost unit, consistent with the nearest-neighbor (SPEC-013) and greedy insertion (SPEC-014) backends. SA's higher computational cost relative to construction heuristics is captured in `latency_profile`, not `cost_profile`. |
-| `is_provisional` | `true` | Latency and quality profile values are pre-implementation estimates. This backend must declare `is_provisional = true` until empirical measurement validates the declared values per SPEC-011 FR-4.2. Additionally, the stream constant (OQ-1) must be confirmed before `is_provisional` can be set to false. |
+| `is_provisional` | `true` | Latency and quality profile values are pre-implementation estimates. This backend must declare `is_provisional = true` until empirical measurement validates the declared values per SPEC-011 FR-4.2. |
 | `supported_contract_version` | `1` | Targets SPEC-004 contract version 1. |
 
 **Accuracy basis:** Latency estimates are derived from algorithmic analysis of SA's per-iteration cost over the binary solution space. For N stops and V vehicles, the QUBO state dimension scales as O(N × V), and each SA iteration evaluates one neighbor proposal at that scale. Latency values are registered in seconds per SPEC-003 FR-4. Quality classification as `Competitive` is consistent with SA-for-VRP benchmark results in the literature demonstrating significant improvement over greedy construction. Both values require empirical validation against the SPEC-002 synthetic workload before `is_provisional = false` can be declared.
@@ -320,7 +327,7 @@ The following capability profile is the registration artifact consumed by the Sc
 - All nine fields from the SPEC-011 FR-4.1 table are present
 - `backend_id` matches the FR-3 metadata value
 - `supported_contract_version` equals 1
-- `is_provisional = true` is declared and remains true until empirical validation and OQ-1 resolution are complete
+- `is_provisional = true` is declared and remains true until empirical validation of latency and quality values is complete (OQ-4)
 - The accuracy basis for `latency_profile` and `quality_profile` is stated
 - `latency_profile` values are expressed in seconds per SPEC-003 FR-4
 
@@ -338,7 +345,7 @@ The QUBO simulated annealing backend is a stochastic backend. Its reproducibilit
 
 **PCG64 stream constant:** `0xcbbb9d5dc90c2383`
 
-This value is the PCG64 increment (stream) parameter. It is a 64-bit odd integer. It is frozen once this specification is Accepted; changing it requires the full ADR-010 Decision 5 breaking change procedure, which includes updating ADR-010 with an explicit change record documenting the previous and replacement value. A `specification_version` increment alone is insufficient. See OQ-1.
+This value is the PCG64 increment (stream) parameter. It is a 64-bit odd integer. It is frozen once this specification is Accepted; changing it requires the full ADR-010 Decision 5 breaking change procedure, which includes updating ADR-010 with an explicit change record documenting the previous and replacement value. A `specification_version` increment alone is insufficient.
 
 **Seeding procedure:** The PCG64 PRNG is seeded exactly once per solver execution using `execution_seed` from the SolverRequest (SPEC-004 FR-2) as the initial state, and `0xcbbb9d5dc90c2383` as the stream constant. The PRNG is not reseeded at any point during execution — not at phase boundaries, not when a new best-so-far is found, and not on timeout or cancellation. Reseeding during execution is prohibited.
 
@@ -350,7 +357,11 @@ This value is the PCG64 increment (stream) parameter. It is a 64-bit odd integer
 
 **Distribution sampling:** This backend uses the following ADR-010 Decision 3 approved distribution algorithms in reproducibility-critical paths:
 - **Uniform floating-point on (0, 1]:** For Metropolis acceptance probability comparisons (FR-5), using the conversion formula: `u = (v >> 11) × (1.0 / (1ULL << 53))` where `v` is a 64-bit PCG64 output. When `u` must be strictly positive (as input to any transcendental function), the zero case is handled by resampling (consuming an additional PCG64 draw until a non-zero value is produced).
-- **Bounded uniform integers:** For any integer-range random selections in neighbor proposal (FR-5, Phase 2 draws in FR-4), a bias-free bounded integer sampling algorithm is required. `std::uniform_int_distribution` is prohibited in reproducibility-critical paths (ADR-010 Decision 3). ADR-010 Decision 3 requires the specific algorithm to be named in this specification. The specific algorithm is an implementation planning decision dependent on the SA neighborhood structure (FR-2) and must be identified by name as part of OQ-2 resolution; FR-9 must be updated at that time.
+- **Bounded uniform integers:** For all integer-range random selections in this backend — including Phase 1 stop assignment draws (FR-4) and Phase 2 neighbor proposal draws (FR-5, FR-4) — the bounded integer sampling algorithm is **Lemire's nearly-divisionless method** (Lemire 2019, *Fast Random Integer Generation in an Interval*, ACM TOMACS). This algorithm is named in compliance with ADR-010 Decision 3. `std::uniform_int_distribution` is prohibited in reproducibility-critical paths (ADR-010 Decision 3).
+
+  **Draw consumption:** Lemire's method typically consumes exactly 1 PCG64 draw per bounded integer call. A second draw may be consumed when the first draw falls in the algorithm's rejection region. The probability of this second draw is at most `range / 2^64`, which for stop counts within the Large size class upper bound (approximately 100) is at most 5.4 × 10^−18 per call — negligible in all practical executions.
+
+  **Reproducibility:** The second draw, when it occurs, is a deterministic function of the first draw's value. Two executions with the same `execution_seed` always agree on whether and when the second draw occurs. The draw sequence is fully reproducible: identical seeds produce identical sequences of bounded integer outputs and identical per-call draw counts. Lemire's method satisfies ADR-010's reproducibility guarantee without qualification.
 - `std::normal_distribution` is not used by this backend.
 
 **Floating-point determinism:** All floating-point computation in reproducibility-critical paths uses IEEE 754 double precision (ADR-010 Decision 6). Extended precision (x87 80-bit) must be disabled in reproducibility-critical code. The specific compiler flags are an implementation planning concern.
@@ -593,7 +604,7 @@ SA's optimization capability scales with the iteration budget relative to the so
 
 4. Anytime behavior is achievable: at the `execution_timeout_ms` deadline, the backend can finalize and return its best-so-far RoutePlan without additional significant computation. The response finalization overhead (encoding the RoutePlan from the best-so-far state and populating extension_metadata) is negligible relative to the iteration budget.
 
-5. The PCG64 stream constant `0xcbbb9d5dc90c2383` is statistically independent from the stream constant used by SPEC-002 (the Synthetic Workload Generator). Independence prevents correlation between generated problem instances and solver PRNG sequences when the same problem seed drives both. This assumption must be confirmed during implementation planning (OQ-1).
+5. The PCG64 stream constant `0xcbbb9d5dc90c2383` is independent from the stream constant used by SPEC-002 (the Synthetic Workload Generator). Independence prevents correlation between generated problem instances and solver PRNG sequences when the same problem seed drives both. OQ-1 has been resolved: at Proposed time, SPEC-002 has not yet frozen its stream constant, so no collision exists. PCG64's design guarantees independence between any two instances with distinct odd-valued stream constants; future PCG64-using components must select constants distinct from `0xcbbb9d5dc90c2383`.
 
 6. All MVP backends are executed within the same C++17 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
 
@@ -842,8 +853,8 @@ The following follow-on updates are required as a result of this specification. 
 - The capability profile for `qubo-simulated-annealing` must be registered through the mechanism resolved by SPEC-003 OQ-2 before this backend becomes eligible for Scheduler selection. No SPEC-003 schema change is required; the capability profile fields defined in FR-8 conform to the existing SPEC-003 FR-4 schema.
 
 **SPEC-011:**
-- FR-11.1 MVP backend inventory: Update the `qubo-simulated-annealing` row's "Solver Specification Status" from "Required; not yet written" to reflect SPEC-015's current status.
-- OQ-1 (PCG64 Stream Constants): SPEC-015 proposes `0xcbbb9d5dc90c2383` as the stream constant. When OQ-1 is resolved and the stream constant is confirmed, SPEC-011 OQ-1 may be updated to reference SPEC-015's resolution. No SPEC-011 content change is required; SPEC-011 OQ-1 defers the specific value to the individual solver specification.
+- FR-11.1 MVP backend inventory: Update the `qubo-simulated-annealing` row's "Solver Specification Status" from "Required; not yet written" to "Proposed (SPEC-015)".
+- OQ-1 (PCG64 Stream Constants): SPEC-015 OQ-1 is resolved; the stream constant `0xcbbb9d5dc90c2383` is adopted and frozen. SPEC-011 OQ-1 may be updated to reference SPEC-015's resolution as the first concrete stream constant assignment in the project. No SPEC-011 content change is required; SPEC-011 OQ-1 defers the specific value to the individual solver specification, which SPEC-015 now satisfies.
 
 **SPEC-009:**
 - No structural changes required. The Solver Execution section of the evidence report surfaces `extension_metadata` values for solver runs. For SA invocations, the qsa.* extension_metadata keys provide annealing diagnostic evidence (temperature values, acceptance rate proxy via `qsa.accepted_worse_transitions`, best-solution iteration) that is specifically valuable for the evidence narrative comparing stochastic and deterministic backends. Report generation logic should surface these keys for SA-specific evidence reporting.
@@ -863,39 +874,38 @@ The following follow-on updates are required as a result of this specification. 
 
 ### OQ-1: PCG64 Stream Constant Confirmation
 
-**Classification:** Implementation Planning Decision (blocks Proposed status)
+**Status: Resolved — 2026-06-19 (POD-1)**
 
-**Question:** Is `0xcbbb9d5dc90c2383` an appropriate PCG64 stream constant for the `qubo-simulated-annealing` backend, and is it confirmed to be statistically independent from the stream constant used by SPEC-002 (Synthetic Workload Generator)?
+| Sub-question | Resolution |
+|---|---|
+| Stream constant adopted | `0xcbbb9d5dc90c2383` (frozen) |
+| SPEC-002 stream constant at Proposed time | Not yet frozen; SPEC-002 defers its stream constant to implementation time |
+| Collision risk | None: no other registered PCG64 stream constant exists at Proposed time |
+| Correlation risk | None: PCG64 guarantees independence for any pair of distinct odd-valued stream constants |
+| Future coordination | Future PCG64-using components must select stream constants distinct from `0xcbbb9d5dc90c2383` |
 
-**Context:** ADR-010 Decision 1 requires each stochastic component to document a unique stream constant, frozen once the specification is Accepted. Statistical independence from other components' stream constants prevents correlation in PRNG output sequences when the same problem seed is used across multiple components (e.g., the workload generator and the solver both processing a problem derived from the same root seed). SPEC-011 OQ-1 identifies this as a per-backend implementation planning decision. The value `0xcbbb9d5dc90c2383` is proposed in this Draft specification. It must be confirmed to differ from SPEC-002's stream constant and from any other registered stochastic component's stream constant before this specification advances to Proposed.
-
-**Resolution required before:** This specification advances from Draft to Proposed. The stream constant is frozen at Accepted; it cannot be changed after acceptance without the full ADR-010 Decision 5 breaking change procedure.
-
-**Blocking:** Blocks advancement to Proposed. Does not block engineering review of this Draft.
+**Resolution:** The stream constant `0xcbbb9d5dc90c2383` is adopted as the frozen PCG64 stream constant for the `qubo-simulated-annealing` backend per POD-1. At Proposed time, SPEC-002 (Synthetic Workload Generator) has not yet frozen its PCG64 stream constant; SPEC-002 FR-3 and FR-9 defer the stream constant to implementation time per ADR-010. No collision exists. PCG64's design guarantees statistical independence between any two instances using distinct odd-valued stream constants; the mathematical independence is an algorithm property, not a function of the distance between constant values. A project-level PCG64 stream constant registry is recommended but is not required for Proposed status; it should be established when SPEC-002 is implemented to prevent future accidental collisions. FR-9 has been updated to remove the pending OQ-1 notation; the stream constant is frozen.
 
 ---
 
-### OQ-2: PRNG Draw Ordering — Per-Iteration Count, Phase 1 Ordering, and Bounded Integer Algorithm
+### OQ-2: PRNG Draw Ordering — Phase 1 Ordering, Bounded Integer Algorithm, and Draw Count Model
 
-**Classification:** Implementation Planning Decision (blocks Proposed status)
+**Status: Resolved — 2026-06-19 (POD-2, POD-3, POD-4)**
 
-**Question:** Three draw ordering items require resolution once the SA neighborhood structure and initial solution construction strategy are selected during implementation planning:
+| Sub-question | Resolution | Spec section updated |
+|---|---|---|
+| Phase 1 draw ordering basis | Stop_id ascending order | FR-4 (Phase 1) |
+| Bounded integer sampling algorithm | Lemire's nearly-divisionless method (Lemire 2019) | FR-9 |
+| Per-iteration draw count | Implementation planning decision; fixed-k and composite both permitted | FR-4 (Phase 2) |
+| Variable draw counts | Permitted when entirely seed-determined; prohibited when non-deterministic | FR-4 (Phase 2) |
 
-1. What is the exact number of PCG64 draws consumed per annealing iteration for the selected neighborhood structure?
-2. What is the specific draw ordering within Phase 1 (initial solution generation): stop-centric (processing stops in a deterministic order), binary-variable-centric (initializing binary state variables in index order), or another approach?
-3. What is the specific bias-free bounded integer sampling algorithm used for neighbor proposal draws, as required by ADR-010 Decision 3?
+**Resolution:**
 
-**Context:** SPEC-011 FR-6.2 requires each stochastic solver specification to document its PRNG draw ordering — "the fixed sequence in which PCG64 draws are consumed during a solver execution." FR-4 of this specification documents the two-phase structure (Phase 1: initial solution generation; Phase 2: annealing iterations) and the ordering within Phase 2 (neighbor proposal draws first, acceptance draw second when ΔE > 0). Three items remain deferred pending implementation planning decisions:
+**Phase 1 ordering (POD-2 — stop_id ascending):** Phase 1 PRNG draws are organized in stop_id ascending order. All draws for stop 0 precede all draws for stop 1, and so on. This decouples the frozen draw ordering from QUBO encoding decisions (FR-2): stop ids are stable, observable identifiers independent of binary variable layout. The QUBO variable ordering remains an implementation concern; the implementation is responsible for mapping the stop_id ordered draw sequence to its internal binary variable representation. FR-4 has been updated with this ordering.
 
-- **Per-iteration draw count:** The exact number of draws consumed per annealing iteration depends on the specific SA neighborhood structure (the move operator). A move that selects two stops for a swap consumes two bounded integer draws; a move that selects a stop and a destination vehicle consumes two draws of different types. Until the neighborhood structure is chosen, the per-iteration draw count cannot be specified with precision.
+**Bounded integer algorithm (POD-3 — Lemire's nearly-divisionless method):** Lemire's nearly-divisionless method is adopted for all bounded integer sampling in reproducibility-critical paths, including Phase 1 stop assignment draws and Phase 2 neighbor proposal draws. This satisfies ADR-010 Decision 3. The algorithm's occasional second draw (negligible probability at CVRP scale; see FR-9) is seed-deterministic and does not affect reproducibility. FR-9 has been updated with the algorithm name and draw consumption specification.
 
-- **Phase 1 draw ordering:** The initial solution construction strategy determines the Phase 1 draw ordering. Because the QUBO binary encoding is an implementation planning decision (FR-2), the Phase 1 draw ordering cannot be fixed until the encoding and construction strategy are selected. A stop-centric strategy processes stops in some deterministic order; a binary-variable-centric strategy initializes binary state variables in index order. The choice between strategies must be explicitly specified before the full PRNG draw sequence is frozen.
-
-- **Bounded integer sampling algorithm:** ADR-010 Decision 3 requires the specific bias-free bounded integer algorithm to be named in this specification. The algorithm choice may depend on the neighborhood structure. Common choices include Lemire's nearly-divisionless method (Lemire 2019) and rejection-sampling with power-of-two masking.
-
-**Resolution required before:** This specification advances from Draft to Proposed. OQ-2 resolution must include: (1) an explicit per-iteration draw enumeration (e.g., "two bounded integer draws for neighbor proposal, then one uniform float draw for acceptance when ΔE > 0"); (2) a complete description of Phase 1 draw ordering; and (3) the specific named bounded integer sampling algorithm. FR-4 and FR-9 must be updated with this information at resolution time.
-
-**Blocking:** Blocks advancement to Proposed. Does not block engineering review of this Draft.
+**Per-iteration draw count and draw model (POD-4 — documented draw consumption, variable counts permitted):** No specific neighborhood operator is mandated. The per-iteration draw count is an implementation planning decision. Fixed-k neighborhood operators (consuming exactly k draws per neighbor proposal), composite neighborhood operators (where draw count varies by move type), and seed-deterministic variable draw counts are all permissible. The specification requires that: (1) all draw consumption be completely specified at implementation planning time; (2) identical executions with the same seed consume identical draws; and (3) any variable draw counts be entirely determined by prior PRNG draws — never by wall-clock time, input shortcuts, or non-seed entropy. FR-4 has been updated with these requirements.
 
 ---
 
@@ -941,6 +951,97 @@ The following follow-on updates are required as a result of this specification. 
 
 ---
 
+# Resolution Summary
+
+This section records the Project Owner Decisions that resolved the blocking open questions and authorized advancement from Draft to Proposed status. All decisions were made on 2026-06-19.
+
+---
+
+## POD-1: Stream Constant (Resolves OQ-1)
+
+**Decision:** Adopt `0xcbbb9d5dc90c2383` as the frozen PCG64 stream constant for the `qubo-simulated-annealing` backend.
+
+**Adopted constant:** `0xcbbb9d5dc90c2383`
+
+**Independence finding:** At Proposed time, SPEC-002 (Synthetic Workload Generator) has not frozen its PCG64 stream constant; SPEC-002 defers this to implementation planning. No collision exists between the adopted SPEC-015 constant and any other currently frozen PCG64 stream constant in the project.
+
+**Independence guarantee:** PCG64's design property guarantees statistical independence between any two generator instances using distinct odd-valued stream constants. The guarantee holds for all distinct constants regardless of their numerical distance from each other.
+
+**Future constraint:** Any subsequent component specification that introduces a PCG64-based stochastic computation must select a stream constant distinct from `0xcbbb9d5dc90c2383`. A project-level stream constant registry is recommended to coordinate this at implementation time.
+
+**Spec changes:** FR-9 stream constant note updated to remove the pending OQ-1 reference; Assumption 5 updated to reflect the confirmed finding; OQ-1 marked Resolved.
+
+---
+
+## POD-2: Phase 1 Draw Ordering (Resolves OQ-2 item 1)
+
+**Decision:** Adopt stop_id ascending order as the Phase 1 PRNG draw ordering basis.
+
+**Adopted ordering:** All Phase 1 PRNG draws are organized by stop_id in ascending order: all draws for stop 0 are consumed before any draws for stop 1, and so on through stop n−1.
+
+**Decoupling principle:** Phase 1 reproducibility is intentionally decoupled from QUBO encoding decisions. The QUBO binary encoding (FR-2) is an implementation planning decision; binding the frozen draw ordering to QUBO variable indices would couple a reproducibility obligation to an implementation detail that may change. Stop ids are stable, observable identifiers present in the routing problem document.
+
+**Implementation responsibility:** The implementation is responsible for mapping the stop_id ordered draw sequence to its internal binary variable representation. The QUBO variable ordering, binary state initialization strategy, and per-stop draw count are all implementation planning decisions. Only the stop_id ordering basis is frozen by this decision.
+
+**Spec changes:** FR-4 Phase 1 section updated with stop_id ascending ordering and rationale; FR-4 Acceptance Criteria updated; OQ-2 Phase 1 item marked Resolved.
+
+---
+
+## POD-3: Bounded Integer Algorithm (Resolves OQ-2 item 2)
+
+**Decision:** Adopt Lemire's nearly-divisionless method as the bounded integer sampling algorithm for all reproducibility-critical integer-range draws.
+
+**Adopted algorithm:** Lemire's nearly-divisionless method (Daniel Lemire, 2019, *Fast Random Integer Generation in an Interval*, ACM Transactions on Modeling and Computer Simulation)
+
+**ADR-010 compliance:** Lemire's method is explicitly listed as an approved algorithm in ADR-010 Decision 3. `std::uniform_int_distribution` remains prohibited.
+
+**Scope:** Applies to all bounded integer draws in this backend: Phase 1 stop assignment draws and Phase 2 neighbor proposal draws (FR-4, FR-5).
+
+**Draw consumption:** Typically 1 draw per call. A second draw is possible with probability at most `range / 2^64` (at most ~5.4 × 10^−18 for CVRP-scale ranges). This second draw is seed-deterministic: it is triggered by the value of the first draw, so identical seeds always produce identical call-level draw counts.
+
+**Reproducibility:** Fully reproducible. The algorithm's occasional second draw does not introduce non-determinism. See FR-9 for the complete specification.
+
+**Spec changes:** FR-9 bounded integer section updated with algorithm name, draw consumption specification, and reproducibility statement; OQ-2 algorithm item marked Resolved.
+
+---
+
+## POD-4: Neighborhood Draw Model (Resolves OQ-2 item 3)
+
+**Decision:** The specification does not mandate a fixed-k neighborhood operator. Both fixed-k and variable-draw-count operators are permitted, subject to reproducibility requirements.
+
+**Permitted operator models:**
+- Fixed-k neighborhood operators (consuming exactly k bounded integer draws per neighbor proposal, plus 0 or 1 acceptance draws)
+- Composite neighborhood operators (where draw count per iteration varies by move type or operator structure)
+- Any neighborhood operator producing seed-deterministic per-iteration draw counts
+
+**Reproducibility requirements (non-negotiable):**
+1. All draw consumption must be completely specified at implementation planning time
+2. Two executions with identical `execution_seed` values and identical routing problems must consume identical draws in identical order
+3. Variable draw counts are acceptable only when the draw count at each step is entirely determined by prior PCG64 draws from the same `execution_seed` — never by wall-clock time, problem-structure shortcuts, or any non-seed entropy source
+
+**Not mandated:** No specific neighborhood operator, QUBO encoding, or objective function is required or implied by this decision.
+
+**Spec changes:** FR-4 Phase 2 section updated with permitted draw model and reproducibility requirements; OQ-2 draw count item marked Resolved.
+
+---
+
+**Reproducibility summary:** As of Proposed status, the following reproducibility obligations are frozen and must not change without the ADR-010 Decision 5 breaking change procedure:
+
+| Obligation | Frozen value |
+|---|---|
+| PRNG algorithm | PCG64 |
+| Stream constant | `0xcbbb9d5dc90c2383` |
+| Seeding procedure | Once per execution from `execution_seed`; no reseeding |
+| Phase boundary | Phase 1 (all draws) before Phase 2 (iteration 1, draw 1) |
+| Phase 1 ordering basis | Stop_id ascending |
+| Phase 2 ordering | Iteration order; within iteration: neighbor proposal draws first, acceptance draw last |
+| Bounded integer algorithm | Lemire's nearly-divisionless method |
+| Floating-point precision | IEEE 754 double precision (ADR-010 Decision 6) |
+
+The per-stop draw count (Phase 1) and per-iteration draw count (Phase 2) are implementation planning decisions that must be documented at that time. Once documented, they become frozen as part of the reproducibility invariant. Any change to a frozen draw count is a backward-incompatible change requiring the ADR-010 Decision 5 procedure.
+
+---
+
 # Acceptance Checklist
 
 **SPEC-011 Framework Obligations (FR-12):**
@@ -951,25 +1052,25 @@ The following follow-on updates are required as a result of this specification. 
 - [ ] Algorithm Description (FR-1): Execution phases, distance metric, service duration non-use, completion condition, timeout condition defined
 - [ ] QUBO Formulation Ownership Boundaries (FR-2): Spec-owned vs. implementation planning vs. adjacent specification ownership clearly delineated
 - [ ] Annealing Schedule Behavior (FR-3): Monotonic non-increase constraint defined; temperature schedule class is an implementation planning decision; termination conditions defined
-- [ ] Initial Solution and PRNG Draw Ordering (FR-4): Phase 1 and Phase 2 draw ordering described; Phase 1 ordering deferred to OQ-2 resolution; iteration ordering within Phase 2; phase boundary defined
+- [ ] Initial Solution and PRNG Draw Ordering (FR-4): Phase 1 and Phase 2 draw ordering described; Phase 1 ordering adopted as stop_id ascending (OQ-2 resolved); iteration ordering within Phase 2 documented including permitted draw models and reproducibility requirements (POD-4); phase boundary defined
 - [ ] Transition Proposal and Metropolis Acceptance (FR-5): Acceptance criterion defined; draw consumption for improving vs. worsening transitions stated
 - [ ] Best-So-Far Solution Tracking (FR-6): Candidate qualification requirements; quality comparison criterion; anytime contract; solution_count semantics defined
 - [ ] Constraint Handling (FR-7): Capacity enforced through formulation; time windows and service durations not enforced; infeasibility detection not supported
 - [ ] Capability Profile Declaration (FR-8): All nine fields from SPEC-011 FR-4.1 present; accuracy basis for latency_profile and quality_profile stated; is_provisional = true declared; latency_profile values expressed in seconds per SPEC-003 FR-4
-- [ ] Seed Usage Policy (FR-9): Stochastic class stated; PCG64 named; stream constant documented; seeding procedure (once per execution, before Phase 1); seed authority (execution_seed exclusive); draw ordering cross-reference (FR-4 and FR-5); approved distribution algorithms identified; specific bounded integer algorithm deferred to OQ-2 resolution per ADR-010 Decision 3; floating-point determinism stated; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5
+- [ ] Seed Usage Policy (FR-9): Stochastic class stated; PCG64 named; stream constant documented and frozen (OQ-1 resolved); seeding procedure (once per execution, before Phase 1); seed authority (execution_seed exclusive); draw ordering cross-reference (FR-4 and FR-5); approved distribution algorithms identified; bounded integer algorithm named as Lemire's nearly-divisionless method (OQ-2 resolved, ADR-010 Decision 3); draw consumption and reproducibility of Lemire's method documented; floating-point determinism stated; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5
 - [ ] Supported SolverOutcome Values (FR-10): Explicit table; Infeasible listed as Not Supported; Timeout-with-solution and Cancelled-with-solution behavior stated; satisfies SPEC-011 FR-5.3
 - [ ] RoutePlan Output Requirements (FR-11): Presence per outcome; SPEC-011 FR-7.1 narrowing for Timeout and Cancelled declared; capacity validity guarantee; stop completeness guarantee; time window non-guarantee; execution_duration_ms obligation confirmed
 - [ ] Extension Metadata (FR-12): All six keys documented with types, presence conditions, and descriptions; raw-data prohibition confirmed; absence on no-solution responses stated; satisfies SPEC-011 FR-7.4
 - [ ] Failure Model (FR-13): ContractVersionMismatch, natural termination with no valid solution, internal error, timeout, and cancellation all defined with trigger conditions and required metadata
 - [ ] Performance Characteristics: Expected behavior per size class; basis for estimates stated; relationship to seconds-based capability profile values noted
 - [ ] Testability: Reproducibility, anytime behavior, Metropolis acceptance, temperature monotonicity, capability profile accuracy, extension metadata coverage, and observability all addressed
-- [ ] Open Questions: OQ-1 through OQ-5 classified; blocking status stated; no open questions with unknown classification remain
+- [ ] Open Questions: OQ-1 and OQ-2 resolved and documented in Resolution Summary; OQ-3 through OQ-5 classified as non-blocking; no open questions with unknown classification remain
 - [ ] No individual solver specification obligation contradicts a framework requirement from SPEC-011 FR-1 through FR-11
 
-**Blocking Open Questions Before Proposed:**
+**Resolved Open Questions (Required for Proposed):**
 
-- [ ] OQ-1: PCG64 stream constant `0xcbbb9d5dc90c2383` confirmed independent from SPEC-002 stream constant
-- [ ] OQ-2: Per-iteration PCG64 draw count documented in FR-4 after SA neighborhood structure is selected
+- [x] OQ-1: Stream constant `0xcbbb9d5dc90c2383` adopted and frozen (POD-1); SPEC-002 stream constant unspecified at Proposed time; no collision; PCG64 independence guaranteed for distinct constants
+- [x] OQ-2: Phase 1 ordering adopted as stop_id ascending (POD-2); bounded integer algorithm adopted as Lemire's nearly-divisionless method (POD-3); per-iteration draw model requirements documented with permitted operator types (POD-4)
 
 **Backend-Specific Acceptance Criteria:**
 
@@ -988,8 +1089,8 @@ The following follow-on updates are required as a result of this specification. 
 This backend is complete when:
 
 - SPEC-015 is in Accepted status (this specification)
-- OQ-1 (PCG64 stream constant) is confirmed and FR-4 and FR-9 reflect the confirmed value
-- OQ-2 (PRNG draw ordering: per-iteration draw count, Phase 1 ordering, and bounded integer algorithm) is resolved and FR-4 and FR-9 are updated with the exact draw sequence and algorithm name
+- OQ-1 (PCG64 stream constant) is resolved: stream constant `0xcbbb9d5dc90c2383` is frozen; FR-9 reflects this value; no collision with SPEC-002 at Proposed time
+- OQ-2 (PRNG draw ordering) is resolved: Phase 1 draw ordering (stop_id ascending) is documented in FR-4; bounded integer algorithm (Lemire's nearly-divisionless method) is documented in FR-9; per-iteration draw model requirements and permitted operator types are documented in FR-4; the specific per-stop draw count (Phase 1) and per-iteration draw count (Phase 2) must be documented at implementation planning time as part of the final frozen draw sequence
 - The backend is implemented as a C++ SolverContract conforming to SPEC-004
 - All acceptance criteria in the Testability section pass
 - Reproducibility is verified: two identical SolverRequests (same problem, same execution_seed) produce identical SolverResponse solution fields when both produce Succeeded
