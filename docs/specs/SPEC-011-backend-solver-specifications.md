@@ -7,7 +7,7 @@
 **Status:** Accepted
 **Author:** Darkhorse286
 **Created:** 2026-06-14
-**Last Modified:** 2026-06-19
+**Last Modified:** 2026-06-20
 **Dependencies:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, ADR-008, ADR-010
 **Blocks:** Individual backend solver specifications (SPEC-013, SPEC-014, SPEC-015)
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-010, ADR-011
@@ -112,7 +112,7 @@ SPEC-011 defines the solver specification framework's ownership boundaries and e
 | Workload feature computation | SPEC-010 |
 | Routing problem validation | SPEC-001, ADR-009 |
 | API, queue, or Worker behavior | SPEC-005, architecture.md |
-| Python adapter transport protocol | ADR-005 (deferred) |
+| Python adapter transport protocol | SPEC-017 (Accepted); ADR-005 (Accepted) |
 | Quantum hardware execution model | ADR-007 (deferred) |
 | Individual backend algorithms or pseudocode | Individual solver specifications; implementation planning |
 
@@ -173,7 +173,7 @@ Classification is determined by the backend's algorithm, not by runtime configur
 
 The Python Adapter (ADR-005) is a deployment and transport mechanism, not an algorithmic backend category. When the Python Adapter transport is specified and implemented, Python adapter backends will carry one of the existing algorithmic categories from FR-2.1 based on the algorithm they implement — for example, `classical_deterministic` for a Python construction heuristic or `quantum_inspired_stochastic` for a Python stochastic search. The transport mechanism (ADR-005 process boundary and wire protocol) is governed by ADR-005 and a future adapter specification; it is not a property of the backend's algorithm and does not determine FR-5 or FR-6 obligations.
 
-The Python Adapter is deferred because ADR-005 OQ-1 (transport protocol) is unresolved. Individual Python adapter backend specifications, when written, will declare both their algorithmic category (governing FR-5 and FR-6 obligations) and their transport mechanism.
+ADR-005 OQ-1 (transport protocol) is resolved by SPEC-017 (Accepted 2026-06-20): JSON over HTTP is the accepted MVP transport. Individual Python backend specifications (SPEC-018+) may now be written; each will declare an algorithmic category from FR-2.1 (governing FR-5 and FR-6 obligations) and conform to SPEC-011 framework requirements through the mechanisms defined in SPEC-017.
 
 ---
 
@@ -497,7 +497,7 @@ The following backends are in scope for the MVP. This inventory is authoritative
 
 | Backend | Deferral Reason | Governing ADR |
 |---|---|---|
-| Python Adapter | Transport protocol (ADR-005 OQ-1) unresolved. The Python adapter invocation model cannot be specified without a resolved transport contract. The Python Adapter is a transport and deployment mechanism, not an algorithmic backend category; Python adapter backend specifications, when written, will declare an algorithmic category from FR-2.1 (see FR-2.4). | ADR-005 |
+| Python Adapter | Transport protocol resolved — SPEC-017 (Accepted 2026-06-20) defines JSON over HTTP transport and the full adapter behavioral contract, resolving ADR-005 OQ-1. ADR-005 is Accepted. Individual Python backend specifications (SPEC-018+) may now be written; each will declare an algorithmic category from FR-2.1 (see FR-2.4) and must conform to SPEC-011 framework requirements through the mechanisms defined in SPEC-017. Python backend support exists; no individual Python backend is yet specified. | ADR-005, SPEC-017 |
 | Quantum Hardware | Out of MVP scope. Quantum hardware backends are non-reproducible by nature (hardware entropy); the architectural implications of a non-reproducible backend on the evidence system are deferred beyond MVP. | ADR-007 |
 
 **Acceptance Criteria:**

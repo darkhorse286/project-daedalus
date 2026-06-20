@@ -265,6 +265,7 @@ Box-Muller uses transcendental functions whose results may differ by at most 1 U
 | Domain Layer (C++ Core)      | Yes    |
 | Synthetic Workload Generator | Yes    |
 | QUBO Simulated Annealing     | Yes    |
+| Python Solver Adapter (SPEC-017) | Yes |
 | API Layer (C# ASP.NET)       | No     |
 | Persistence                  | No     |
 | Infrastructure               | Yes    |
@@ -276,6 +277,8 @@ Box-Muller uses transcendental functions whose results may differ by at most 1 U
 **Synthetic Workload Generator:** OQ-1 is resolved. SPEC-002 FR-3 must document the PCG64 stream constant and specify the bounded integer sampling algorithm. SPEC-002 FR-9 must reference this ADR's semantic equivalence standard. SPEC-002 FR-5 must account for Box-Muller's two-output form in draw count calculations.
 
 **QUBO Simulated Annealing:** The annealing process must seed its PRNG from the `execution_seed` it receives in the SolverRequest. The seed usage policy — how the solver initializes its PRNG from `execution_seed` — is defined in the QUBO solver specification. The solver specification does not define derivation policy; `execution_seed` is derived by the Worker per Decision 4 and ODR-4.
+
+**Python Solver Adapter (SPEC-017):** Python backends hosted by the adapter initialize PCG64 via `numpy.random.SeedSequence(execution_seed, spawn_key=(BACKEND_SPAWN_KEY,))` per SPEC-017 FR-9. This is the Python-language realization of Decision 1's per-component stream isolation policy. Each individual Python backend specification (SPEC-018+) must declare a unique positive integer `BACKEND_SPAWN_KEY`. The spawn key is frozen when the backend specification is Accepted; changing it constitutes a reproducibility-breaking change requiring the full Decision 5 governance process. Spawn keys and C++ PCG64 stream constants belong to different initialization mechanisms (SeedSequence hash-based initialization vs. direct PCG64 increment assignment) and are not numerically comparable. This annotation does not modify any ADR-010 Decision.
 
 **Infrastructure:** PCG64 must be adopted as a C++ project dependency. The specific implementation library (the pcg-random.org header-only reference implementation is the default candidate) must be designated during implementation planning. This is not resolved by this ADR.
 

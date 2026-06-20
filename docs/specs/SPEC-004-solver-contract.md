@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-08
 
-**Last Updated:** 2026-06-08 (Revision 1 — Engineering and Architecture Review)
+**Last Updated:** 2026-06-20 (Revision 2 — Post-acceptance documentation alignment; OQ-1 closed referencing SPEC-017)
 
 **Supersedes:** None
 
@@ -452,7 +452,7 @@ The `solver.execute` OTel span (defined in architecture.md) is emitted by the Wo
 - The Solver Contract does not define how SolverResponse fields are persisted to PostgreSQL (Evidence Log Specification responsibility)
 - The Solver Contract does not define route quality evaluation or the normalized quality metric (Core Quality Evaluation Specification responsibility)
 - The Solver Contract does not define regret calculation (Core responsibility)
-- The Solver Contract does not define the Python adapter transport protocol (blocked on ADR-005 transport decision)
+- The Solver Contract does not define the Python adapter transport protocol. The transport and wire format are defined by SPEC-017 (Accepted); the behavioral contract is owned by SPEC-017. ADR-005 is Accepted.
 - The Solver Contract does not define the specific formula by which the Worker derives `execution_seed` from the problem seed (Worker specification responsibility; the uniformity policy is defined in FR-11.3)
 - The Solver Contract does not define solver timeout response time obligations beyond "must respond to cancellation" (implementation planning concern)
 - The Solver Contract does not define QUBO problem formulation or annealing schedule (backend-internal concerns)
@@ -466,7 +466,7 @@ The `solver.execute` OTel span (defined in architecture.md) is emitted by the Wo
 1. All MVP solver backends can express their optimization output as an ordered stop sequence per vehicle satisfying FR-5 structural requirements.
 2. A normalized quality metric meaningful for cross-backend comparison can be computed by Core from the RoutePlan (ordered stop sequences) and the routing problem (coordinates, capacity, time windows, service durations). The specific metric is defined in the Core Quality Evaluation Specification.
 3. Solver backends can self-terminate within a bounded time when `execution_timeout_ms` expires. The specific response time bound is a solver implementation concern.
-4. The Python adapter process realizes the same logical SolverContract through a transport protocol. The logical contract schema applies uniformly; the transport is ADR-005's concern.
+4. The Python adapter process realizes the same logical SolverContract through JSON over HTTP (SPEC-017 FR-2). The logical contract schema applies uniformly; wire-format representations for all SolverRequest and SolverResponse fields are defined in SPEC-017 FR-3 and FR-4.
 5. MVP backends (nearest-neighbor, greedy insertion, QUBO simulated annealing) can all produce capacity-valid, complete route plans as their primary output type within reasonable time budgets.
 6. The QUBO simulated annealing backend can implement anytime behavior: maintaining a running best-complete-solution that has been decoded from the QUBO binary assignment space and repair-processed into a capacity-valid RoutePlan satisfying FR-5 structural requirements, returnable at any point before deadline. This is an implementation risk: a partial annealing state may not decode into a complete, feasible route plan, in which case the backend returns Timeout or Cancelled with no solution. This risk must be validated and explicitly addressed during QUBO backend specification.
 
@@ -478,7 +478,7 @@ The `solver.execute` OTel span (defined in architecture.md) is emitted by the Wo
 2. Backends must not use entropy sources other than `execution_seed` for reproducibility-critical stochastic operations (ADR-010 Decision 4).
 3. The contract operates on the C++ routing problem domain representation (ADR-001, SPEC-001 FR-14).
 4. `extension_metadata` must not contain routing problem raw data (geographic coordinate arrays, full stop lists), to comply with SPEC-001 Security Considerations on log safety.
-5. The Python adapter transport contract is explicitly outside this specification's scope (ADR-005 deferred).
+5. The Python adapter transport contract is outside this specification's scope. The transport and behavioral contract are defined by SPEC-017 (Accepted). ADR-005 is Accepted with the JSON over HTTP transport decision.
 
 ---
 
@@ -655,13 +655,11 @@ Backend-specific questions (QUBO energy convergence, annealing acceptance rates)
 
 ### OQ-1: Python Adapter Transport Realization
 
-**Question:** How does the Python adapter backend realize the SolverContract over an inter-process transport?
+**Status: RESOLVED — SPEC-017 Accepted (2026-06-20)**
 
-**Why it matters:** The Python adapter runs as a separate container process (ADR-005). The SolverContract as defined in SPEC-004 is a logical interface instantiated in C++ for in-process backends. Python backends must present the same logical contract through a network transport (JSON over HTTP or gRPC, per ADR-005 transport candidates). The transport mapping must define wire-format representations for all SolverRequest and SolverResponse fields, including the RoutePlan structure.
+**Resolution:** SPEC-017 (Python Solver Adapter) is Accepted. The Python adapter transport realization is fully defined: JSON over HTTP is the accepted transport (SPEC-017 FR-2, resolving ADR-005 OQ-1). Wire-format representations for all SolverRequest and SolverResponse fields, including the RoutePlan structure, are specified in SPEC-017 FR-3 and FR-4. The cross-language execution boundary is defined by SPEC-017 FR-1. Python adapter behavior is owned by SPEC-017; individual Python backend specifications (SPEC-018+) are children of SPEC-017 and conform to SPEC-011 framework requirements through the mechanisms defined there. ADR-005 is Accepted.
 
-**Ownership:** ADR-005 owns the transport decision. Once ADR-005 is resolved, a transport mapping appendix to SPEC-004 (or a separate Python adapter contract specification) is required before any Python-based backend can be implemented.
-
-**Blocking:** Not blocking SPEC-004 acceptance or C++ solver implementation. Blocking for Python adapter backend implementation.
+**Ownership:** SPEC-017 owns the transport definition and adapter behavioral contract.
 
 ---
 
@@ -736,7 +734,7 @@ The remaining question — what the Worker does upon detecting a structural viol
 - [x] Observability requirements exist
 - [x] Security considerations exist
 - [x] Documentation updates are identified
-- [ ] OQ-1 resolved — Python adapter transport realization (blocking for Python adapter; non-blocking for SPEC-004 acceptance)
+- [x] OQ-1 resolved — Python adapter transport realization. Resolved by SPEC-017 (Accepted 2026-06-20); JSON over HTTP transport and wire format defined in SPEC-017 FR-2 through FR-4. ADR-005 Accepted.
 - [ ] OQ-2 resolved — actual execution cost reporting (non-blocking for MVP)
 - [ ] OQ-3 resolved — partial route plan semantics (non-blocking for MVP)
 - [x] OQ-4 closed — Contract requirement resolved in SPEC-004 (solutions in Timeout/Cancelled responses must satisfy FR-5 structural requirements). Worker handling behavior upon violation is a Worker specification concern.
@@ -752,6 +750,6 @@ This feature is complete when:
 - `solver.execute` OTel span is emitted and verifiable in the test environment
 - ADR-008 status is updated to Accepted following this specification being accepted
 - SPEC-001 FR-15 dependent constraint is marked resolved
-- OQ-1 is resolved and a Python adapter transport mapping is specified before Python adapter backend implementation begins
+- OQ-1 is resolved — Python adapter transport and wire format defined in SPEC-017 (Accepted 2026-06-20); JSON over HTTP transport specified in SPEC-017 FR-2 through FR-4; individual Python backend specifications (SPEC-018+) may now be written
 - Engineering review passes
 - Specification status is updated to Verified
