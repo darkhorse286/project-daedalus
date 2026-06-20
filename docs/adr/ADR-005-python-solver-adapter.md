@@ -2,9 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-06-07
+
+**Amended:** 2026-06-20 — OQ-1 (transport contract) resolved. JSON over HTTP accepted as MVP transport. Transport Contract section updated from Unresolved to Resolved. SPEC-017 FR-2 is the authoritative transport and endpoint definition.
 
 **Related Feature(s):** Python Solver Adapter
 
@@ -34,19 +36,25 @@ The Python adapter runs as a separate container process. The Daedalus Worker com
 
 Python is not the runtime. Python is not the scheduler. Python is an adapter.
 
-## Transport Contract (Unresolved)
+## Transport Contract (Resolved — SPEC-017)
 
-The transport mechanism between the C++ Worker and the Python adapter has not been decided.
+**OQ-1 status: Resolved (2026-06-20)**
 
-The following candidates remain under consideration:
+The transport mechanism between the C++ Worker and the Python adapter is **JSON over HTTP**. This decision is recorded in SPEC-017 FR-2, which is the authoritative endpoint and transport definition.
 
-- JSON over HTTP: Simple, debuggable, testable. Adds per-request serialization overhead. Suitable if routing problem payloads remain small.
-- gRPC: Lower serialization overhead. Strongly typed contract. Better suited for large payloads. Higher implementation complexity.
-- stdin/stdout IPC: Minimal overhead. Simple process lifecycle management. Less structured. Harder to observe and test.
+**Decided transport:**
+- **JSON over HTTP** — Selected for MVP. Simple, debuggable, testable. Requests and responses are observable as plain text without special tooling. Standard HTTP testing applies without generated client stubs. Python's HTTP server ecosystem is mature (FastAPI, Flask, stdlib). At MVP routing problem payload sizes (maximum approximately 100 stops with coordinate arrays), JSON serialization overhead is acceptable and must be measured. Full rationale documented in SPEC-017 FR-2.
 
-The transport decision is deferred until implementation planning establishes evidence on routing problem payload sizes and acceptable solver execution latency budgets. This ADR will be updated when the transport decision is made.
+**Rejected transports:**
+- **gRPC** — Not selected for MVP. The strongly typed contract benefit does not outweigh the additional code generation tooling, protobuf dependency, and debugging complexity at MVP scale.
+- **stdin/stdout IPC** — Not selected. Would require the Worker to manage the Python process lifetime, contradicting the separate container model established by this ADR.
 
-Implementation of the Python adapter cannot begin until the transport contract is resolved.
+**Endpoint contract (defined by SPEC-017 FR-2):**
+- POST `/v1/solve` — Submit a SolverRequest; receive a SolverResponse
+- GET `/health` — Adapter liveness and readiness check
+- Port 8080 within the Docker Compose internal network
+
+Python remains confined to the adapter container role per the Role Boundary decision above. The transport decision does not alter Python's role.
 
 ---
 
@@ -126,8 +134,6 @@ Access to Python-native solver ecosystems without polluting the core runtime exe
 
 Inter-process communication adds latency on the solver execution path. This must be measured and reported in solver benchmarks.
 
-The transport contract is unresolved. The Python adapter cannot be implemented until it is decided.
-
 Two process lifetimes to manage in Docker Compose.
 
 ## Accepted Risks
@@ -175,8 +181,6 @@ The IPC transport overhead will be acceptable relative to solver execution time.
 
 # Limitations
 
-The transport contract is unresolved. Python adapter implementation is blocked until ADR-005 is updated with the transport decision.
-
 The security of the adapter-to-worker communication channel is not defined for the MVP.
 
 ---
@@ -184,17 +188,16 @@ The security of the adapter-to-worker communication channel is not defined for t
 # Documentation Updates
 
 - Architecture documentation (addressed by this ADR)
-- This ADR must be updated when the transport contract decision is made
+- **SPEC-017 (Accepted):** Provides the full transport and behavioral contract for the Python Solver Adapter. SPEC-017 FR-2 is the authoritative endpoint definition, resolving OQ-1.
+- **docs/architecture.md:** Python Solver Adapter responsibilities description should be updated from "JSON or gRPC adapter contract" to "JSON over HTTP adapter contract."
 
 ---
 
 # Review Triggers
 
-IPC transport overhead materially affects solver benchmark results.
+IPC transport overhead materially affects solver benchmark results and requires a revision to the transport selection.
 
-A transport candidate proves unsuitable during implementation planning.
-
-The transport contract decision is made. This ADR must be updated at that point.
+mTLS or authentication requirements arise for the adapter-to-worker channel in a non-MVP deployment context.
 
 ---
 
@@ -208,12 +211,12 @@ The transport contract decision is made. This ADR must be updated at that point.
 
 # Decision Summary
 
-**Decision:** Python confined to a separate adapter container. Transport contract unresolved and deferred.
+**Decision:** Python confined to a separate adapter container. JSON over HTTP is the accepted MVP transport (resolved from OQ-1 by SPEC-017 FR-2).
 
-**Primary Benefit:** Clean separation of Python ecosystem access from C++ runtime execution. Python remains replaceable.
+**Primary Benefit:** Clean separation of Python ecosystem access from C++ runtime execution. Python remains replaceable. JSON over HTTP provides a debuggable, testable interface without code generation overhead.
 
-**Primary Cost:** IPC overhead on the solver execution path. Transport contract is a blocking dependency for adapter implementation.
+**Primary Cost:** IPC overhead on the solver execution path. JSON serialization latency must be measured and reported in solver benchmarks.
 
-**Evidence Supporting the Decision:** Architecture document intent. No benchmark evidence at this stage.
+**Evidence Supporting the Decision:** Architecture document intent. SPEC-017 FR-2 transport rationale. No IPC benchmark evidence at this stage; measurement required during implementation.
 
-**Next Review Trigger:** Transport contract resolved during implementation planning. This ADR must be updated at that point.
+**Next Review Trigger:** IPC transport overhead materially affects solver benchmark results and requires a revision to the transport selection.
