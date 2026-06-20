@@ -173,9 +173,7 @@ The annealing schedule controls the temperature parameter across iterations. SPE
 
 **Monotonic decrease:** The temperature parameter must be monotonically non-increasing across annealing iterations. The temperature must never increase during normal annealing execution. This constraint is observable through `qsa.initial_temperature` and `qsa.final_temperature` in extension_metadata: `final_temperature` must be less than or equal to `initial_temperature`.
 
-**Temperature schedule class:** The annealing schedule must be geometric (multiplicative): each iteration's temperature is the product of the previous iteration's temperature and a cooling rate `α` where `0 < α < 1`. Geometric schedules have a fixed ratio between successive temperatures and a fixed relationship between initial temperature, cooling rate, and iteration count. The specific values of initial temperature, `α`, and the minimum temperature threshold below which annealing terminates are implementation planning decisions.
-
-**Rationale for specifying geometric:** Geometric cooling is observable through the `qsa.initial_temperature` and `qsa.final_temperature` extension metadata values and the `qsa.iteration_count`. Given initial temperature T₀, cooling rate α, and iteration count N, a geometric schedule produces final temperature `T₀ × α^N`. If the implementation used a non-geometric schedule (linear, exponential, or adaptive), the relationship between these three values would differ, making the annealing evidence in extension_metadata non-interpretable without knowing the schedule class. Specifying geometric makes the annealing evidence self-consistent and interpretable.
+**Temperature schedule class:** The specific annealing schedule class (geometric, linear, adaptive, or other) is an implementation planning decision. The observable constraint is monotonic non-increase: the temperature must not increase at any iteration boundary during normal execution. The three extension metadata values — `qsa.initial_temperature`, `qsa.final_temperature`, and `qsa.iteration_count` — are each independently observable; their interpretation does not require knowledge of the schedule class.
 
 **Temperature termination condition:** Annealing terminates naturally (Succeeded path) when the temperature drops below the implementation-defined minimum temperature threshold, or when the maximum iteration budget is reached, or when both conditions are satisfied simultaneously.
 
@@ -183,7 +181,6 @@ The annealing schedule controls the temperature parameter across iterations. SPE
 
 **Acceptance Criteria:**
 - `qsa.final_temperature` ≤ `qsa.initial_temperature` in all SolverResponses that include extension_metadata
-- The temperature decreases from `qsa.initial_temperature` to `qsa.final_temperature` over `qsa.iteration_count` iterations following a geometric schedule
 - A Succeeded response implies natural termination (schedule or iteration budget exhausted) before the `execution_timeout_ms` deadline
 
 ---
@@ -198,9 +195,9 @@ This section documents the PRNG draw ordering for all PCG64 draws consumed durin
 
 All PCG64 draws consumed to construct the starting state for the annealing process occur in Phase 1. All Phase 1 draws are consumed before the first annealing iteration begins.
 
-Within Phase 1, draws are consumed in stop_id ascending order: for each stop in ascending stop_id order, any draws required to assign that stop to an initial vehicle or position are consumed before moving to the next stop_id. If the initial solution construction requires multiple draws per stop (for example, a vehicle index selection and a position selection), those draws are consumed consecutively for that stop before moving to the next.
+The exact ordering of Phase 1 draws depends on the initial solution construction algorithm selected during implementation planning. The construction strategy may be stop-centric (processing stops in a deterministic order), binary-variable-centric (initializing binary state variables in index order), or another approach determined by the QUBO encoding choice (FR-2). Because the QUBO binary encoding is an implementation planning decision, the Phase 1 draw ordering cannot be fixed in this Draft specification. The specific Phase 1 draw ordering must be documented as part of OQ-2 resolution; FR-4 must be updated at that time with the complete Phase 1 draw sequence.
 
-If the initial solution construction algorithm requires draws not tied to individual stop assignments (for example, a shuffling pass over the stop list or a global initialization step), those draws occur first, before per-stop draws begin.
+The observable constraint is: all Phase 1 draws must be consumed before the first annealing iteration begins, regardless of which construction strategy is chosen.
 
 **Phase 2 — Annealing iterations:**
 
@@ -211,9 +208,9 @@ All PCG64 draws consumed during the annealing process occur in Phase 2, after Ph
 Phase 1 draws are always consumed before Phase 2 draws, regardless of implementation ordering. This ordering is fixed and must not be altered. The boundary between phases is observable: the first annealing iteration begins after the last Phase 1 draw is consumed.
 
 **Acceptance Criteria:**
-- Phase 1 draws are consumed in stop_id ascending order within each draw category
+- Phase 1 draws are consumed before Phase 2 begins; no Phase 2 draw occurs before Phase 1 is complete
+- Phase 1 draw ordering within the construction strategy is documented in the OQ-2 resolution update to this section
 - Phase 2 draws are consumed in iteration order; within each iteration, neighbor proposal draws precede acceptance draws
-- No Phase 2 draw is consumed before Phase 1 is complete
 - Two executions with identical `execution_seed` values and identical routing problems consume draws in the same sequence and produce the same result (ADR-010 reproducibility invariant)
 
 ---
@@ -312,8 +309,8 @@ The following capability profile is the registration artifact consumed by the Sc
 | `supports_time_windows` | `false` | The optimization process does not incorporate time window constraints. Candidate evaluation is based exclusively on Haversine distance and capacity. Declaring `true` would misrepresent the backend's construction behavior. |
 | `supports_capacity_constraints` | `true` | Capacity constraints are encoded as penalty terms in the QUBO objective. Decoded solutions that violate capacity are not treated as best-so-far candidates. The returned RoutePlan always satisfies capacity validity when present. |
 | `latency_profile` | Small: < 1.0s, Medium: < 10.0s, Large: < 60.0s | Pre-implementation estimates based on algorithmic analysis: SA's per-iteration cost scales with the binary state dimension (which scales with stop count and vehicle count). Values expressed in seconds per SPEC-003 FR-4. Empirical measurement on SPEC-002 synthetic workload problems of each size class is required before `is_provisional` can be set to false. |
-| `quality_profile` | `Competitive` | SA's global stochastic search consistently outperforms greedy construction heuristics on CVRP for problems with sufficient iteration budgets. `Competitive` reflects expected performance above the `Baseline` tier achieved by nearest-neighbor and greedy insertion. Classification is consistent with established SA-for-VRP literature. Empirical measurement during benchmarking will confirm or revise this classification. |
-| `cost_profile` | `4` | SA executes many iterations of a stochastic search, requiring significantly more computation than construction heuristics. A value of `4` (relative to NN's `1`) reflects approximately 4× the computational intensity at comparable problem sizes. Pre-implementation estimate requiring empirical validation. |
+| `quality_profile` | `Competitive` | SA's global stochastic search consistently outperforms greedy construction heuristics on CVRP for problems with sufficient iteration budgets. `Competitive` reflects expected performance at or above the `Competitive` tier established by greedy insertion (SPEC-014) and above the `Baseline` tier of nearest-neighbor (SPEC-013). Note: both `greedy-insertion` (SPEC-014) and `qubo-simulated-annealing` declare `Competitive`; the Scheduler cannot differentiate between them on quality alone under this classification. If empirical validation demonstrates SA consistently achieves quality above GI's tier, this classification should be revised to `Near-Optimal` as part of the `is_provisional = false` transition. See OQ-4. |
+| `cost_profile` | `1` | In-process C++ execution with no external dependencies, no network calls, and no paid compute. Cost per invocation is negligible. Value of `1` represents the minimum relative cost unit, consistent with the nearest-neighbor (SPEC-013) and greedy insertion (SPEC-014) backends. SA's higher computational cost relative to construction heuristics is captured in `latency_profile`, not `cost_profile`. |
 | `is_provisional` | `true` | Latency and quality profile values are pre-implementation estimates. This backend must declare `is_provisional = true` until empirical measurement validates the declared values per SPEC-011 FR-4.2. Additionally, the stream constant (OQ-1) must be confirmed before `is_provisional` can be set to false. |
 | `supported_contract_version` | `1` | Targets SPEC-004 contract version 1. |
 
@@ -353,12 +350,12 @@ This value is the PCG64 increment (stream) parameter. It is a 64-bit odd integer
 
 **Distribution sampling:** This backend uses the following ADR-010 Decision 3 approved distribution algorithms in reproducibility-critical paths:
 - **Uniform floating-point on (0, 1]:** For Metropolis acceptance probability comparisons (FR-5), using the conversion formula: `u = (v >> 11) × (1.0 / (1ULL << 53))` where `v` is a 64-bit PCG64 output. When `u` must be strictly positive (as input to any transcendental function), the zero case is handled by resampling (consuming an additional PCG64 draw until a non-zero value is produced).
-- **Bounded uniform integers:** For any integer-range random selections in neighbor proposal (FR-5, Phase 2 draws in FR-4), using a bias-free algorithm such as Lemire's nearly-divisionless method. `std::uniform_int_distribution` is prohibited in reproducibility-critical paths (ADR-010 Decision 3).
+- **Bounded uniform integers:** For any integer-range random selections in neighbor proposal (FR-5, Phase 2 draws in FR-4), a bias-free bounded integer sampling algorithm is required. `std::uniform_int_distribution` is prohibited in reproducibility-critical paths (ADR-010 Decision 3). ADR-010 Decision 3 requires the specific algorithm to be named in this specification. The specific algorithm is an implementation planning decision dependent on the SA neighborhood structure (FR-2) and must be identified by name as part of OQ-2 resolution; FR-9 must be updated at that time.
 - `std::normal_distribution` is not used by this backend.
 
 **Floating-point determinism:** All floating-point computation in reproducibility-critical paths uses IEEE 754 double precision (ADR-010 Decision 6). Extended precision (x87 80-bit) must be disabled in reproducibility-critical code. The specific compiler flags are an implementation planning concern.
 
-**PRNG draw ordering:** See FR-4 for the complete documentation of PCG64 draw ordering across Phase 1 (initial solution generation) and Phase 2 (annealing iterations). The draw ordering is frozen once this specification is Accepted.
+**PRNG draw ordering:** See FR-4 and FR-5 for the complete documentation of PCG64 draw ordering across Phase 1 (initial solution generation) and Phase 2 (annealing iterations). FR-4 documents the phase structure and inter-phase ordering; FR-5 documents the within-iteration ordering (neighbor proposal draws first, acceptance draw when ΔE > 0). The draw ordering is frozen once this specification is Accepted.
 
 This section satisfies the documentation obligation stated in SPEC-004 FR-1 and SPEC-011 FR-6.5.
 
@@ -419,7 +416,7 @@ The QUBO SA backend produces a RoutePlan conforming to SPEC-004 FR-5. This secti
 | `Failed` | Absent | Never present |
 | `Infeasible` | Not Applicable | Outcome not supported |
 
-**SPEC-011 FR-7.1 narrowing for Timeout and Cancelled:** SPEC-011 FR-7.1 declares the RoutePlan as Optional under Timeout and Cancelled for all backends. This backend narrows that permission to "present when best-so-far exists, absent when it does not." This narrowing is consistent with anytime behavior design: the backend actively tracks a best-so-far, so Timeout-with-solution is the expected outcome rather than an edge case. The framework's Optional permission accommodates both the construction heuristics (which typically have no solution at timeout) and this backend (which typically does).
+**SPEC-011 FR-7.1 narrowing for Timeout and Cancelled:** SPEC-011 FR-7.1 declares the RoutePlan as Optional under Timeout and Cancelled for all backends. This backend narrows that permission to "present when best-so-far exists, absent when it does not." This narrowing is the opposite direction from SPEC-013 (FR-6) and SPEC-014 (FR-10), which both narrow Timeout Optional→Absent: construction heuristics have no intermediate complete solutions and therefore always produce Timeout without a solution. This backend's anytime design means Timeout-with-solution is the expected outcome rather than an edge case. The framework's Optional permission deliberately accommodates both narrowing directions.
 
 **Capacity validity guarantee when solution present:** The returned RoutePlan always satisfies SPEC-004 FR-5 condition 5 (total stop demand per route ≤ `capacity_per_vehicle`). Decoded states that violate capacity are not eligible as best-so-far candidates (FR-6). No post-return capacity validation is required; the selection criterion ensures this.
 
@@ -455,6 +452,8 @@ The QUBO SA backend produces the following `extension_metadata` keys in the Solv
 | `qsa.solution_route_distance_km` | float64 | Solution present | Total Haversine route distance in kilometers of the returned best-so-far RoutePlan. Computed as the sum of Haversine distances for all vehicle routes, including each vehicle's depot-to-first-stop leg and last-stop-to-depot leg. This is the solver's internal quality metric, not the normalized quality metric used by Core (SPEC-007). |
 
 Extension metadata is absent when no solution is present (Failed outcomes, and Timeout/Cancelled outcomes without a best-so-far).
+
+**Departure from construction heuristic precedent:** SPEC-013 (nearest-neighbor) and SPEC-014 (greedy insertion) produce `extension_metadata` only on Succeeded responses. This specification produces `extension_metadata` on Timeout-with-solution and Cancelled-with-solution responses as well. This departure is deliberate. For SA, Timeout-with-solution is an expected outcome path on large problems, not an edge case. Restricting `extension_metadata` to Succeeded would suppress the annealing diagnostic evidence (temperature values, acceptance rates, iteration counts) precisely on the outcome paths where it is most diagnostically valuable.
 
 `extension_metadata` must not contain routing problem raw data (geographic coordinate arrays, stop identifier lists, demand arrays, or other raw problem input fields). The six keys above contain only derived summary values safe for evidence log inclusion (SPEC-004 FR-13, SPEC-001 Security Considerations).
 
@@ -501,14 +500,14 @@ This section defines all failure conditions specific to the QUBO SA backend. Gen
 
 - **Trigger:** `execution_timeout_ms` deadline reached.
 - **Outcome:** `Timeout`, `failure_code = ExecutionTimeout`
-- **Behavior:** The backend monitors the deadline at iteration boundaries and self-terminates when the deadline is approached. The backend returns Timeout with the best-so-far solution (if found) and extension metadata. If the Worker enforces an external timeout because the backend did not self-terminate, the Worker constructs the Timeout response on the backend's behalf (SPEC-004 FR-10); that Worker-constructed response contains no solution and no extension metadata.
-- **Self-termination monitoring:** The backend checks the elapsed time at the boundary between annealing iterations. When the remaining time before the deadline falls below a threshold sufficient to finalize the response, the backend terminates the current iteration and begins response construction. The specific threshold is an implementation planning decision.
+- **Behavior:** The backend MUST monitor the deadline at iteration boundaries and self-terminate when the deadline is approached. Self-termination is a stronger obligation for this backend than the advisory in SPEC-004 FR-10.1: if the Worker enforces an external timeout because the backend did not self-terminate, the Worker-constructed Timeout response contains no solution and no extension metadata, forfeiting the anytime behavior value of this backend. On self-termination, the backend returns Timeout with the best-so-far solution (if found) and extension metadata.
+- **Self-termination monitoring:** The backend MUST check elapsed time at the boundary between annealing iterations. When the remaining time before the deadline falls below a threshold sufficient to finalize the response, the backend terminates the current iteration and begins response construction. The specific threshold is an implementation planning decision.
 
 **Cancellation:**
 
-- **Trigger:** Worker cancellation signal received during annealing.
+- **Trigger:** Worker cancellation signal received during execution (Phase 1 or Phase 2).
 - **Outcome:** `Cancelled`, `failure_code = ExecutionCancelled`
-- **Behavior:** The backend terminates upon receiving the cancellation signal and returns the best-so-far solution (if found) and extension metadata. If cancellation arrives before any valid solution is produced, the response contains no solution and no extension metadata.
+- **Behavior:** The backend terminates upon receiving the cancellation signal and returns the best-so-far solution (if found) and extension metadata. If cancellation arrives before any valid solution is produced — including during Phase 1 before the initial solution construction completes — the response contains no solution and no extension metadata. The best-so-far tracking rule (FR-6) applies at all phases: if a complete, structurally valid RoutePlan was produced during Phase 1 before the cancellation signal arrived, it is included as the best-so-far.
 
 All `Failed` responses include a `SolverFailureDetail` with both `failure_code` and `failure_message` populated. The `failure_message` is diagnostic (developer-readable), not user-facing. The backend does not write to stdout or stderr.
 
@@ -549,7 +548,7 @@ SA's optimization capability scales with the iteration budget relative to the so
 
 # Quality Expectations
 
-**Route quality expectations:** The QUBO SA backend is expected to produce Competitive-quality routes — better than the Baseline construction heuristics on most problem instances, with larger improvements observed at larger problem sizes and higher capacity utilization ratios where construction heuristics are most constrained.
+**Route quality expectations:** The QUBO SA backend is expected to produce Competitive-quality routes — at or above the quality of the greedy insertion backend (SPEC-014) on most problem instances, with larger improvements observed at larger problem sizes and higher capacity utilization ratios where construction heuristics are most constrained.
 
 **Workload classes where SA performs better than construction heuristics:**
 - Larger problem sizes (Medium, Large) where the iteration budget can explore more of the solution space
@@ -734,45 +733,49 @@ The following behaviors must be verified. Specific test implementations are dete
 
 7. **Empty vehicle routes:** A routing problem with more vehicles than stops produces a Succeeded response where some routes are empty.
 
+**Failure model:**
+
+8. **Natural termination with no valid solution:** Given a routing problem and execution parameters calibrated to exhaust the iteration budget before the `execution_timeout_ms` deadline without producing any complete, structurally valid RoutePlan, the backend returns `Failed` with `failure_code = InternalError` and a `failure_message` containing "qubo-simulated-annealing: annealing completed without producing a valid route plan". Verifies the FR-13 natural-termination-with-no-valid-solution failure path.
+
 **Stochastic algorithm correctness:**
 
-8. **Anytime behavior — Timeout with solution:** Given a SolverRequest with a `execution_timeout_ms` set to a value that allows at least one complete valid solution to be found but not the full annealing schedule, the backend returns `Timeout` with a complete, structurally valid RoutePlan.
+9. **Anytime behavior — Timeout with solution:** Given a SolverRequest with a `execution_timeout_ms` set to a value that allows at least one complete valid solution to be found but not the full annealing schedule, the backend returns `Timeout` with a complete, structurally valid RoutePlan.
 
-9. **Anytime behavior — solution quality improves with time:** Given the same problem and seed with increasing `execution_timeout_ms` values, the `qsa.solution_route_distance_km` in the response does not increase. A longer execution budget should not produce a worse solution than a shorter one (monotone non-worsening).
+10. **Anytime behavior — solution quality improves with time:** Given the same problem and seed with increasing `execution_timeout_ms` values, the `qsa.solution_route_distance_km` in the response does not increase. A longer execution budget should not produce a worse solution than a shorter one (monotone non-worsening).
 
-10. **Best-so-far update tracking:** `solution_count` equals the number of times the best-so-far solution was updated. Verified by comparing `qsa.best_solution_iteration` against total `qsa.iteration_count` and checking monotone improvement.
+11. **Best-so-far update tracking:** `solution_count` equals the number of times the best-so-far solution was updated. Verified by comparing `qsa.best_solution_iteration` against total `qsa.iteration_count` and checking monotone improvement.
 
-11. **Metropolis acceptance:** `qsa.accepted_worse_transitions` is non-negative and no greater than `qsa.iteration_count`. At sufficiently high initial temperature (early iterations), `qsa.accepted_worse_transitions / qsa.iteration_count` should be close to the theoretical acceptance rate.
+12. **Metropolis acceptance:** `qsa.accepted_worse_transitions` is non-negative and no greater than `qsa.iteration_count`. At sufficiently high initial temperature (early iterations), `qsa.accepted_worse_transitions / qsa.iteration_count` should be close to the theoretical acceptance rate.
 
-12. **Temperature monotonicity:** `qsa.final_temperature` ≤ `qsa.initial_temperature` in all responses that include extension_metadata.
+13. **Temperature monotonicity:** `qsa.final_temperature` ≤ `qsa.initial_temperature` in all responses that include extension_metadata.
 
-13. **No partial assignments:** No Succeeded, Timeout, or Cancelled response contains a RoutePlan with unassigned stops. Every stop in the routing problem appears in exactly one route in every RoutePlan present.
+14. **No partial assignments:** No Succeeded, Timeout, or Cancelled response contains a RoutePlan with unassigned stops. Every stop in the routing problem appears in exactly one route in every RoutePlan present.
 
-14. **Capacity validity across workload:** For all SolverResponses with a RoutePlan across the full SPEC-002 synthetic workload, no route has total demand exceeding `capacity_per_vehicle`.
+15. **Capacity validity across workload:** For all SolverResponses with a RoutePlan across the full SPEC-002 synthetic workload, no route has total demand exceeding `capacity_per_vehicle`.
 
 **Reproducibility pipeline:**
 
-15. **PCG64 stream constant:** Two executions with the same problem and seed produce the same `qsa.iteration_count`, `qsa.accepted_worse_transitions`, and `qsa.solution_route_distance_km` values. This verifies that the PRNG stream is determined by `execution_seed` and the frozen stream constant.
+16. **PCG64 stream constant:** Two executions with the same problem and seed produce the same `qsa.iteration_count`, `qsa.accepted_worse_transitions`, and `qsa.solution_route_distance_km` values. This verifies that the PRNG stream is determined by `execution_seed` and the frozen stream constant.
 
-16. **Draw ordering phase boundary:** Phase 1 draws are completed before Phase 2 begins. Verified by demonstrating that changing the initial solution construction (Phase 1) while holding Phase 2 constant changes the output, and vice versa, when draw ordering is validated against the specification.
+17. **Draw ordering phase boundary:** Phase 1 draws are completed before Phase 2 begins. Verified by demonstrating that changing the initial solution construction (Phase 1) while holding Phase 2 constant changes the output, and vice versa, when draw ordering is validated against the specification.
 
 **Capability profile accuracy:**
 
-17. **Latency profile validation:** Empirical execution duration on representative SPEC-002 problems of each size class — measured as `execution_duration_ms` — is within the declared `latency_profile` bounds (< 1.0s, < 10.0s, < 60.0s per size class). Required before `is_provisional` is set to false.
+18. **Latency profile validation:** Empirical execution duration on representative SPEC-002 problems of each size class — measured as `execution_duration_ms` — is within the declared `latency_profile` bounds (< 1.0s, < 10.0s, < 60.0s per size class). Required before `is_provisional` is set to false.
 
-18. **Quality classification:** Route quality (measured by Core's normalized metric, SPEC-007) on SPEC-002 benchmark problems is consistent with `Competitive` classification relative to the classical construction heuristic baselines. Required before `is_provisional` is set to false.
+19. **Quality classification:** Route quality (measured by Core's normalized metric, SPEC-007) on SPEC-002 benchmark problems is consistent with `Competitive` classification relative to the classical construction heuristic baselines. Required before `is_provisional` is set to false.
 
 **Extension metadata:**
 
-19. **Key presence on solution:** All six `extension_metadata` keys are present when a solution is present; extension_metadata is absent when no solution is present.
+20. **Key presence on solution:** All six `extension_metadata` keys are present when a solution is present; extension_metadata is absent when no solution is present.
 
-20. **qsa.solution_route_distance_km accuracy:** The reported distance matches the sum of Haversine distances computed from the route sequences in the RoutePlan, including depot-return legs.
+21. **qsa.solution_route_distance_km accuracy:** The reported distance matches the sum of Haversine distances computed from the route sequences in the RoutePlan, including depot-return legs.
 
-21. **Temperature relation:** `qsa.final_temperature ≤ qsa.initial_temperature` in all responses.
+22. **Temperature relation:** `qsa.final_temperature ≤ qsa.initial_temperature` in all responses.
 
 **Observability:**
 
-22. **solver.execute span:** A `solver.execute` OTel span is emitted by the Worker for every SolverRequest dispatch, successful or not. All required attributes (SPEC-004 FR-15) are present. Span status is `Unset` for Timeout-with-solution (not Error). Verified in integration test.
+23. **solver.execute span:** A `solver.execute` OTel span is emitted by the Worker for every SolverRequest dispatch, successful or not. All required attributes (SPEC-004 FR-15) are present. Span status is `Unset` for Timeout-with-solution (not Error). Verified in integration test.
 
 ---
 
@@ -842,6 +845,9 @@ The following follow-on updates are required as a result of this specification. 
 - FR-11.1 MVP backend inventory: Update the `qubo-simulated-annealing` row's "Solver Specification Status" from "Required; not yet written" to reflect SPEC-015's current status.
 - OQ-1 (PCG64 Stream Constants): SPEC-015 proposes `0xcbbb9d5dc90c2383` as the stream constant. When OQ-1 is resolved and the stream constant is confirmed, SPEC-011 OQ-1 may be updated to reference SPEC-015's resolution. No SPEC-011 content change is required; SPEC-011 OQ-1 defers the specific value to the individual solver specification.
 
+**SPEC-009:**
+- No structural changes required. The Solver Execution section of the evidence report surfaces `extension_metadata` values for solver runs. For SA invocations, the qsa.* extension_metadata keys provide annealing diagnostic evidence (temperature values, acceptance rate proxy via `qsa.accepted_worse_transitions`, best-solution iteration) that is specifically valuable for the evidence narrative comparing stochastic and deterministic backends. Report generation logic should surface these keys for SA-specific evidence reporting.
+
 **SPEC-012:**
 - No schema changes are required. `extension_metadata` for `qubo-simulated-annealing` passes through the existing JSONB column structure in `solver_run_records`. The six extension metadata keys defined in FR-12 are stored within the existing schema.
 
@@ -869,15 +875,25 @@ The following follow-on updates are required as a result of this specification. 
 
 ---
 
-### OQ-2: Per-Iteration PRNG Draw Count Documentation
+### OQ-2: PRNG Draw Ordering — Per-Iteration Count, Phase 1 Ordering, and Bounded Integer Algorithm
 
 **Classification:** Implementation Planning Decision (blocks Proposed status)
 
-**Question:** What is the exact number of PCG64 draws consumed per annealing iteration for the SA neighborhood structure selected during implementation planning?
+**Question:** Three draw ordering items require resolution once the SA neighborhood structure and initial solution construction strategy are selected during implementation planning:
 
-**Context:** SPEC-011 FR-6.2 requires each stochastic solver specification to document its PRNG draw ordering — "the fixed sequence in which PCG64 draws are consumed during a solver execution." FR-4 of this specification documents the two-phase structure (Phase 1: initial solution generation; Phase 2: annealing iterations) and the ordering within each phase (neighbor proposal draws first, acceptance draw second when ΔE > 0). However, the exact number of draws consumed per annealing iteration depends on the specific SA neighborhood structure (the move operator), which is an implementation planning decision (FR-2). A move that selects two stops for a swap consumes two bounded integer draws; a move that selects a stop and a destination vehicle consumes two draws of different types. Until the neighborhood structure is chosen, the per-iteration draw count cannot be specified with precision.
+1. What is the exact number of PCG64 draws consumed per annealing iteration for the selected neighborhood structure?
+2. What is the specific draw ordering within Phase 1 (initial solution generation): stop-centric (processing stops in a deterministic order), binary-variable-centric (initializing binary state variables in index order), or another approach?
+3. What is the specific bias-free bounded integer sampling algorithm used for neighbor proposal draws, as required by ADR-010 Decision 3?
 
-**Resolution required before:** This specification advances from Draft to Proposed. The draw count per iteration must be documented as an explicit enumeration (e.g., "two bounded integer draws for neighbor proposal, then one uniform float draw for acceptance when ΔE > 0") before the specification is complete. At that point FR-4 should be updated with the exact draw count.
+**Context:** SPEC-011 FR-6.2 requires each stochastic solver specification to document its PRNG draw ordering — "the fixed sequence in which PCG64 draws are consumed during a solver execution." FR-4 of this specification documents the two-phase structure (Phase 1: initial solution generation; Phase 2: annealing iterations) and the ordering within Phase 2 (neighbor proposal draws first, acceptance draw second when ΔE > 0). Three items remain deferred pending implementation planning decisions:
+
+- **Per-iteration draw count:** The exact number of draws consumed per annealing iteration depends on the specific SA neighborhood structure (the move operator). A move that selects two stops for a swap consumes two bounded integer draws; a move that selects a stop and a destination vehicle consumes two draws of different types. Until the neighborhood structure is chosen, the per-iteration draw count cannot be specified with precision.
+
+- **Phase 1 draw ordering:** The initial solution construction strategy determines the Phase 1 draw ordering. Because the QUBO binary encoding is an implementation planning decision (FR-2), the Phase 1 draw ordering cannot be fixed until the encoding and construction strategy are selected. A stop-centric strategy processes stops in some deterministic order; a binary-variable-centric strategy initializes binary state variables in index order. The choice between strategies must be explicitly specified before the full PRNG draw sequence is frozen.
+
+- **Bounded integer sampling algorithm:** ADR-010 Decision 3 requires the specific bias-free bounded integer algorithm to be named in this specification. The algorithm choice may depend on the neighborhood structure. Common choices include Lemire's nearly-divisionless method (Lemire 2019) and rejection-sampling with power-of-two masking.
+
+**Resolution required before:** This specification advances from Draft to Proposed. OQ-2 resolution must include: (1) an explicit per-iteration draw enumeration (e.g., "two bounded integer draws for neighbor proposal, then one uniform float draw for acceptance when ΔE > 0"); (2) a complete description of Phase 1 draw ordering; and (3) the specific named bounded integer sampling algorithm. FR-4 and FR-9 must be updated with this information at resolution time.
 
 **Blocking:** Blocks advancement to Proposed. Does not block engineering review of this Draft.
 
@@ -934,13 +950,13 @@ The following follow-on updates are required as a result of this specification. 
 - [ ] Solver Classification: Backend category declared as `quantum_inspired_stochastic`; determinism class declared as `Stochastic (reproducible)`; infeasibility proof capability declared as No
 - [ ] Algorithm Description (FR-1): Execution phases, distance metric, service duration non-use, completion condition, timeout condition defined
 - [ ] QUBO Formulation Ownership Boundaries (FR-2): Spec-owned vs. implementation planning vs. adjacent specification ownership clearly delineated
-- [ ] Annealing Schedule Behavior (FR-3): Monotonic non-increase, geometric schedule class, termination conditions defined
-- [ ] Initial Solution and PRNG Draw Ordering (FR-4): Phase 1 and Phase 2 draw ordering described; stop_id ordering within Phase 1; iteration ordering within Phase 2; phase boundary defined
+- [ ] Annealing Schedule Behavior (FR-3): Monotonic non-increase constraint defined; temperature schedule class is an implementation planning decision; termination conditions defined
+- [ ] Initial Solution and PRNG Draw Ordering (FR-4): Phase 1 and Phase 2 draw ordering described; Phase 1 ordering deferred to OQ-2 resolution; iteration ordering within Phase 2; phase boundary defined
 - [ ] Transition Proposal and Metropolis Acceptance (FR-5): Acceptance criterion defined; draw consumption for improving vs. worsening transitions stated
 - [ ] Best-So-Far Solution Tracking (FR-6): Candidate qualification requirements; quality comparison criterion; anytime contract; solution_count semantics defined
 - [ ] Constraint Handling (FR-7): Capacity enforced through formulation; time windows and service durations not enforced; infeasibility detection not supported
 - [ ] Capability Profile Declaration (FR-8): All nine fields from SPEC-011 FR-4.1 present; accuracy basis for latency_profile and quality_profile stated; is_provisional = true declared; latency_profile values expressed in seconds per SPEC-003 FR-4
-- [ ] Seed Usage Policy (FR-9): Stochastic class stated; PCG64 named; stream constant documented; seeding procedure (once per execution, before Phase 1); seed authority (execution_seed exclusive); draw ordering cross-reference (FR-4); approved distribution algorithms identified; floating-point determinism stated; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5
+- [ ] Seed Usage Policy (FR-9): Stochastic class stated; PCG64 named; stream constant documented; seeding procedure (once per execution, before Phase 1); seed authority (execution_seed exclusive); draw ordering cross-reference (FR-4 and FR-5); approved distribution algorithms identified; specific bounded integer algorithm deferred to OQ-2 resolution per ADR-010 Decision 3; floating-point determinism stated; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5
 - [ ] Supported SolverOutcome Values (FR-10): Explicit table; Infeasible listed as Not Supported; Timeout-with-solution and Cancelled-with-solution behavior stated; satisfies SPEC-011 FR-5.3
 - [ ] RoutePlan Output Requirements (FR-11): Presence per outcome; SPEC-011 FR-7.1 narrowing for Timeout and Cancelled declared; capacity validity guarantee; stop completeness guarantee; time window non-guarantee; execution_duration_ms obligation confirmed
 - [ ] Extension Metadata (FR-12): All six keys documented with types, presence conditions, and descriptions; raw-data prohibition confirmed; absence on no-solution responses stated; satisfies SPEC-011 FR-7.4
@@ -973,7 +989,7 @@ This backend is complete when:
 
 - SPEC-015 is in Accepted status (this specification)
 - OQ-1 (PCG64 stream constant) is confirmed and FR-4 and FR-9 reflect the confirmed value
-- OQ-2 (per-iteration draw count) is resolved and FR-4 is updated with the exact draw sequence
+- OQ-2 (PRNG draw ordering: per-iteration draw count, Phase 1 ordering, and bounded integer algorithm) is resolved and FR-4 and FR-9 are updated with the exact draw sequence and algorithm name
 - The backend is implemented as a C++ SolverContract conforming to SPEC-004
 - All acceptance criteria in the Testability section pass
 - Reproducibility is verified: two identical SolverRequests (same problem, same execution_seed) produce identical SolverResponse solution fields when both produce Succeeded
