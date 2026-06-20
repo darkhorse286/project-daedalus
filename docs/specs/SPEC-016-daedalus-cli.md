@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Revised post-engineering-review: MF-1, MF-2, MF-3, SF-1–SF-7)
+**Last Updated:** 2026-06-20 (Revised post-architecture-review: NB-1 OQ-1 ownership clarification, NB-2 generator embedding migration note)
 
 **Supersedes:** None
 
@@ -1067,15 +1067,21 @@ The following questions must be answerable by a developer running the CLI:
 
 **Question:** Does the Daedalus API expose a `GET /v1/jobs` list endpoint that the `job list` command (FR-9) can consume?
 
-**Why it matters:** SPEC-008 defines eight endpoints (FR-15 Versioning section) and does not include a job listing endpoint. The `job list` command requires this endpoint. Without it, `job list` cannot be implemented and should be marked deferred.
+**Ownership clarification:** SPEC-016 is not the authoritative owner of this endpoint. The CLI is a consumer: it expresses a requirement that the API expose a job listing endpoint, but the endpoint contract, schema, and implementation belong exclusively to SPEC-008. Resolving this question requires a future SPEC-008 revision. SPEC-016 does not define the endpoint; it documents the CLI's minimum consumer requirements.
 
-**Options:**
-- (a) Add `GET /v1/jobs` to SPEC-008 in a future revision.
-- (b) Remove `job list` from SPEC-016 scope.
+**CLI consumer requirements (minimum fields required in the API response):**
+- `job_id` — job correlation handle
+- `status` — current lifecycle state (`Pending`, `Processing`, `Completed`, `Failed`)
+- `solver_outcome` — present when `status = Completed`; absent otherwise
+- `created_at` — ISO 8601 UTC timestamp
 
-**Recommendation:** Add the endpoint via a SPEC-008 revision. A minimal list endpoint returning `[{job_id, status, solver_outcome, created_at}]` with optional `?status=` and `?limit=` query parameters satisfies the CLI's need without significant API scope expansion.
+SPEC-016 also requires support for optional `?status=` and `?limit=` query parameters to support the `--status` and `--limit` flags in FR-9. The complete endpoint schema — including response field names, ordering, pagination, and error behavior — is owned by SPEC-008 and will be defined in a future SPEC-008 revision.
 
-**Blocking:** Blocking for `job list` implementation only. Not blocking for any other CLI command. `job list` should be marked deferred in the Definition of Done until OQ-1 is resolved.
+**Why it matters:** SPEC-008 defines eight endpoints (FR-15 Versioning section) and does not include a job listing endpoint. The `job list` command requires this endpoint. Without it, `job list` cannot be implemented and must remain deferred.
+
+**Resolution path:** A future SPEC-008 revision adds `GET /v1/jobs` to the endpoint inventory (FR-15) and defines its full contract. The CLI consumer requirements above are the minimum SPEC-008 must satisfy for SPEC-016's `job list` command to be implementable.
+
+**Blocking:** Blocking for `job list` implementation only. Not blocking for any other CLI command. `job list` should remain deferred in the Definition of Done until OQ-1 is resolved via SPEC-008 revision.
 
 ---
 
@@ -1142,7 +1148,7 @@ The following questions must be answerable by a developer running the CLI:
 - [x] Exit codes are defined.
 - [x] Output formats are defined for both text and JSON modes.
 - [x] SPEC-002 OQ-2 (generator process location) is resolved.
-- [ ] OQ-1 resolved — `GET /v1/jobs` list endpoint (blocking for `job list` command only).
+- [ ] OQ-1 resolved — `GET /v1/jobs` list endpoint added to SPEC-008 via future revision (blocking for `job list` command only; endpoint contract owned by SPEC-008, not SPEC-016).
 - [ ] OQ-2 resolved — CLI implementation language (blocking for implementation).
 - [ ] OQ-3 resolved — experiment result persistence (non-blocking at MVP).
 - [ ] OQ-4 resolved — `--wait` default behavior (non-blocking; current spec uses opt-in).
@@ -1169,4 +1175,26 @@ This feature is complete when:
 - The generated routing problem document produced by `problem generate` passes SPEC-001 domain validation when submitted to the API.
 - The portfolio demonstration path — `daedalus problem run <config> --wait` followed by `daedalus report show <job_id>` — completes end-to-end against a running Docker Compose environment.
 - Engineering review passes.
+- Architecture review passes.
 - Specification status is updated to Verified.
+
+---
+
+# Future Considerations
+
+The following concerns are not MVP requirements. They are documented here so that future specifications can account for them without revisiting the architecture of this specification from scratch.
+
+## Generator Embedding Migration
+
+SPEC-016 FR-4 resolves SPEC-002 OQ-2 by embedding the SPEC-002 generator as an in-process library in the CLI binary. This is the correct MVP decision. The generator is invoked by the developer at a terminal, not by a networked client, and the CLI binary is the appropriate host for that use case.
+
+If any of the following become requirements in future work, the generator hosting architecture should be reconsidered:
+
+- **Dashboard generation:** A web dashboard that generates synthetic workloads on behalf of a browser-based user would not be able to invoke the CLI binary. The generator would need to be exposed as a SPEC-008 API endpoint or moved to the Core library.
+- **CI/CD pipeline generation:** Automated CI pipelines that generate workloads server-side (rather than running the CLI on a build agent) would have the same constraint.
+- **API-mediated generation:** If the system needs to generate workloads programmatically from a service (for example, a benchmark orchestrator running inside Docker Compose), direct library embedding in the CLI binary is inaccessible.
+- **Multi-client generation:** If multiple clients (CLI, dashboard, mobile, CI) all need access to the generator, moving the generator to a server-side endpoint or a shared service would eliminate per-client reimplementation risk.
+
+None of these scenarios are in scope for the MVP. README.md explicitly defers the full dashboard. This note is recorded so that the architectural consequence of the current embedding decision is visible when dashboard or multi-client generation work begins.
+
+**No changes to OQ-2, FR-4, or the Constraints section are required as a result of this note.**
