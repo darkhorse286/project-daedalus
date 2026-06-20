@@ -14,6 +14,11 @@
 
 **Last Updated:** 2026-06-19
 
+**Review History:**
+- 2026-06-19: Engineering Review completed. Accepted findings applied: R-1/R-4 (`average_vehicle_speed_kmh` field added), R-5 (Haversine Earth radius pinned to 6371.0 km), R-6 (canonical stop ordering defined). No-change findings: R-2, R-3, R-7.
+- 2026-06-19: Architecture Review completed. Applied: AR-001 (field made unconditionally required; system-default path removed), AR-002 (SPEC-012 downstream note corrected to Already Aligned), AR-003 (SPEC-008 downstream note corrected to Already Aligned), AR-004 (SPEC-002 downstream note expanded with explicit generation configuration contract). Deferred: AR-005 (SPEC-013/SPEC-014 cleanup).
+- 2026-06-19: Acceptance Review completed. Classification: Ready for Acceptance. No blocking findings.
+
 ---
 
 # Problem Statement
@@ -261,7 +266,7 @@ The following raw properties must be accessible from the routing problem without
 | constraint_types | Set | Active constraint type identifiers: capacity is always present; time_windows is present when any stop carries time window fields |
 | stop_time_windows | Sequence | Per-stop time window fields (open, close) where present |
 | stop_service_durations | Sequence | Per-stop service duration values, defaulting to 0 when absent |
-| average_vehicle_speed_kmh | float64 | Fleet-wide average vehicle speed in km/h. Used to derive travel times from Haversine distances (FR-17). Present as a field value when submitted; carries the configured system default when absent from a problem with no time windows. |
+| average_vehicle_speed_kmh | float64 | Fleet-wide average vehicle speed in km/h. Required for all routing problem submissions. Used to derive travel times from Haversine distances (FR-17). Always present in the routing problem representation. |
 
 The derived workload features required by the Scheduler — including capacity_utilization_ratio, problem_size_class, time_window_density, and average_time_window_width_seconds — are computed from these raw properties by the Core. Their computation contract is defined in SPEC-003. SPEC-001 ensures the raw data is accessible; SPEC-003 specifies the feature computation and naming contract.
 
@@ -312,7 +317,7 @@ The Python adapter transport format is explicitly excluded from this spec. It is
 
 **Acceptance Criteria:**
 - The C++ representation contains all fields required by solver execution: geographic coordinates, time window fields, service duration fields, capacity fields, and `average_vehicle_speed_kmh`.
-- When `average_vehicle_speed_kmh` is absent from the submission (permitted for problems with no time-windowed stops), the C++ representation carries the configured system default value for that field.
+- `average_vehicle_speed_kmh` is present in the C++ representation exactly as submitted and persisted.
 - A C++ representation constructed from persisted data is semantically equivalent to the original submission.
 - The C++ representation is not the JSON form. The JSON form is the API and persistence form.
 - The solver contract defined in ADR-008 operates on the C++ representation.
@@ -355,16 +360,15 @@ This is a dependent architectural constraint. It cannot be verified until the co
 
 **Description:** A routing problem specifies the average vehicle speed used to derive travel times from Haversine distances. All vehicles in the fleet operate at the same speed. There is no per-vehicle speed variation in the MVP.
 
-Travel times are derived values, not stored fields. The derivation formula is defined in FR-9 and is used by route simulation during Core Quality Evaluation (SPEC-007 FR-5).
+Travel times are derived values, not stored fields. The derivation formula is defined in FR-9 and is used by route simulation during Core Quality Evaluation (SPEC-007 FR-5). Route simulation uses this value for all problems regardless of whether time window fields are present: it derives vehicle travel times on every simulated route to compute `total_route_distance_km`, `hindsight_quality`, and regret analysis inputs. The field is required for all routing problem submissions.
 
 **Acceptance Criteria:**
 - `average_vehicle_speed_kmh` is a float64 field.
 - `average_vehicle_speed_kmh` must be positive and non-zero.
 - A zero, negative, or NaN value for `average_vehicle_speed_kmh` is invalid and rejected at submission.
-- `average_vehicle_speed_kmh` is required when any stop in the problem carries time window fields. A problem with time-windowed stops and no `average_vehicle_speed_kmh` is invalid.
-- `average_vehicle_speed_kmh` is optional when no stop carries time window fields. When absent, a configurable system default applies. The system default must be a positive non-zero value.
+- `average_vehicle_speed_kmh` is required for all routing problem submissions regardless of whether time window fields are present. A submission omitting this field is invalid.
 - `average_vehicle_speed_kmh` is persisted with the routing problem.
-- `average_vehicle_speed_kmh` is included in the C++ domain representation. When absent from the submission, the C++ representation carries the configured system default.
+- `average_vehicle_speed_kmh` is included in the C++ domain representation exactly as submitted and persisted.
 - `average_vehicle_speed_kmh` applies fleet-wide. There is no per-vehicle speed setting in the MVP.
 
 ---
@@ -465,12 +469,11 @@ Each stop:
 integer (non-negative, 64-bit)
 ```
 
-**average_vehicle_speed_kmh** (conditionally required)
+**average_vehicle_speed_kmh** (required)
 
 ```
 float64 (positive, non-zero).
-Required when any stop carries time window fields (time_window_open or time_window_close present).
-Optional when no stop carries time window fields; a configurable system default applies when absent.
+Required for all routing problem submissions regardless of time-window usage.
 Zero, negative, or NaN values are rejected.
 ```
 
@@ -675,9 +678,10 @@ The following behaviors must be proven before this feature is considered complet
 - A stop with time_window_close present and time_window_open absent.
 - A negative service_duration value.
 - A scheduler_config_id that does not reference an existing scheduler configuration.
-- A problem with time-windowed stops and `average_vehicle_speed_kmh` absent.
+- A routing problem submission omitting `average_vehicle_speed_kmh`.
 - An `average_vehicle_speed_kmh` value of zero.
 - A negative `average_vehicle_speed_kmh` value.
+- An `average_vehicle_speed_kmh` value of NaN.
 
 **Configurability:**
 
@@ -700,8 +704,7 @@ The following behaviors must be proven before this feature is considered complet
 
 **Vehicle speed:**
 
-- A problem with time-windowed stops and `average_vehicle_speed_kmh` present is accepted. The value is available in the C++ representation.
-- A problem with no time-windowed stops and `average_vehicle_speed_kmh` absent produces a C++ representation in which the speed field carries the configured system default.
+- A routing problem submission including `average_vehicle_speed_kmh` with a positive value is accepted. The value is available in the C++ representation.
 - The speed value persists through the persistence round-trip without modification.
 
 **Stop iteration order:**
@@ -876,11 +879,11 @@ Do not invent specific latency targets. These areas require measurement during i
 - Architecture documentation: routing problem entity definition, geographic coordinate model with double precision specification, route start definition, time window model, and service duration model
 - ADR-008: concrete solver contract interface is a dependent output of this spec and must be drafted after approval
 - ADR-009: domain validation authority (created alongside this spec update)
-- SPEC-002 (Synthetic Workload Generator): depends on this spec for schema, validation rules, coordinate generation approach, service duration generation, and time window generation parameters. **Revision required:** SPEC-002 must be updated to generate `average_vehicle_speed_kmh` as part of routing problem instances and must document the speed value used when generating synthetic workloads. If SPEC-002 generates time-windowed problems, it must ensure time windows are achievable under the configured `average_vehicle_speed_kmh`.
+- SPEC-002 (Synthetic Workload Generator): depends on this spec for schema, validation rules, coordinate generation approach, service duration generation, and time window generation parameters. **Revision required:** `average_vehicle_speed_kmh` must become an explicit generation configuration parameter in SPEC-002 FR-2. It is not sufficient to document a fixed speed or derive it from routing problem instances — SPEC-002 must accept a configurable speed value and apply it consistently across generated problems. When SPEC-002 generates time-windowed problems, generated time windows must be achievable under the configured `average_vehicle_speed_kmh` (i.e., the speed participates in time-window generation). When SPEC-002 generates feasibility-targeted problems, the configured speed participates in feasibility generation — generated problems must be solvable under the configured speed.
 - SPEC-003 (Scheduler Objectives and Policy Engine): depends on this spec for raw problem properties available for workload feature computation; must define derived workload features (capacity_utilization_ratio, problem_size_class, time_window_density, average_time_window_width_seconds) and the default scheduler configuration referenced by FR-13
 - SPEC-007 (Core Quality Evaluation): references `average_vehicle_speed_kmh` as `RoutingProblem.average_vehicle_speed_kmh` per Project Owner Decision ODR-1, noting "pending SPEC-001 revision." That pending status is resolved by this revision. The "pending SPEC-001 revision" dependency note in SPEC-007 FR-3 and SPEC-007 FR-5 may be removed.
-- SPEC-008 (API Control Plane): may require minor update to document `average_vehicle_speed_kmh` in job submission request body documentation.
-- SPEC-012 (Persistence Schema): **Revision required.** Must add `average_vehicle_speed_kmh` as a column to the routing problems table. Type: `DOUBLE PRECISION`. The column must accept NULL for problems submitted without this field (no time windows), with the system default applied by the API layer before persistence or at load time in the C++ representation.
+- SPEC-008 (API Control Plane): **Already aligned.** SPEC-008 FR-2 already defines `average_vehicle_speed_kmh` as a required field in the job submission request body with constraint `> 0.0`, and SPEC-008 FR-3 already includes the corresponding validation rule. No revision required.
+- SPEC-012 (Persistence Schema): **Already aligned.** SPEC-012 FR-4 already defines `average_vehicle_speed_kmh` as `DOUBLE PRECISION NOT NULL` with `CHECK (average_vehicle_speed_kmh > 0)` in the `routing_problems` table, sourced from ODR-1 and SPEC-008 FR-2. No revision required.
 - SPEC-004 (Solver Contract), SPEC-013 (Nearest-Neighbor Solver), SPEC-014 (Greedy Insertion Solver), SPEC-015 (QUBO Simulated Annealing Solver): no behavioral changes required. The `routing_problem` field in the SolverRequest (SPEC-004 FR-2) carries the complete C++ domain representation, which now includes `average_vehicle_speed_kmh`. Solver specifications reference the C++ domain representation and do not enumerate individual routing problem fields. No solver contract version increment is required.
 
 ---
@@ -958,7 +961,7 @@ This feature is complete when:
 - The routing problem JSON schema is defined and validated against the API submission endpoint.
 - Valid routing problems (with and without time windows, with and without service durations) are persisted to PostgreSQL before the job is published.
 - Invalid routing problems are rejected at the API with structured field-level errors covering all rejection behaviors specified in the Testability section.
-- The C++ Core constructs an equivalent representation from the persisted record, including Haversine distance computation, time window fields, and service duration fields.
+- The C++ Core constructs an equivalent representation from the persisted record, including Haversine distance computation, time window fields, service duration fields, and `average_vehicle_speed_kmh`.
 - All API validation behaviors specified in the Testability section are proven.
 - All C++ Core behaviors specified in the Testability section are proven.
 - All API integration behaviors specified in the Testability section are proven.
