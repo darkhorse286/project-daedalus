@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-08
 
-**Last Updated:** 2026-06-08
+**Last Updated:** 2026-06-20
 
 **Related ADRs:** ADR-001, ADR-004, ADR-006, ADR-009, ADR-010
 
@@ -117,6 +117,7 @@ The generation configuration is the caller's contract with the generator.
 | stop_count | positive integer | Number of stops in the generated problem. |
 | vehicle_count | positive integer | Number of vehicles in the generated fleet. |
 | capacity_per_vehicle | positive integer | Capacity per vehicle in demand units. |
+| average_vehicle_speed_kmh | positive float64 | Fleet-wide average vehicle speed in km/h. Passed through unchanged as the routing problem `average_vehicle_speed_kmh` field (SPEC-001 FR-17). Applied uniformly to all vehicles. Used to derive travel times from Haversine distances when evaluating time window achievability (FR-5). Must be positive and non-zero. |
 
 **Optional Parameters (with defaults)**
 
@@ -145,6 +146,7 @@ The following configuration errors must be rejected before generation begins:
 - `vehicle_count` = 0.
 - `capacity_per_vehicle` = 0.
 - `stop_count` = 0.
+- `average_vehicle_speed_kmh` ≤ 0 (zero or negative speed is invalid per SPEC-001 FR-17).
 - `bounding_box.min_lat` ≥ `bounding_box.max_lat`.
 - `bounding_box.min_lon` ≥ `bounding_box.max_lon`.
 - Any `bounding_box` coordinate outside the SPEC-001 FR-5 valid ranges (latitude ∈ [-90.0, 90.0], longitude ∈ [-180.0, 180.0]).
@@ -156,6 +158,8 @@ The following configuration errors must be rejected before generation begins:
 - Each optional parameter applies its documented default when absent.
 - A configuration with `scenario_type` absent is rejected.
 - A configuration with `stop_count` absent is rejected.
+- A configuration with `average_vehicle_speed_kmh` absent is rejected.
+- A configuration with `average_vehicle_speed_kmh` ≤ 0 is rejected.
 
 ---
 
@@ -301,6 +305,26 @@ The structural validation rule in FR-2 (`time_window_width_seconds` < `planning_
 
 Time window tightness is governed by `time_window_width_seconds` relative to `planning_horizon_seconds`. Narrow windows (small width relative to horizon) are tight. Wide windows are loose. The generator does not compute a tightness metric; average time window width relative to planning horizon is a derived workload feature computed by the Core (SPEC-003).
 
+**Speed-Dependent Achievability**
+
+Generated time windows must be achievable under the configured `average_vehicle_speed_kmh`. Travel time between two locations is derived from Haversine distance using the formula defined in SPEC-001 FR-17 (and FR-9):
+
+```
+travel_time_seconds = (haversine_distance_km / average_vehicle_speed_kmh) × 3600
+```
+
+Generated time windows must not assume a different speed. The value of `average_vehicle_speed_kmh` in the generation configuration is the sole speed parameter for achievability evaluation.
+
+The generator's achievability obligation: for each stop assigned a time window, the stop's `time_window_close` must be reachable from the depot at t=0 under the configured speed. That is, for each time-windowed stop:
+
+```
+(haversine(depot, stop) / average_vehicle_speed_kmh) × 3600 < time_window_close
+```
+
+A time-windowed stop that violates this condition is a construction self-check failure (see Failure Modes). The generator does not produce a routing problem document when any time-windowed stop is not individually reachable from the depot under the configured speed.
+
+This is a necessary but not sufficient condition for full route feasibility. Full route feasibility — considering inter-stop travel, service durations, vehicle count, and routing interactions — is not guaranteed by the depot-reachability check alone. Callers targeting highly feasible workloads should configure `average_vehicle_speed_kmh`, `planning_horizon_seconds`, `time_window_width_seconds`, and `bounding_box` such that inter-stop travel is achievable given the generated geography. The relationship between bounding box size, speed, and planning horizon determines the practical feasibility of generated time-windowed problems.
+
 **Acceptance Criteria:**
 
 - The count of stops receiving time windows equals floor(`stop_count` × `time_window_density`).
@@ -311,6 +335,7 @@ Time window tightness is governed by `time_window_width_seconds` relative to `pl
 - Stops selected for time windows carry both `time_window_open` and `time_window_close`.
 - For `time_window_density` = 0.0: no stops carry time window fields, and the generated problem has `time_windows` constraint type flag = false (per SPEC-001 FR-9).
 - For `time_window_density` = 1.0: all stops carry time window fields, and the generated problem has `time_windows` constraint type flag = true.
+- For every time-windowed stop: `(haversine(depot, stop) / average_vehicle_speed_kmh) × 3600` < `time_window_close`. A violation is a construction self-check failure; no routing problem document is produced.
 - Given the same seed and configuration, time window assignments and values are identical across invocations.
 
 ---
@@ -409,7 +434,8 @@ The routing problem document contains:
       "service_duration": <integer, seconds, optional>
     }
   ],
-  "seed": <uint64>
+  "seed": <uint64>,
+  "average_vehicle_speed_kmh": <double>
 }
 ```
 
@@ -459,6 +485,7 @@ The routing problem document is produced as output and submitted to the API via 
 - The routing problem document does not contain `difficulty_tier`, `scenario_type`, or any generation manifest field.
 - The generation manifest does not contain per-stop coordinate arrays.
 - The generation manifest `spec_version` field identifies the SPEC-002 version.
+- The routing problem document includes `average_vehicle_speed_kmh` equal to the configured `average_vehicle_speed_kmh`.
 
 ---
 
@@ -495,6 +522,7 @@ The fixed draw sequence is defined in FR-3. Any reordering of PRNG draws, or any
 
 # Non-Requirements
 
+- No per-vehicle speed variation. All vehicles travel at the same speed defined by `average_vehicle_speed_kmh`, consistent with SPEC-001 FR-17.
 - No real geographic routing. The generator does not use road networks, geographic databases, address geocoding, or map data.
 - No multi-depot scenarios. Single depot only, per SPEC-001 FR-3.
 - No heterogeneous fleet scenarios. All vehicles have identical capacity, per SPEC-001 FR-2.
@@ -519,6 +547,8 @@ The fixed draw sequence is defined in FR-3. Any reordering of PRNG draws, or any
 - The default bounding box is a configurable value. Changing it does not require code changes.
 - A generated routing problem is submitted via the existing SPEC-001 submission path. The generator is not responsible for API availability, authentication, or submission retries.
 - For the MVP, uniform service duration per stop is sufficient. Per-stop variable service duration is deferred to a future extension (OQ-4).
+- `average_vehicle_speed_kmh` is an explicit generation configuration parameter provided by the caller. It is not derived from system configuration, defaults, or external sources.
+- All vehicles in the generated fleet travel at the same average speed (`average_vehicle_speed_kmh`). Per-vehicle speed variation is not generated, consistent with SPEC-001 Non-Requirements.
 
 ---
 
@@ -606,6 +636,18 @@ The generation configuration is the only external input to the generator. No dat
 
 ---
 
+### Time Window Achievability Failure (Construction Self-Check)
+
+**Cause:** A construction self-check detects that a time-windowed stop is not individually reachable from the depot under the configured `average_vehicle_speed_kmh`: `(haversine(depot, stop) / average_vehicle_speed_kmh) × 3600` ≥ `time_window_close`.
+
+**Expected behavior:** Generation fails after time window assignment. No routing problem document is produced. A structured error identifies the offending stop index, the computed travel time from the depot, and the `time_window_close` value that was not met.
+
+**Expected fallback:** None. The caller must adjust `average_vehicle_speed_kmh`, `bounding_box`, `time_window_width_seconds`, or `planning_horizon_seconds` and reinvoke.
+
+**User-visible result:** Structured error with stop index, computed travel time, and `time_window_close` value showing the unmet achievability condition.
+
+---
+
 ### Construction Invariant Violation
 
 **Cause:** A construction self-check detects a generation invariant violation not covered by the more specific failure modes above (e.g., a duplicate stop id, a stop demand outside the configured range). These are checks the generator runs on its own output to detect defects in generation logic. They are not implementations of SPEC-001 domain validation rules.
@@ -666,6 +708,9 @@ The following behaviors must be proven before this feature is considered complet
 - A configuration with a `bounding_box` where `min_lat` ≥ `max_lat` is rejected.
 - A configuration with a `bounding_box` where `min_lon` ≥ `max_lon` is rejected.
 - A configuration with a `bounding_box` coordinate outside SPEC-001 FR-5 valid ranges is rejected.
+- A configuration with `average_vehicle_speed_kmh` absent is rejected with a structured error before generation begins.
+- A configuration with `average_vehicle_speed_kmh` = 0 is rejected.
+- A configuration with a negative `average_vehicle_speed_kmh` is rejected.
 - All valid configurations proceed to generation without error.
 
 ## Geographic Behaviors
@@ -695,6 +740,8 @@ The following behaviors must be proven before this feature is considered complet
 - The above hold for both even and odd values of `time_window_width_seconds`.
 - For `time_window_density` = 0.0: no stops carry time window fields. The routing problem document has `time_windows` constraint type flag = false.
 - For `time_window_density` = 1.0: all stops carry time window fields. The routing problem document has `time_windows` constraint type flag = true.
+- For each time-windowed stop in a generated problem, `(haversine(depot, stop) / average_vehicle_speed_kmh) × 3600` < `time_window_close`.
+- A configuration that would produce a time-windowed stop not individually reachable from the depot under the configured speed produces a construction self-check failure with no routing problem document emitted.
 
 ## Reproducibility Behaviors
 
@@ -712,6 +759,7 @@ The following behaviors must be proven before this feature is considered complet
 - The `generation_config` field in the manifest contains all generation parameters except `seed`.
 - The routing problem document does not contain any generation manifest fields.
 - The generation manifest does not contain per-stop coordinate arrays.
+- The routing problem document includes `average_vehicle_speed_kmh` equal to the configured value.
 
 ## Difficulty Tier Behaviors
 
@@ -823,7 +871,7 @@ Do not invent specific latency targets. These require measurement.
 
 - Architecture documentation: Add `workload.generate` to the required spans list. Add the generation manifest as a development artifact in the system context.
 - SPEC-003 (pending): Must define workload feature computation contracts for the features that the Core computes from generator-produced problems.
-- SPEC-001: No changes required. The generator conforms to SPEC-001 as published.
+- SPEC-001: SPEC-001 FR-17 formally defines `average_vehicle_speed_kmh` as a required routing problem field. SPEC-002 now accepts this field in FR-2 (generation configuration) and emits it in FR-8 (routing problem document output). This revision aligns SPEC-002 with the accepted SPEC-001 routing problem model. No further SPEC-001 changes are required.
 
 ---
 
