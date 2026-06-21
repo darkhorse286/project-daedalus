@@ -6,13 +6,13 @@
 
 **Title:** QAOA Solver Backend
 
-**Status:** Draft
+**Status:** Proposed
 
 **Author:** Darkhorse286
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20
+**Last Updated:** 2026-06-20 (Revised — Engineering Review complete; F-001 through F-005 and NB-003, NB-004 applied; status advanced to Proposed)
 
 **Supersedes:** None
 
@@ -21,6 +21,9 @@
 **Parent Specification:** SPEC-011 (Backend Solver Specifications)
 
 **Adapter Specification:** SPEC-017 (Python Solver Adapter)
+
+**Review History:**
+- Engineering Review: Completed 2026-06-20
 
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011
 
@@ -245,7 +248,7 @@ The QAOA backend includes a classical outer optimizer that adjusts the QAOA para
 - If the classical optimizer is deterministic (for example, COBYLA or L-BFGS-B), no additional seeding is required beyond the initial parameter values derived from the rng in FR-10 Phase 2.
 - In either case, the choice of optimizer does not alter the reproducibility invariant: identical executions with identical `execution_seed` values produce identical parameter trajectories and identical solution outcomes.
 
-**Timeout during optimizer iteration:** The backend checks elapsed time at the boundary between optimizer evaluations. When the remaining time before the deadline falls below a threshold sufficient to finalize the response, the backend terminates the current optimizer evaluation and begins response construction. The specific threshold and check mechanism are implementation planning decisions. See FR-14.
+**Timeout during optimizer iteration:** The backend checks elapsed time at the boundary between optimizer evaluations — after one evaluation completes and before the next begins. When the remaining time before the deadline falls below a threshold sufficient to finalize the response, the backend does not begin the next optimizer evaluation and instead proceeds to response construction. The specific threshold and check mechanism are implementation planning decisions. See FR-14.
 
 **Acceptance Criteria:**
 - The optimizer terminates due to convergence, evaluation budget exhaustion, or deadline — no other termination conditions are defined
@@ -420,6 +423,8 @@ The specific range values (0.0 to 2π for γ, 0.0 to π for β) are the observab
 
 All randomness consumed during the optimization loop — circuit transpilation, shot-based measurement outcomes, and stochastic optimizer steps — flows through the Qiskit sub-systems initialized from the Phase 1 seeds, not directly from the rng. The main rng is not consumed during Phase 3.
 
+**Aer simulator seed model (part of the reproducibility contract):** The Aer simulator is initialized once per solver execution using `simulator_seed`, before the optimization loop begins. The simulator maintains its internal PRNG state across all optimizer evaluations within a single execution; it is not re-seeded between evaluations. Shot outcomes at evaluation N depend on the PRNG state accumulated through evaluations 1..N−1 in addition to the current circuit parameters. This stateful model ensures that given identical `execution_seed` values, the simulator's state trajectory is identical across invocations, producing identical shot sequences at every evaluation. Changing to a per-evaluation seed reset — passing `simulator_seed` to each individual `run()` call rather than to the simulator constructor — would produce different shot sequences at evaluations 2..N and constitutes a reproducibility-breaking change governed by ADR-010 Decision 5.
+
 This phase boundary means that:
 - The rng's total contribution is exactly 3 + 2p draws per solver execution
 - Phase 3 randomness is fully determined by `transpiler_seed`, `simulator_seed`, and `optimizer_seed`, which are in turn determined by `execution_seed`
@@ -443,6 +448,19 @@ The reproducibility invariant applies when comparing two Succeeded responses fro
 - `numpy.random.default_rng()` without explicit seed: prohibited
 - `routing_problem.seed` as PRNG entropy: prohibited (SPEC-004 FR-11.2); the problem seed field is received in the SolverRequest JSON per SPEC-017 FR-3 and must not be used as a PRNG entropy source
 - Hardware entropy sources: prohibited
+
+**Reproducibility Decision Summary**
+
+The following decisions are frozen once this specification is Accepted. Changing any value constitutes a reproducibility-breaking change governed by ADR-010 Decision 5: update the ADR-010 change record, increment `specification_version`, and update all affected specifications.
+
+| Decision | Value | Notes |
+|---|---|---|
+| `BACKEND_SPAWN_KEY` | `20260620` | Frozen on Acceptance. Future Python backend specifications must use distinct spawn keys. |
+| Phase 1 Draw 1 | `transpiler_seed = int(rng.integers(0, 2**31))` | Always consumed at position 1 before any parameter initialization. |
+| Phase 1 Draw 2 | `simulator_seed = int(rng.integers(0, 2**31))` | Always consumed at position 2. |
+| Phase 1 Draw 3 | `optimizer_seed = int(rng.integers(0, 2**31))` | Always consumed at position 3 regardless of optimizer type. For deterministic optimizers the drawn value is generated but not applied. |
+| Phase 2 Draw order | Interleaved: γ[0], β[0], γ[1], β[1], ..., γ[p−1], β[p−1] via `rng.uniform()` | 2p draws total. Draw ordering is fixed by layer index i, gamma before beta within each layer. |
+| Aer simulator seed model | Initialized once with `simulator_seed` before the optimization loop; internal state maintained across all evaluations; not re-seeded between evaluations. | A change to per-evaluation seed reset (passing `simulator_seed` to each `run()` call) changes shot sequences at evaluations 2..N and is a breaking change. |
 
 **Acceptance Criteria:**
 - Two SolverRequests with identical routing problems and identical `execution_seed` values produce identical `solution` fields when both produce `outcome = "Succeeded"`
@@ -533,8 +551,8 @@ The QAOA backend produces the following `extension_metadata` keys in the SolverR
 |---|---|---|---|
 | `qaoa.ansatz_depth` | uint32 | Solution present | The QAOA circuit depth p used in this execution. The number of cost-mixer layer pairs in the parameterized ansatz. |
 | `qaoa.shots_per_evaluation` | uint32 | Solution present | The number of circuit measurement shots per classical optimizer function evaluation. Determines the size of the bitstring pool decoded at each evaluation step. |
-| `qaoa.optimizer_evaluations` | uint32 | Solution present | The number of classical optimizer function evaluations (circuit executions) completed before termination — whether natural, timeout, or cancellation. Includes the evaluation in progress at the time of termination if it completed. |
-| `qaoa.best_bitstring_energy` | float64 | Solution present | The QUBO energy of the bitstring corresponding to the returned best-so-far RoutePlan. Computed from the QUBO objective function (implementation planning decision) at the bitstring that produced the returned RoutePlan. Encoded as a decimal string in IEEE 754 double precision. Lower energy indicates a better QUBO solution. |
+| `qaoa.optimizer_evaluations` | uint32 | Solution present | The number of classical optimizer function evaluations (circuit executions) that completed before the boundary at which termination was detected — whether natural, timeout, or cancellation. Timeout and cancellation are detected only at evaluation boundaries; no partial evaluations are counted. |
+| `qaoa.best_bitstring_energy` | float64 | Solution present | The QUBO energy of the bitstring corresponding to the returned best-so-far RoutePlan. Computed from the QUBO objective function (implementation planning decision) at the bitstring that produced the returned RoutePlan. Encoded as a decimal string in IEEE 754 double precision. Lower energy indicates a better QUBO solution within this execution. This value is meaningful only within a single QUBO formulation and implementation; it is not comparable across different encoding schemes or penalty weight configurations. |
 | `qaoa.feasible_bitstrings_found` | uint32 | Solution present | The total count of bitstrings across all optimizer evaluations that decoded to a RoutePlan satisfying all SPEC-004 FR-5 structural validity requirements. Includes all valid bitstrings, not only those that became the best-so-far. A value of 1 means exactly one feasible bitstring was found across the entire optimization run. |
 | `qaoa.solution_route_distance_km` | float64 | Solution present | Total Haversine route distance in kilometers of the returned best-so-far RoutePlan. Computed as the sum of Haversine distances for all vehicle routes, including each vehicle's depot-to-first-stop leg and last-stop-to-depot leg. This is the solver's internal quality metric; the normalized quality metric used by Core (SPEC-007) is computed independently. Encoded as a decimal string in IEEE 754 double precision. |
 
@@ -562,9 +580,9 @@ Consumers must silently ignore any keys not listed here. Unrecognized keys are n
 This section defines all failure conditions specific to the QAOA backend and its obligations for the SPEC-017 OQ-3B interrupt compliance bound. General framework failure obligations are defined in SPEC-011 FR-8.
 
 **Contract version mismatch:**
-- **Trigger:** `contract_version` in the SolverRequest JSON does not equal 1.
+- **Trigger:** `contract_version` in the SolverRequest JSON does not equal the backend's declared `supported_contract_version` (1).
 - **Outcome:** `Failed`, `failure_code = "ContractVersionMismatch"`
-- **Behavior:** The backend returns `ContractVersionMismatch` immediately before any processing begins — before Phase 1 rng initialization, before QUBO construction, before any Qiskit import. This check is performed by the adapter before the Python solver function is invoked (SPEC-017 FR-10). No stochastic computation occurs.
+- **Behavior:** The adapter performs this check before invoking the Python solver function (SPEC-017 FR-10). No Python backend code executes. No rng initialization occurs. No QUBO construction occurs. No Qiskit import is triggered by this path. The adapter returns the ContractVersionMismatch response directly.
 - **Metadata:** `failure_message` must identify the received version and the expected version (1).
 
 **Qiskit import failure:**
@@ -578,6 +596,12 @@ This section defines all failure conditions specific to the QAOA backend and its
 - **Outcome:** `Failed`, `failure_code = "InternalError"`
 - **Behavior:** The backend returns Failed immediately, before Phase 1 rng initialization. No solution is present. Extension metadata is absent.
 - **Metadata:** `failure_message` identifies the failure cause.
+
+**QUBO dimension exceeds simulator tractability limit:**
+- **Trigger:** After QUBO formulation, the computed binary variable count Q exceeds the maximum tractable qubit count for the local Aer simulator (empirically determined at implementation time per OQ-1 and OQ-6).
+- **Outcome:** `Failed`, `failure_code = "InternalError"`
+- **Behavior:** The backend returns Failed immediately after QUBO construction determines Q, before Phase 1 rng initialization and before any QAOA circuit is constructed or submitted to the simulator. No stochastic computation occurs. No solution is present. Extension metadata is absent.
+- **Metadata:** `failure_message` must identify the computed Q value, the maximum supported Q value, the stop count, and the vehicle count. Example: `"qaoa-qiskit: QUBO dimension Q=52 exceeds maximum supported qubit count Q_max=30 for stop_count=18 vehicle_count=4."` This condition indicates a capability boundary, not a solver implementation fault.
 
 **Transpilation failure:**
 - **Trigger:** The Qiskit transpiler raises an error when compiling the QAOA circuit.
@@ -603,7 +627,7 @@ This section defines all failure conditions specific to the QAOA backend and its
 - **Outcome:** `Timeout`, `failure_code = "ExecutionTimeout"`
 - **Behavior:** The backend MUST monitor the deadline at optimizer evaluation boundaries. When the remaining time before the deadline falls below a threshold sufficient to finalize the response (including response serialization and return), the backend terminates the current evaluation and begins response construction. The specific threshold is an implementation planning decision. On timeout, the backend returns the best-so-far solution if found; absent otherwise. Extension metadata is present if a solution is present.
 - **Self-termination obligation:** Self-termination is a stronger obligation for this backend than the advisory in SPEC-004 FR-10.1. If the Worker's HTTP client timeout fires because the adapter did not self-terminate, the Worker-constructed Timeout response contains no solution and no extension metadata, discarding the best-so-far and all QAOA diagnostic evidence. Self-termination before the HTTP client timeout fires is a behavioral obligation.
-- **Monitoring mechanism:** The backend checks elapsed time at each optimizer evaluation boundary (between the end of one evaluation and the beginning of the next). Time checks within a single circuit execution (a single call to the Qiskit backend) are not required; the granularity of timeout monitoring is one optimizer evaluation.
+- **Monitoring mechanism:** The backend checks elapsed time at each optimizer evaluation boundary — after one evaluation completes and before the next begins. Time checks within a single circuit execution are not required and not defined. If the deadline is detected at a boundary, the backend does not begin the next evaluation; the evaluation that just completed is the last counted evaluation in `qaoa.optimizer_evaluations`. Termination is never declared mid-evaluation.
 
 **Cancellation:**
 - **Trigger:** Worker cancellation signal received via HTTP connection abort (SPEC-017 FR-6) during an optimizer evaluation.
@@ -1058,6 +1082,20 @@ These values pass through the Worker to the evidence log, where they are availab
 
 ---
 
+### OQ-6: Maximum Single Evaluation Duration
+
+**Classification:** Implementation Qualification Requirement
+
+**Question:** What is the maximum acceptable wall-clock duration of a single Qiskit circuit evaluation (transpilation time, if per-evaluation, plus shot simulation time) for the QAOA backend across the supported problem range within the Small size class?
+
+**Context:** The interrupt compliance bound declared in FR-14 is "the duration of one Qiskit circuit evaluation." Until the maximum single-evaluation duration is empirically established, this bound provides no operational assurance for the adapter's resource planning after a cancellation signal. A single-evaluation duration that approaches the full `execution_timeout_ms` budget renders the interrupt compliance bound effectively unbounded. The empirically established maximum also informs the `transport_overhead_buffer_ms` calibration (SPEC-017 OQ-1): if one evaluation can take close to the full execution budget, the buffer must account for the adapter still completing that evaluation after the HTTP client timeout window opens.
+
+**Resolution required before:** `is_provisional = false` qualification review. The implementation must measure the 99th-percentile single-evaluation wall-clock duration across the supported range of QUBO dimensions and ansatz depths within the Small size class and report the measured bound as part of the qualification evidence.
+
+**Blocking:** Does not block SPEC-018 acceptance or initial implementation. Blocks `is_provisional = false` declaration.
+
+---
+
 # Acceptance Checklist
 
 **SPEC-011 Framework Obligations (FR-12):**
@@ -1081,7 +1119,7 @@ These values pass through the Worker to the evidence log, where they are availab
 - [ ] Failure Model (FR-14): ContractVersionMismatch, Qiskit import failure, QUBO construction failure, transpilation failure, natural termination with no feasible solution, internal error, timeout, and cancellation all defined; interrupt compliance bound declared (SPEC-017 OQ-3B satisfied)
 - [ ] Performance Characteristics: Expected behavior by Small range; basis for estimates stated; simulator tractability constraint noted
 - [ ] Testability: 27 test contracts covering contract conformance, failure model, stochastic algorithm correctness, reproducibility pipeline, capability profile accuracy, extension metadata, observability, and adapter integration
-- [ ] Open Questions: OQ-1 through OQ-5 classified with blocking status; no open questions with unknown classification remain
+- [ ] Open Questions: OQ-1 through OQ-6 classified with blocking status; no open questions with unknown classification remain
 - [ ] No individual solver specification obligation contradicts a framework requirement from SPEC-011 FR-1 through FR-11
 
 **SPEC-017 Compliance Obligations:**
@@ -1124,9 +1162,10 @@ This backend is complete when:
 - Extension metadata keys (all six from FR-13) are present in every SolverResponse where a solution is present
 - The adapter structured log events (SPEC-017 FR-13) are emitted and correlated via job_id and decision_id
 - Self-termination before the Worker's HTTP client timeout is verified on test cases that trigger the timeout path
-- Empirical latency and quality values are measured from the SPEC-002 synthetic workload; `is_provisional = false` is declared after OQ-4 and OQ-5 are resolved by Project Owner decision
+- Empirical latency and quality values are measured from the SPEC-002 synthetic workload; `is_provisional = false` is declared after OQ-4 and OQ-5 are resolved by Project Owner decision and OQ-6 is reported
 - The capability profile is registered through the mechanism resolved by SPEC-003 OQ-2
 - OQ-5 (feasible solution frequency threshold) is reviewed against empirical measurements; threshold is within the Project Owner-approved range
+- OQ-6 (maximum single-evaluation duration) is empirically measured across the supported range of QUBO dimensions and ansatz depths; the measured bound is documented in the `is_provisional = false` qualification review
 - Qiskit and Qiskit Aer are added to the python-adapter container image's pinned requirements file
 - ADR-007 is advanced to Accepted following this specification's acceptance
 - Engineering review passes
