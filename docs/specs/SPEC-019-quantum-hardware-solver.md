@@ -263,7 +263,7 @@ A hardware execution job proceeds through a defined lifecycle: preparation, subm
 
 | Phase | Description | Timeout Consumed |
 |---|---|---|
-| 1. Circuit preparation | QUBO construction, QAOA circuit generation, transpilation (may include PCG64 draws per FR-13) | Yes |
+| 1. Circuit preparation | QUBO construction, QAOA circuit generation, transpilation (may include PCG64 draws per FR-13 PRNG Phase 1) | Yes |
 | 2. Job submission | Circuit and parameters submitted to provider API | Yes |
 | 3. Queue wait | Job waits in provider queue before hardware execution begins | Yes |
 | 4. Hardware execution | Circuit executes on QPU; shots are measured | Yes |
@@ -304,7 +304,7 @@ The backend does not have separate queue and execution timeouts. One budget gove
 **Timeout during queue wait (Phase 3):**
 1. The backend checks the `execution_timeout_ms` deadline at each status monitoring interval during queue waiting.
 2. If the deadline is reached while the job is still queued, the backend submits a cancellation request to the provider API.
-3. After confirming the job is cancelled (or after a bounded cancellation confirmation time per OQ-4), the backend returns HTTP 200 with `outcome = "Timeout"`, `failure_code = "ExecutionTimeout"`, and no `solution`. Extension metadata is absent. `qaoa.hardware.queue_wait_ms` is populated with the measured queue wait up to cancellation.
+3. After confirming the job is cancelled (or after a bounded cancellation confirmation time per OQ-4), the backend returns HTTP 200 with `outcome = "Timeout"`, `failure_code = "ExecutionTimeout"`, and no `solution`. FR-15.2 shared keys (solution fields) are absent. Hardware evidence keys (FR-15.1) are present for each phase reached: `qaoa.hardware.provider_backend`, `qaoa.hardware.hardware_version`, `qaoa.hardware.provider_job_id`, `qaoa.hardware.transpiled_circuit_depth`, and `qaoa.hardware.transpiled_cx_count` are present (device was selected and job was submitted); `qaoa.hardware.queue_wait_ms` is present and populated with the measured queue wait up to cancellation. Hardware execution keys (`qaoa.hardware.circuit_execution_ms`, `qaoa.hardware.calibration_id`, `qaoa.hardware.actual_shot_count`, `qaoa.hardware.estimated_cost`, `qaoa.hardware.error_mitigation_applied`, `qaoa.hardware.error_mitigation_method`) are absent because hardware execution did not begin.
 4. A response produced under this condition reports `execution_duration_ms` as the total elapsed time from execution start to response construction.
 
 **Timeout during hardware execution (Phase 4–5):**
@@ -346,7 +346,7 @@ Cancellation for hardware-backed execution requires cancelling a job that may be
 1. The Worker aborts the HTTP connection.
 2. The backend submits a cancellation request to the provider API for the executing job.
 3. If the provider supports partial result retrieval from a cancelled job, the backend may attempt to retrieve partial results before terminating.
-4. If at least one complete, structurally valid RoutePlan was decoded from partial results, it may be included in the Worker-constructed Cancelled response. Whether partial results are recoverable depends on provider behavior (OQ-4).
+4. The Worker constructs a Cancelled SolverResponse with no solution (SPEC-005 FR-12 Worker-constructed Cancelled). Because the HTTP connection was aborted before the adapter returned a response, no partial results decoded by the backend are accessible to the Worker.
 5. The adapter returns to ready state after the cancellation completes.
 
 **Interrupt compliance bound (SPEC-017 OQ-3B):**
@@ -371,13 +371,16 @@ The anytime contract from SPEC-018 FR-7 applies to this backend, with the constr
 
 **Queue phase:** During queue wait (Phase 3), best-so-far is null. No solution can be returned from a Timeout or Cancelled event that occurs while the job is still queued.
 
-**Timeout and Cancellation with partial results:**
-- If the deadline or cancellation signal arrives after hardware execution has completed but before full result decoding, the backend completes decoding the results already retrieved.
-- If partial shot results are available from a mid-execution cancellation (provider-dependent), the backend decodes available bitstrings and includes the best-so-far in the Timeout or Cancelled response if a feasible RoutePlan was found.
+**Timeout with partial results:**
+- If the deadline arrives after hardware execution has completed but before full result decoding, the backend completes decoding the results already retrieved.
+- If partial shot results are available when the deadline is reached during hardware execution (provider-dependent), the backend decodes available bitstrings and includes the best-so-far in the Timeout response if a feasible RoutePlan was found.
+
+**Cancellation: no partial results available:**
+- When the Worker aborts the HTTP connection (FR-9), the adapter cannot return data through the closed connection. The Worker constructs a Cancelled SolverResponse with no solution (SPEC-005 FR-12). No partial results are included in a Worker-constructed Cancelled response regardless of what results the backend decoded before the connection was closed.
 
 **Feasibility gate:** Unchanged from SPEC-018 FR-6. Decoded bitstrings are eligible as best-so-far candidates if and only if they satisfy all SPEC-004 FR-5 structural validity requirements. Hardware noise increases the likelihood of infeasible bitstrings (constraint-violating assignments) relative to noise-free simulation.
 
-**solution_count in ExecutionStatistics:** Same semantics as SPEC-018 FR-7. Number of optimizer evaluations (or, for batched execution, the number of distinct best-so-far improvements across the full result set) in which the best-so-far improved.
+**solution_count in ExecutionStatistics:** Number of times the best-so-far solution improved during execution. For streaming providers: identical semantics to SPEC-018 FR-7 — the count of optimizer evaluations in which a new feasible best solution was decoded. For batch providers where all optimizer evaluations are submitted as a single hardware job: the count of distinct improvements to the best-so-far observed while processing the complete result set in order, scanning evaluation results sequentially and counting each step at which the decoded route distance improved. These definitions are equivalent for streaming providers; they diverge for batch providers because no per-evaluation boundary exists during job execution.
 
 **Acceptance Criteria:**
 - No solution is returned from a Timeout or Cancellation that occurred during queue waiting
@@ -447,16 +450,16 @@ A provider outage occurs when the cloud quantum execution service is unavailable
 
 **Provider outage during hardware execution:**
 - **Detection:** Provider API becomes unreachable while the job is executing.
-- **Outcome:** `Failed`, `failure_code = "InternalError"`
-- **Behavior:** Result retrieval may have produced partial results. If any complete RoutePlan was decoded before the outage, it is... this is a deviation from the standard Failed behavior (Failed responses have no solution). Given the investment of hardware execution time, this situation is classified as `Timeout` (outcome of execution exceeded budget) rather than `Failed`, allowing the best-so-far to be returned if available. `failure_code = "ExecutionTimeout"`.
+- **Outcome:** `Timeout`, `failure_code = "ExecutionTimeout"`
+- **Behavior:** Result retrieval may have produced partial results. If any complete RoutePlan was decoded before the outage, it is included in the Timeout response. Given the investment of hardware execution time, this situation is classified as `Timeout` rather than `Failed`, allowing the best-so-far to be returned if available.
 - **Note:** This is the only case where `Timeout` is returned due to an infrastructure failure rather than a time budget event.
 
-**Outage classification in evidence:** `qaoa.hardware.failure_classification` distinguishes outage failures from hardware execution errors (FR-15.1). This supports post-incident analysis.
+**Outage classification in evidence:** Provider outage during execution produces `Timeout` with `qaoa.hardware.failure_classification = "provider_outage"` (FR-15.1). This makes provider-outage Timeouts distinguishable from time-budget Timeouts in evidence and supports post-incident analysis.
 
 **Acceptance Criteria:**
 - Provider outage at submission or queue wait produces `Failed` with `InternalError` (not connection-refused to the Worker)
 - Provider outage during execution produces `Timeout` with best-so-far if available, `Timeout` with no solution otherwise
-- `qaoa.hardware.failure_classification` distinguishes outage from hardware error in extension_metadata
+- `qaoa.hardware.failure_classification = "provider_outage"` is present in provider-outage Timeout responses, distinguishing them from time-budget Timeouts in evidence
 
 ---
 
@@ -466,7 +469,7 @@ A provider outage occurs when the cloud quantum execution service is unavailable
 SPEC-011 FR-2.1 explicitly classifies `quantum_hardware` backends as "Stochastic (non-reproducible)." The SPEC-004 FR-11 reproducibility invariant does not apply to this backend. This section defines what IS expected, what IS NOT expected, and what constitutes acceptable hardware nondeterminism.
 
 **What is reproducible:**
-- Classical pre-processing: variational parameter initialization (Phase 2 draws in SPEC-018 FR-10 terms) and Qiskit sub-system seeds (Phase 1 draws) are reproducible given the same `execution_seed` and the same frozen `BACKEND_SPAWN_KEY`. Two invocations with the same `execution_seed` begin the optimization loop with identical initial parameters.
+- Classical pre-processing: variational parameter initialization (PRNG Phase 2 draws) and Qiskit sub-system seeds (PRNG Phase 1 draws) are reproducible given the same `execution_seed` and the same frozen `BACKEND_SPAWN_KEY`. Two invocations with the same `execution_seed` begin the optimization loop with identical initial parameters.
 - QUBO construction: the QUBO representation of the routing problem is deterministic given the same routing problem fields.
 - Classical optimizer updates: for deterministic optimizers, parameter update trajectories are reproducible given the same initial parameters (which are reproducible from the seed). For stochastic optimizers, the `optimizer_seed` derived in Phase 1 governs their behavior.
 
@@ -490,18 +493,18 @@ SPEC-011 FR-2.1 explicitly classifies `quantum_hardware` backends as "Stochastic
 
 **Cross-hardware reproducibility:** Not required and not expected. Results from one hardware device are not expected to match results from a different hardware device, even with the same classical seed.
 
-**BACKEND_SPAWN_KEY:** A unique positive integer, distinct from `20260620` (SPEC-018). To be assigned on Acceptance of this specification. Governs PCG64 initialization for classical pre-processing phases only. Changing the spawn key requires the full ADR-010 Decision 5 breaking change procedure.
+**BACKEND_SPAWN_KEY:** A unique positive integer, distinct from `20260620` (SPEC-018). Must be assigned and declared in this specification before it transitions to Accepted. Governs PCG64 initialization for classical pre-processing phases only. Changing the spawn key after Acceptance requires the full ADR-010 Decision 5 breaking change procedure.
 
 **PRNG draw ordering (classical phases only):**
 
-Phase 1 (Qiskit sub-system seed derivation): Same draw sequence as SPEC-018 FR-10, Phase 1. Three draws from the PCG64 rng, in this order:
+PRNG Phase 1 (Qiskit sub-system seed derivation): Same draw sequence as SPEC-018 FR-10 Phase 1. Three draws from the PCG64 rng, in this order:
 1. `transpiler_seed`: `int(rng.integers(0, 2**31))`
 2. `simulator_seed`: Not applicable (no simulator). This draw is still consumed at position 2 to maintain draw-ordering stability consistent with SPEC-018. The drawn value is generated but not used.
 3. `optimizer_seed`: `int(rng.integers(0, 2**31))` — consumed if the optimizer is stochastic; generated but not used if deterministic.
 
-Phase 2 (QAOA parameter initialization): Same draw sequence as SPEC-018 FR-10, Phase 2. 2p draws in interleaved order: γ[0], β[0], γ[1], β[1], ..., γ[p-1], β[p-1].
+PRNG Phase 2 (QAOA parameter initialization): Same draw sequence as SPEC-018 FR-10 Phase 2. 2p draws in interleaved order: γ[0], β[0], γ[1], β[1], ..., γ[p-1], β[p-1].
 
-Phase 3 (Hardware execution): Randomness during hardware execution originates from the QPU and is not governed by the classical rng. The transpiler seed (Phase 1 Draw 1) governs classical transpilation only.
+PRNG Phase 3 (Hardware execution): Randomness during hardware execution originates from the QPU and is not governed by the classical rng. The transpiler seed (PRNG Phase 1 Draw 1) governs classical transpilation only.
 
 **Reproducibility invariant status:** The SPEC-004 FR-11.1 reproducibility invariant — identical inputs produce identical solutions — does not apply to this backend. This exemption is established by SPEC-011 FR-2.1. Evidence records must not assert reproducibility of hardware-sourced results.
 
@@ -547,7 +550,7 @@ Hardware execution generates evidence that is not produced by local simulation. 
 - Error mitigation method: name of the mitigation method applied, if any (e.g., "readout_mitigation", "zne"); provider-agnostic identifier
 
 **Failure classification:**
-- Failure classification: when `outcome = "Failed"`, a structured string identifying the failure class: one of `"circuit_incompatible"`, `"submission_error"`, `"hardware_error"`, `"calibration_degraded"`, `"provider_outage"`, `"no_feasible_solution"`, `"internal_error"`. Populated only on Failed responses.
+- Failure classification: a structured string identifying the failure class: one of `"circuit_incompatible"`, `"submission_error"`, `"hardware_error"`, `"calibration_degraded"`, `"provider_outage"`, `"no_feasible_solution"`, `"internal_error"`. Present on all Failed responses. Also present on Timeout responses when the Timeout was caused by a provider outage during hardware execution (FR-12), with value `"provider_outage"`.
 
 **Evidence purpose:** These fields support the evidence thesis of Project DAEDALUS. A technical publication based on hardware results must disclose the hardware device, calibration state, shot count, and transpilation metrics to allow readers to assess the evidence's validity. An evidence record lacking these fields cannot support a credible hardware execution claim.
 
@@ -580,7 +583,7 @@ The following extension_metadata keys are defined for this backend. Keys prefixe
 | `qaoa.hardware.error_mitigation_method` | string | `error_mitigation_applied = "true"` | Name of the error mitigation method applied. Absent if no mitigation applied. |
 | `qaoa.hardware.actual_shot_count` | uint32 | Job executed | Number of shot measurement results actually returned by the hardware provider. May differ from `shots_per_evaluation` if the provider truncated or modified the shot count. |
 | `qaoa.hardware.estimated_cost` | string | Job executed | Estimated monetary cost of this hardware job execution in units defined by the provider's pricing model. Encoded as a decimal string. Example: `"0.00023"`. See FR-17 for cost reporting obligations. `"unknown"` if cost cannot be determined from the provider. |
-| `qaoa.hardware.failure_classification` | string | `outcome = "Failed"` | Structured failure class string. One of: `"circuit_incompatible"`, `"submission_error"`, `"hardware_error"`, `"calibration_degraded"`, `"provider_outage"`, `"no_feasible_solution"`, `"internal_error"`. |
+| `qaoa.hardware.failure_classification` | string | `outcome = "Failed"`; or `outcome = "Timeout"` caused by provider outage during execution (FR-12) | Structured failure class string. One of: `"circuit_incompatible"`, `"submission_error"`, `"hardware_error"`, `"calibration_degraded"`, `"provider_outage"`, `"no_feasible_solution"`, `"internal_error"`. On provider-outage Timeout responses, value is `"provider_outage"`. |
 
 **FR-15.2: Shared extension metadata (inherited from SPEC-018):**
 
@@ -598,13 +601,13 @@ The following keys carry identical semantics to SPEC-018 FR-13. All are present 
 **Presence rules:**
 - Hardware evidence keys (FR-15.1): each key is present when the phase described in the "Present When" column was reached, regardless of `outcome`. `qaoa.hardware.provider_backend` is present whenever device selection occurred. `qaoa.hardware.provider_job_id` is present whenever a job was submitted to the provider.
 - Shared keys (FR-15.2): present when and only when a solution is present in the response. Absent otherwise.
-- `qaoa.hardware.failure_classification`: present only on `Failed` responses.
+- `qaoa.hardware.failure_classification`: present on all `Failed` responses; also present on `Timeout` responses caused by provider outage during hardware execution (FR-12), with value `"provider_outage"`. Absent on all other Timeout and Cancelled responses.
 
 **Acceptance Criteria:**
 - All FR-15.1 hardware keys are present as specified by their "Present When" conditions
 - All FR-15.2 shared keys are present when and only when a solution is present
 - No key contains routing problem raw data (coordinates, demands, stop lists)
-- `qaoa.hardware.failure_classification` is present in every Failed response and contains one of the seven defined values
+- `qaoa.hardware.failure_classification` is present in every Failed response and in every provider-outage Timeout response (FR-12); contains one of the seven defined values
 - `qaoa.hardware.estimated_cost` is present in every response where hardware execution occurred; `"unknown"` is permitted if provider cost data is unavailable
 
 ---
@@ -665,13 +668,13 @@ Hardware quantum execution incurs monetary cost. This backend must report estima
 ### FR-18: Supported SolverOutcome Values
 
 **Description:**
-This backend is classified `quantum_hardware`. It supports the same outcome set as `quantum_inspired_stochastic` backends but does not support `Infeasible` and cannot satisfy the SPEC-004 FR-11.1 reproducibility invariant.
+This backend is classified `quantum_hardware`. The supported outcome set for `quantum_hardware` category backends is defined in SPEC-011 FR-5.1 (see Documentation Updates for the required SPEC-011 amendment). This backend does not support `Infeasible` (SPEC-011 FR-5.2) and cannot satisfy the SPEC-004 FR-11.1 reproducibility invariant (SPEC-011 FR-2.1).
 
 | Outcome | Supported | Trigger Condition |
 |---|---|---|
 | `Succeeded` | Yes | The optimization loop terminates naturally before the `execution_timeout_ms` deadline AND at least one feasible RoutePlan was found AND hardware execution completed without error |
 | `Timeout` | Yes | `execution_timeout_ms` budget exhausted during queue wait, hardware execution, or result retrieval; also used for provider outage during execution (FR-12); best-so-far RoutePlan included if available |
-| `Cancelled` | Yes | Worker cancellation signal received during queue wait or hardware execution; hardware job cancellation submitted; best-so-far RoutePlan included if already retrieved before cancellation |
+| `Cancelled` | Yes | Worker cancellation signal received during queue wait or hardware execution; hardware job cancellation submitted; no solution (Worker-constructed per SPEC-005 FR-12; HTTP connection abort precludes adapter-returned data) |
 | `Failed` | Yes | Contract version mismatch; device selection failure; circuit incompatibility; job submission failure; hardware execution error; natural optimizer termination with no feasible solution; internal error |
 | `Infeasible` | **Not Supported** | This backend cannot prove infeasibility. Prohibited per SPEC-011 FR-5.2. |
 
@@ -735,7 +738,7 @@ This section satisfies the supported outcome declaration requirement in SPEC-011
 
 2. The SPEC-004 FR-11.1 reproducibility invariant does not apply to this backend. The `quantum_hardware` category exemption established in SPEC-011 FR-2.1 is the governing authority.
 
-3. Classical pre-processing uses NumPy PCG64 initialized via `SeedSequence(execution_seed, spawn_key=(BACKEND_SPAWN_KEY,))` per SPEC-017 FR-9. `BACKEND_SPAWN_KEY` must be a unique positive integer distinct from `20260620` (SPEC-018). Assigned on Acceptance.
+3. Classical pre-processing uses NumPy PCG64 initialized via `SeedSequence(execution_seed, spawn_key=(BACKEND_SPAWN_KEY,))` per SPEC-017 FR-9. `BACKEND_SPAWN_KEY` must be a unique positive integer distinct from `20260620` (SPEC-018). Must be assigned before Acceptance. **Blocking: `BACKEND_SPAWN_KEY = TBD` is not valid in an Accepted specification.**
 
 4. `execution_seed` is the exclusive authorized entropy source for classical pre-processing. Prohibited in reproducibility-critical classical paths: `random.random()`, `os.urandom()`, `time.time()`, `os.getpid()`, any unseeded NumPy generator. Hardware shot outcomes are not governed by this constraint.
 
@@ -821,7 +824,7 @@ Fields not used in optimization: `routing_problem.time_window_open`, `routing_pr
 **Provider outage during execution:**
 - **Condition:** Provider API becomes unreachable while job is executing.
 - **Outcome:** `Timeout` with best-so-far (if available); `Timeout` with no solution otherwise.
-- **Fallback:** Outage-classified Timeout recorded. Infrastructure failure distinguished from algorithm failure in evidence.
+- **Fallback:** Outage-classified Timeout recorded. `qaoa.hardware.failure_classification = "provider_outage"` is present in the Timeout response, distinguishing this infrastructure failure from time-budget Timeouts in evidence.
 
 **Natural optimizer termination with no feasible solution:**
 - **Condition:** Optimization completes before deadline; no feasible bitstring was decoded.
@@ -946,11 +949,23 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 **SPEC-004:**
 - OQ-2 (actual execution cost reporting) is the first concrete scenario requiring resolution. SPEC-019's monetary cost reporting obligation makes OQ-2 non-hypothetical. A `reported_cost` field in ExecutionStatistics should be considered before SPEC-019 moves to Proposed.
 
-**ADR-007:**
-- SPEC-019 is the formal hardware execution specification anticipated by ADR-007. ADR-007's next review trigger ("IBM Quantum Runtime access becomes available at acceptable cost and queue latency") applies. ADR-007's Documentation Updates section should reference SPEC-019 as the planned realization once access conditions are satisfied.
+**SPEC-011 FR-3.1 (DeterminismClass controlled vocabulary):**
+- The `determinism_class` metadata field's controlled vocabulary (SPEC-011 FR-3.1) currently defines two valid values: `Deterministic` and `Stochastic (reproducible)`. This specification declares `determinism_class = "Stochastic (non-reproducible)"`, which is described as the `quantum_hardware` category's determinism class in SPEC-011 FR-2.1 but is not listed in FR-3.1's controlled vocabulary. SPEC-011 FR-3.1 must be amended to add `Stochastic (non-reproducible)` as a third valid DeterminismClass value with definition: "Non-reproducible by nature; hardware entropy precludes reproducibility from `execution_seed` alone. Applies to `quantum_hardware` category backends (SPEC-011 FR-2.1)." This amendment is required before SPEC-019 transitions to Proposed.
+
+**SPEC-011 FR-5.1 (Supported SolverOutcome Values matrix):**
+- SPEC-011 FR-5.1 does not include a `quantum_hardware` column in its supported SolverOutcome Values matrix. SPEC-011 FR-5.1 must be amended to add a `quantum_hardware` column with: `Succeeded` — Required; `Timeout` — Required; `Cancelled` — Required; `Failed` — Required; `Infeasible` — Not Supported. This amendment is required before SPEC-019 transitions to Proposed.
 
 **SPEC-011 FR-11 (deferred backends):**
 - The "Quantum Hardware" deferred backend entry cites ADR-007. SPEC-019 should be noted as the planned individual solver specification for this backend.
+
+**SPEC-017 FR-15 (External network access prohibition):**
+- SPEC-017 FR-15 prohibits external network access from the python-adapter container for all Python solver backends, citing ADR-007 hardware deferral as justification. SPEC-019 is the realization of that deferral end state and requires external network access. SPEC-017 FR-15 must be amended to add an exception for `quantum_hardware`-category backends: "Exception: Python backends in the `quantum_hardware` category (SPEC-011 FR-2.1) are permitted to make external network calls to configured, authorized provider endpoints. This exception applies only to backends for which the Docker Compose network policy change has been resolved and the adapter container's outbound access is restricted to permitted provider endpoints." The FR-15 acceptance criterion ("Python backends make no external network calls during solver execution") must be updated to apply only to non-`quantum_hardware` backends. This amendment is required before SPEC-019 transitions to Proposed.
+
+**SPEC-017 OQ-1 (`transport_overhead_buffer_ms`):**
+- The `transport_overhead_buffer_ms` value in SPEC-017 OQ-1 was calibrated for local computation serialization overhead. Hardware backends require additional time for provider API cancellation before self-terminating; this latency may exceed the current calibrated buffer. If OQ-4 resolution identifies provider cancellation round-trip times that exceed the current buffer, SPEC-017 OQ-1 must be reopened to assess whether a hardware-specific `transport_overhead_buffer_ms` value is required.
+
+**ADR-007:**
+- SPEC-019 is the formal hardware execution specification anticipated by ADR-007. ADR-007's next review trigger ("IBM Quantum Runtime access becomes available at acceptable cost and queue latency") applies. ADR-007's Documentation Updates section should reference SPEC-019 as the planned realization once access conditions are satisfied.
 
 **SPEC-018:**
 - No content changes required. SPEC-019 defines a separate backend that reuses SPEC-018's QUBO representation and decoding model. SPEC-018 may note in its Documentation Updates section that SPEC-019 is the hardware execution counterpart.
@@ -1004,7 +1019,9 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 
 **Question:** Does the selected provider support: (a) cancellation of queued jobs; (b) cancellation of executing jobs; (c) partial result retrieval from cancelled or timed-out jobs?
 
-**Why it matters:** The cancellation behavior defined in FR-9 and timeout behavior in FR-8 assume that provider cancellation is possible. If the provider does not support cancellation, in-flight job cancellation is impossible, and the interrupt compliance bound (SPEC-017 OQ-3B) cannot be satisfied. Partial result availability determines whether Timeout and Cancelled responses can include a best-so-far solution.
+**Why it matters:** The cancellation behavior defined in FR-9 and timeout behavior in FR-8 assume that provider cancellation is possible. If the provider does not support cancellation, in-flight job cancellation is impossible, and the interrupt compliance bound (SPEC-017 OQ-3B) cannot be satisfied. Partial result availability determines whether Timeout responses can include a best-so-far solution.
+
+**transport_overhead_buffer_ms dependency:** The OQ-4 resolution must include an estimate of provider API cancellation round-trip time (call submission latency plus provider acknowledgment latency). This estimate must be provided to the SPEC-017 OQ-1 resolution process: the `transport_overhead_buffer_ms` calibration was performed for local computation and may be insufficient for hardware-backend self-termination, which requires issuing a provider API cancellation request before the Worker's HTTP client timeout fires. See Documentation Updates (SPEC-017 OQ-1).
 
 **Blocking:** Blocks implementation of FR-8 and FR-9. Does not block Draft status.
 
@@ -1065,7 +1082,7 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 - [ ] Best-So-Far Behavior (FR-10): Queue phase has no solution; streaming vs. batch provider constraint; feasibility gate inherited from SPEC-018
 - [ ] Hardware Failure Behavior (FR-11): Circuit incompatibility; job submission failure; hardware execution error; calibration degradation (not a failure); no-feasible-solution failure
 - [ ] Provider Outage Behavior (FR-12): Outage at submission/queue produces Failed; outage during execution produces Timeout with best-so-far
-- [ ] Reproducibility Expectations (FR-13): SPEC-011 FR-2.1 quantum_hardware exemption cited; what IS reproducible (classical pre-processing) stated; what IS NOT reproducible (hardware shots) stated; BACKEND_SPAWN_KEY declared as TBD; draw ordering consistent with SPEC-018
+- [ ] Reproducibility Expectations (FR-13): SPEC-011 FR-2.1 quantum_hardware exemption cited; what IS reproducible (classical pre-processing) stated; what IS NOT reproducible (hardware shots) stated; BACKEND_SPAWN_KEY assigned to a unique positive integer; draw ordering consistent with SPEC-018
 - [ ] Evidence Requirements (FR-14): All evidence categories stated; publication support rationale provided
 - [ ] Extension Metadata (FR-15): All hardware-specific keys documented; shared SPEC-018 keys referenced; presence rules defined; raw-data prohibition confirmed
 - [ ] Capability Profile (FR-16): All nine SPEC-011 FR-4.1 fields present; is_provisional = true; TBD fields flagged; accuracy basis stated
@@ -1081,10 +1098,10 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 
 **SPEC-017 Compliance Obligations:**
 
-- [ ] BACKEND_SPAWN_KEY declared as TBD, to be a unique positive integer distinct from `20260620` (SPEC-018), frozen on Acceptance
+- [ ] `BACKEND_SPAWN_KEY` assigned to a unique positive integer distinct from `20260620` (SPEC-018) and declared in this specification. **Blocking: This specification cannot transition to Accepted with `BACKEND_SPAWN_KEY = TBD`.**
 - [ ] rng initialization formula follows SPEC-017 FR-9 (SeedSequence with spawn_key)
-- [ ] Phase 1 draw ordering documented and consistent with SPEC-018; `simulator_seed` draw consumed but not applied
-- [ ] Phase 2 draw ordering documented and consistent with SPEC-018
+- [ ] PRNG Phase 1 draw ordering documented and consistent with SPEC-018 FR-10 Phase 1; `simulator_seed` draw consumed but not applied
+- [ ] PRNG Phase 2 draw ordering documented and consistent with SPEC-018 FR-10 Phase 2
 - [ ] SPEC-017 OQ-3B interrupt compliance bound declared (bounded by cancellation API round-trip time plus provider acknowledgment wait, OQ-4)
 - [ ] No stdout/stderr usage confirmed (SPEC-017 Constraint 14)
 
