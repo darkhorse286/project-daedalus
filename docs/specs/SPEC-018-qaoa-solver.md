@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Revised — Engineering Review complete; F-001 through F-005 and NB-003, NB-004 applied; status advanced to Proposed)
+**Last Updated:** 2026-06-20 (Revised — Architecture Review complete; AR-001 and AR-002 applied)
 
 **Supersedes:** None
 
@@ -24,6 +24,7 @@
 
 **Review History:**
 - Engineering Review: Completed 2026-06-20
+- Architecture Review: Completed 2026-06-20
 
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011
 
@@ -409,7 +410,7 @@ These three draws are consumed in Phase 1 regardless of whether the optimizer is
 
 **PRNG draw ordering — Phase 2: QAOA parameter initialization**
 
-Phase 2 begins immediately after Phase 1's three draws are complete. Phase 2 initializes the 2p QAOA variational parameters (p gamma values and p beta values) in the following fixed order:
+Phase 2 begins immediately after Phase 1's three draws are complete. Phase 2 initializes the 2p QAOA variational parameters (p gamma values and p beta values) in the following fixed order. p must be determined before Phase 1 begins; p may not be derived from rng draws and must be computed deterministically from routing problem fields or backend configuration parameters.
 
 For i = 0, 1, ..., p−1:
 - Draw γ[i]: `rng.uniform(0.0, 2π)` — gamma parameter for QAOA layer i
@@ -763,6 +764,8 @@ These estimates assume shallow ansatz depth (p ≤ 3) and modest shot counts (10
 
 14. `extension_metadata` must not contain routing problem raw data: geographic coordinate arrays, stop identifier lists, demand arrays, time window arrays (SPEC-004 FR-13, SPEC-011 FR-7.4).
 
+15. Ansatz depth p must be determined before Phase 1 rng draws begin. p may not be derived from rng draws; p must be computed deterministically from routing problem fields or backend configuration parameters. Deriving p from the rng would insert undocumented draws before Phase 1 or between Phase 1 and Phase 2, violating the frozen draw ordering in the Reproducibility Decision Summary (FR-10, ADR-010 Decision 5).
+
 ---
 
 # Inputs
@@ -1112,7 +1115,7 @@ These values pass through the Worker to the evidence log, where they are availab
 - [ ] Best-So-Far Solution Tracking (FR-7): Update trigger (per optimizer evaluation); quality comparison criterion (minimum Haversine distance); anytime contract; solution_count semantics; coarser granularity vs. SPEC-015 acknowledged
 - [ ] Constraint Handling (FR-8): Capacity enforced; time windows and service durations not enforced; infeasibility detection not supported
 - [ ] Capability Profile Declaration (FR-9): All nine fields from SPEC-011 FR-4.1 present; supported_size_classes = {Small} with rationale; quality_profile = Baseline with rationale; is_provisional = true declared; latency_profile in seconds; accuracy basis stated
-- [ ] Seed Usage Policy (FR-10): Stochastic class stated; NumPy PCG64 named; BACKEND_SPAWN_KEY declared as 20260620 and frozen; rng initialization formula per SPEC-017 FR-9 stated; Phase 1 draw ordering (3 draws: transpiler_seed, simulator_seed, optimizer_seed) documented; Phase 2 draw ordering (2p draws: interleaved γ, β) documented; Phase 3 via sub-system seeds stated; Qiskit randomness obligation (SPEC-017 FR-9) satisfied; prohibited entropy sources confirmed absent; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5 and SPEC-017 FR-9
+- [ ] Seed Usage Policy (FR-10): Stochastic class stated; NumPy PCG64 named; BACKEND_SPAWN_KEY declared as 20260620 and frozen; rng initialization formula per SPEC-017 FR-9 stated; Phase 1 draw ordering (3 draws: transpiler_seed, simulator_seed, optimizer_seed) documented; Phase 2 draw ordering (2p draws: interleaved γ, β) documented; Phase 3 via sub-system seeds stated; Qiskit randomness obligation (SPEC-017 FR-9) satisfied; prohibited entropy sources confirmed absent; p deterministically derived (not from rng draws) and determined before Phase 1 begins stated (Constraint 15); satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5 and SPEC-017 FR-9
 - [ ] Supported SolverOutcome Values (FR-11): Explicit table; Infeasible listed as Not Supported; Timeout-with-solution and Cancelled-with-solution behavior stated; satisfies SPEC-011 FR-5.3
 - [ ] RoutePlan Output Requirements (FR-12): Presence per outcome; SPEC-011 FR-7.1 narrowing declared; capacity validity guarantee; stop completeness guarantee; time window non-guarantee; execution_duration_ms obligation per SPEC-017 FR-5
 - [ ] Extension Metadata (FR-13): All six keys documented with types, presence conditions, and descriptions; raw-data prohibition confirmed; absence on no-solution responses stated; rationale for Timeout-with-solution inclusion stated; satisfies SPEC-011 FR-7.4
@@ -1167,6 +1170,6 @@ This backend is complete when:
 - OQ-5 (feasible solution frequency threshold) is reviewed against empirical measurements; threshold is within the Project Owner-approved range
 - OQ-6 (maximum single-evaluation duration) is empirically measured across the supported range of QUBO dimensions and ansatz depths; the measured bound is documented in the `is_provisional = false` qualification review
 - Qiskit and Qiskit Aer are added to the python-adapter container image's pinned requirements file
-- ADR-007 is advanced to Accepted following this specification's acceptance
+- ADR-007 is advanced to Accepted before or concurrently with this specification's acceptance
 - Engineering review passes
 - Specification status is updated to Verified
