@@ -561,7 +561,9 @@ Security posture for the Python Solver Adapter at MVP scope, consistent with ADR
 
 **Input validation:** The adapter validates that the SolverRequest body is well-formed JSON and contains all required fields before passing any data to a Python solver. The adapter does not re-validate routing problem domain constraints; the routing problem has been validated by Core (ADR-009) before the Worker dispatched the request.
 
-**No external network access:** Python solver backends must not make external network calls during solver execution. IBM Quantum hardware execution is deferred per ADR-007. Unauthorized external calls from within the adapter could introduce timing non-determinism, network latency into execution budgets, and data exfiltration risk.
+**No external network access:** Python solver backends must not make external network calls during solver execution. Unauthorized external calls from within the adapter could introduce timing non-determinism, network latency into execution budgets, and data exfiltration risk.
+
+**Exception — `quantum_hardware` category backends (SPEC-011 FR-2.1):** Python backends in the `quantum_hardware` category are permitted to make external network calls to configured, authorized cloud quantum provider endpoints during solver execution. This exception applies only when: (a) the individual backend specification explicitly declares external network access as required; (b) the Docker Compose network policy has been updated to restrict outbound access to permitted provider endpoints only; and (c) the deployment satisfies the credential and data protection requirements stated in the individual backend specification. External network access for `quantum_hardware` backends must be scoped to provider API endpoints only; general internet access from the adapter container is not authorized. IBM Quantum hardware execution is deferred per ADR-007; this exception becomes operative when the ADR-007 review trigger is satisfied and an individual hardware backend specification is Accepted.
 
 **Entropy isolation:** Python backends must not use OS random sources in reproducibility-critical paths. Incorrect entropy use produces non-reproducible outputs that undermine evidence integrity and violate ADR-010.
 
@@ -570,7 +572,7 @@ Security posture for the Python Solver Adapter at MVP scope, consistent with ADR
 **Acceptance Criteria:**
 - The adapter is not reachable from outside the Docker Compose internal network at MVP scope
 - The adapter validates SolverRequest JSON structure before passing data to any Python solver
-- Python backends make no external network calls during solver execution
+- Non-`quantum_hardware` Python backends make no external network calls during solver execution; `quantum_hardware` backends may contact permitted provider endpoints only, subject to the exception stated above and the individual backend specification's network policy requirements
 - Log events contain no geographic coordinate arrays, stop lists, or demand arrays
 
 ---
@@ -616,7 +618,7 @@ Security posture for the Python Solver Adapter at MVP scope, consistent with ADR
 6. The adapter returns HTTP 200 for every SolverResponse payload. HTTP non-200 indicates adapter-level failure.
 7. The adapter must self-terminate active Python solver computation before `execution_timeout_ms` expires (FR-5). Relying exclusively on the Worker HTTP client timeout is a behavioral violation.
 8. The adapter is stateless between requests (FR-7). PRNG state, partial solutions, and computation state from one request must not persist into a subsequent request.
-9. Python backend execution must not access external networks (IBM Quantum hardware deferred per ADR-007).
+9. Python backend execution must not access external networks. Exception: `quantum_hardware` category backends (SPEC-011 FR-2.1) may contact configured, authorized provider endpoints when the Docker Compose network policy has been updated to permit and restrict outbound access to those endpoints only. IBM Quantum hardware execution is deferred per ADR-007; this exception applies when that deferral is lifted per the ADR-007 review trigger.
 10. `routing_problem.seed` must not be used as a PRNG entropy source. Only `execution_seed` seeds the PRNG (SPEC-004 FR-11.2).
 11. `extension_metadata` must not contain routing problem raw data: geographic coordinate arrays, stop identifier lists, demand arrays (SPEC-004 FR-13).
 12. `Infeasible` must not be returned by heuristic Python backends (SPEC-011 FR-5.2).
@@ -826,7 +828,7 @@ These are answered by:
 
 **Entropy isolation:** Python backends must not use OS random sources in reproducibility-critical paths. Incorrect entropy use causes non-reproducible outputs that undermine evidence integrity and violate ADR-010. This must be enforced through code review of individual Python backend implementations.
 
-**No external network access:** Python solvers must not make external network calls during execution. This must be enforced through Docker Compose network policy (no outbound internet access from the `python-adapter` container at MVP scope) and code review.
+**No external network access:** Non-`quantum_hardware` Python solvers must not make external network calls during execution. This must be enforced through Docker Compose network policy and code review. `quantum_hardware` backends (SPEC-011 FR-2.1) require outbound access to provider API endpoints as an exception to this rule (FR-15); the Docker Compose network policy must restrict this access to permitted endpoints only and must be updated per individual hardware backend specification requirements.
 
 **Log safety:** Log events must not include geographic coordinate arrays, stop lists, or demand arrays per SPEC-001 Security Considerations.
 
@@ -867,7 +869,9 @@ These are answered by:
 
 **Why it matters:** Too small a buffer causes the Worker HTTP client timeout to fire before the adapter's self-termination response arrives. This discards any best-so-far solution from Python backends implementing anytime behavior and produces a Worker-constructed Timeout response with no solution. Too large a buffer provides less protection if the adapter becomes unresponsive. The value must be empirically calibrated against JSON serialization time for maximum-size routing problem payloads and Docker Compose internal network latency.
 
-**Owner:** Worker implementation planning. Requires measurement during implementation.
+**Hardware backend calibration note (SPEC-019 OQ-4 dependency):** `quantum_hardware` category backends (SPEC-019) must issue a provider API cancellation request before self-terminating. This adds network round-trip latency — provider API call time plus provider acknowledgment time — beyond the local computation serialization overhead this buffer was calibrated for. When SPEC-019 OQ-4 (provider cancellation semantics and latency) is resolved, the OQ-4 resolution must include an estimate of provider API cancellation round-trip time. If that estimate exceeds the `transport_overhead_buffer_ms` value calibrated for local backends, this open question must be reopened to assess whether a hardware-specific buffer value is required.
+
+**Owner:** Worker implementation planning. Requires measurement during implementation. Hardware-specific recalibration contingent on SPEC-019 OQ-4 resolution.
 
 **Blocking:** Blocks Worker HTTP client implementation for the Python adapter dispatch path. Does not block SPEC-017 acceptance.
 
