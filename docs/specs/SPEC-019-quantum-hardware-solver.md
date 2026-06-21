@@ -6,13 +6,20 @@
 
 **Title:** Quantum Hardware Solver Backend
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20
+**Last Updated:** 2026-06-21
+
+**Review History:**
+- Engineering Review: completed 2026-06-20 (findings F-001 through F-012; F-001–F-010 applied, F-011 deferred, F-012 resolved through F-003)
+- Architecture Review: completed 2026-06-21 (classification: Architecturally Sound; NB-001–NB-003 identified)
+- Architecture Revision: completed 2026-06-21 (NB-001–NB-003 applied; SPEC-004 FR-10 and ADR-007 updated)
+- Acceptance Review: completed 2026-06-21 (BLOCK-001 identified: BACKEND_SPAWN_KEY = TBD)
+- Acceptance Revision: completed 2026-06-21 (BLOCK-001 resolved: BACKEND_SPAWN_KEY = 20260621; NB-B applied)
 
 **Supersedes:** None
 
@@ -157,7 +164,7 @@ This backend executes QAOA circuits on an external cloud quantum execution servi
 1. The backend accepts a configured provider connection from the deployment environment. The mechanism by which provider credentials, endpoints, and selection parameters are supplied to the backend is an implementation planning decision (OQ-1).
 2. The backend interacts with the provider through a Python SDK layer. The specific SDK and SDK version are implementation planning decisions.
 3. The backend must not hard-code provider API behavior. Provider API calls are isolated behind an adapter layer within the backend implementation, enabling provider substitution without contract changes.
-4. If no configured provider is available at invocation time, the backend returns `Failed` with `failure_code = InternalError` and a `failure_message` identifying the configuration failure.
+4. If no configured provider is available at invocation time, the backend returns `Failed` with `failure_code = InternalError`, `qaoa.hardware.failure_classification = "internal_error"`, and a `failure_message` identifying the configuration failure.
 
 **Provider neutrality obligation:** The observable contract — SolverRequest input, SolverResponse output, extension_metadata keys — must not vary based on which provider is used. Provider-specific data belongs in extension_metadata values (keyed generically), not in new contract fields.
 
@@ -175,8 +182,8 @@ A cloud quantum execution provider may offer multiple hardware devices (backends
 **Device selection obligations:**
 1. The backend selects a hardware device from among the configured eligible devices before submitting the circuit. The selection criteria — qubit count compatibility with the QUBO dimension, gate fidelity thresholds, availability — are implementation planning decisions (OQ-2).
 2. The selected hardware device identifier is recorded before job submission and is available for evidence reporting regardless of execution outcome.
-3. The backend must not submit a circuit to a device whose qubit count is insufficient for the QUBO binary variable count Q of the routing problem. If no eligible device has sufficient qubit count, the backend returns `Failed` with `failure_code = InternalError` before job submission.
-4. If no eligible device is available (all devices are offline, at capacity, or misconfigured), the backend returns `Failed` with `failure_code = InternalError`.
+3. The backend must not submit a circuit to a device whose qubit count is insufficient for the QUBO binary variable count Q of the routing problem. If no eligible device has sufficient qubit count, the backend returns `Failed` with `failure_code = InternalError` and `qaoa.hardware.failure_classification = "circuit_incompatible"` before job submission.
+4. If no eligible device is available (all devices are offline, at capacity, or misconfigured), the backend returns `Failed` with `failure_code = InternalError` and `qaoa.hardware.failure_classification = "internal_error"`.
 5. The selected device identifier and its hardware version at the time of selection are included in extension_metadata (FR-15.1) regardless of whether the execution produces a RoutePlan.
 
 **Acceptance Criteria:**
@@ -393,7 +400,7 @@ The anytime contract from SPEC-018 FR-7 applies to this backend, with the constr
 ### FR-11: Hardware Failure Behavior
 
 **Description:**
-Hardware execution introduces failure modes that do not exist for local simulation. These are in addition to the failure modes inherited from SPEC-018 (contract version mismatch, QUBO construction failure, natural termination with no feasible solution, internal error).
+Hardware execution introduces failure modes that do not exist for local simulation. These are in addition to the failure modes inherited from SPEC-018 (contract version mismatch, QUBO construction failure, natural termination with no feasible solution, internal error). Inherited failure modes use `qaoa.hardware.failure_classification = "internal_error"` unless a more specific value applies (e.g., `"no_feasible_solution"` for natural optimizer termination with no feasible decoded route plan).
 
 **Hardware-specific failure conditions:**
 
@@ -405,7 +412,7 @@ Hardware execution introduces failure modes that do not exist for local simulati
 
 **Job submission failure:**
 - **Trigger:** The provider API returns an error when the job is submitted (transient network error, API error, quota exceeded).
-- **Outcome:** `Failed`, `failure_code = "InternalError"`
+- **Outcome:** `Failed`, `failure_code = "InternalError"`, `qaoa.hardware.failure_classification = "submission_error"`
 - **Behavior:** The backend returns Failed after a bounded number of submission retries (OQ-4). `failure_message` identifies the provider error.
 - **Hardware evidence:** `qaoa.hardware.provider_backend` is included if device selection occurred.
 
@@ -439,13 +446,13 @@ A provider outage occurs when the cloud quantum execution service is unavailable
 
 **Provider outage at job submission:**
 - **Detection:** The provider API returns connection errors or service unavailability responses for all submission attempts within the bounded retry window (OQ-4).
-- **Outcome:** `Failed`, `failure_code = "InternalError"`
+- **Outcome:** `Failed`, `failure_code = "InternalError"`, `qaoa.hardware.failure_classification = "provider_outage"`
 - **Behavior:** The backend returns Failed. `failure_message` identifies the outage as the cause. The Worker receives HTTP 200 with a Failed SolverResponse (not a connection-refused error) because the adapter itself is running.
 - **Worker handling:** The Worker processes this as a solver-level failure per SPEC-017 FR-12. The job reaches `Completed` with a Failed solver outcome. Unlike adapter unavailability (connection refused, which triggers NACK-with-requeue), a provider outage produces a completed failed solver run that is recorded in evidence.
 
 **Provider outage during queue wait:**
 - **Detection:** Provider API status polling returns persistent errors indicating the service is unavailable.
-- **Outcome:** `Failed`, `failure_code = "InternalError"`
+- **Outcome:** `Failed`, `failure_code = "InternalError"`, `qaoa.hardware.failure_classification = "provider_outage"`
 - **Behavior:** The backend terminates queue monitoring and returns Failed. `failure_message` identifies the outage. Hardware evidence fields available before the outage are included.
 
 **Provider outage during hardware execution:**
@@ -493,7 +500,9 @@ SPEC-011 FR-2.1 explicitly classifies `quantum_hardware` backends as "Stochastic
 
 **Cross-hardware reproducibility:** Not required and not expected. Results from one hardware device are not expected to match results from a different hardware device, even with the same classical seed.
 
-**BACKEND_SPAWN_KEY:** A unique positive integer, distinct from `20260620` (SPEC-018). Must be assigned and declared in this specification before it transitions to Accepted. Governs PCG64 initialization for classical pre-processing phases only. Changing the spawn key after Acceptance requires the full ADR-010 Decision 5 breaking change procedure.
+**BACKEND_SPAWN_KEY:** `20260621`
+
+This value is the spawn key parameter passed to `numpy.random.SeedSequence`. It is a positive integer, distinct from `20260620` (SPEC-018). It is frozen as of this specification's Acceptance; changing it requires the full ADR-010 Decision 5 breaking change procedure, which includes updating ADR-010 with an explicit change record. A `specification_version` increment alone is insufficient. Governs PCG64 initialization for classical pre-processing phases only; hardware shot randomness is not governed by this key.
 
 **PRNG draw ordering (classical phases only):**
 
@@ -738,7 +747,7 @@ This section satisfies the supported outcome declaration requirement in SPEC-011
 
 2. The SPEC-004 FR-11.1 reproducibility invariant does not apply to this backend. The `quantum_hardware` category exemption established in SPEC-011 FR-2.1 is the governing authority.
 
-3. Classical pre-processing uses NumPy PCG64 initialized via `SeedSequence(execution_seed, spawn_key=(BACKEND_SPAWN_KEY,))` per SPEC-017 FR-9. `BACKEND_SPAWN_KEY` must be a unique positive integer distinct from `20260620` (SPEC-018). Must be assigned before Acceptance. **Blocking: `BACKEND_SPAWN_KEY = TBD` is not valid in an Accepted specification.**
+3. Classical pre-processing uses NumPy PCG64 initialized via `SeedSequence(execution_seed, spawn_key=(20260621,))` per SPEC-017 FR-9. `BACKEND_SPAWN_KEY = 20260621`. This value is frozen as of Acceptance; changing it requires the full ADR-010 Decision 5 breaking change procedure (ADR-010 change record + `specification_version` increment).
 
 4. `execution_seed` is the exclusive authorized entropy source for classical pre-processing. Prohibited in reproducibility-critical classical paths: `random.random()`, `os.urandom()`, `time.time()`, `os.getpid()`, any unseeded NumPy generator. Hardware shot outcomes are not governed by this constraint.
 
@@ -1089,7 +1098,7 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 - [ ] Capability Profile (FR-16): All nine SPEC-011 FR-4.1 fields present; is_provisional = true; TBD fields flagged; accuracy basis stated
 - [ ] Cost Reporting (FR-17): SPEC-004 OQ-2 dependency noted; estimated_cost in extension_metadata defined; future obligation stated
 - [ ] Supported SolverOutcome Values (FR-18): Explicit table; Infeasible listed as Not Supported; satisfies SPEC-011 FR-5.3
-- [ ] Seed Usage Policy (FR-13): Non-reproducible class stated; PCG64 for classical phases; BACKEND_SPAWN_KEY TBD; draw ordering defined; hardware shot exemption from seed governance stated; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5 and SPEC-017 FR-9
+- [x] Seed Usage Policy (FR-13): Non-reproducible class stated; PCG64 for classical phases; BACKEND_SPAWN_KEY = 20260621; draw ordering defined; hardware shot exemption from seed governance stated; satisfies SPEC-004 FR-1 and SPEC-011 FR-6.5 and SPEC-017 FR-9
 - [ ] RoutePlan Output Requirements: Same as SPEC-018; presence rules per outcome; capacity validity guarantee; no partial assignments
 - [ ] Failure Model: Hardware-specific failure conditions defined; inherited failure conditions from SPEC-018 referenced; failure_classification values enumerated
 - [ ] Performance Characteristics: Queue dominance noted; QUBO dimension and hardware scaling addressed; cost vs. quality tradeoff identified
@@ -1099,7 +1108,7 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 
 **SPEC-017 Compliance Obligations:**
 
-- [ ] `BACKEND_SPAWN_KEY` assigned to a unique positive integer distinct from `20260620` (SPEC-018) and declared in this specification. **Blocking: This specification cannot transition to Accepted with `BACKEND_SPAWN_KEY = TBD`.**
+- [x] `BACKEND_SPAWN_KEY = 20260621` — assigned, distinct from `20260620` (SPEC-018), declared in FR-13 and Constraint 3. Frozen as of Acceptance per ADR-010 Decision 5.
 - [ ] rng initialization formula follows SPEC-017 FR-9 (SeedSequence with spawn_key)
 - [ ] PRNG Phase 1 draw ordering documented and consistent with SPEC-018 FR-10 Phase 1; `simulator_seed` draw consumed but not applied
 - [ ] PRNG Phase 2 draw ordering documented and consistent with SPEC-018 FR-10 Phase 2
@@ -1113,7 +1122,7 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 - [ ] Queue wait time is explicitly counted against the execution_timeout_ms budget
 - [ ] Provider outage during execution produces Timeout (not Failed) to preserve best-so-far
 - [ ] All OQ classifications are Project Owner Decision Required or Implementation Planning Decision — no unknown classification remains
-- [ ] `BACKEND_SPAWN_KEY = TBD` is flagged as requiring assignment before Acceptance
+- [x] `BACKEND_SPAWN_KEY = 20260621` is assigned and frozen; ADR-010 Decision 5 governs any future change
 
 ---
 
