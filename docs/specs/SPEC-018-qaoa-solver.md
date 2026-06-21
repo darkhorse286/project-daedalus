@@ -6,13 +6,13 @@
 
 **Title:** QAOA Solver Backend
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Revised — Architecture Review complete; AR-001 and AR-002 applied)
+**Last Updated:** 2026-06-20 (Accepted — Acceptance Review complete; Acceptance Revision applied)
 
 **Supersedes:** None
 
@@ -25,6 +25,7 @@
 **Review History:**
 - Engineering Review: Completed 2026-06-20
 - Architecture Review: Completed 2026-06-20
+- Acceptance Review: Completed 2026-06-20
 
 **Related ADRs:** ADR-005, ADR-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011
 
@@ -850,7 +851,7 @@ Consumer: The SPEC-017 adapter receives the Python solver's output, serializes i
 
 **SPEC-011 FR-11:** The SPEC-011 MVP backend inventory does not list this backend. SPEC-011 FR-11.2 identifies "Python Adapter" as a deferred backend with note "Individual Python backend specifications (SPEC-018+) may now be written." SPEC-018 satisfies the stated condition. SPEC-011 FR-11 should be updated to list `qaoa-qiskit` as a Python adapter backend with this specification's status once SPEC-018 is Accepted.
 
-**ADR-007:** ADR-007 is Proposed status and explicitly identifies Qiskit Aer local simulation as a permissible future extension. This specification is consistent with ADR-007: no cloud quantum hardware is used, no IBM Quantum Runtime dependency is introduced, and all execution is local. ADR-007 should be advanced to Accepted following this specification's review.
+**ADR-007:** ADR-007 is Accepted (amended 2026-06-20). SPEC-018 is the accepted realization of the Qiskit Aer local simulation path identified in ADR-007. This specification is consistent with ADR-007: no cloud quantum hardware is used, no IBM Quantum Runtime dependency is introduced, and all execution is local. IBM Quantum Runtime and cloud quantum execution remain deferred to SPEC-019 or later per ADR-007.
 
 ---
 
