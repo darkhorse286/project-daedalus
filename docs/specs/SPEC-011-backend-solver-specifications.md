@@ -497,8 +497,16 @@ The following backends are in scope for the MVP. This inventory is authoritative
 
 | Backend | Deferral Reason | Governing ADR |
 |---|---|---|
-| Python Adapter | Transport protocol resolved — SPEC-017 (Accepted 2026-06-20) defines JSON over HTTP transport and the full adapter behavioral contract, resolving ADR-005 OQ-1. ADR-005 is Accepted. Individual Python backend specifications (SPEC-018+) may now be written; each will declare an algorithmic category from FR-2.1 (see FR-2.4) and must conform to SPEC-011 framework requirements through the mechanisms defined in SPEC-017. Python backend support exists; no individual Python backend is yet specified. | ADR-005, SPEC-017 |
+| Python Adapter | Transport protocol resolved — SPEC-017 (Accepted 2026-06-20) defines JSON over HTTP transport and the full adapter behavioral contract, resolving ADR-005 OQ-1. ADR-005 is Accepted. Individual Python backend specifications (SPEC-018+) may now be written; each will declare an algorithmic category from FR-2.1 (see FR-2.4) and must conform to SPEC-011 framework requirements through the mechanisms defined in SPEC-017. Python backend support exists. SPEC-018 (QAOA Solver Backend) is Accepted and is the first individual Python backend specification. See FR-11.3. | ADR-005, SPEC-017 |
 | Quantum Hardware | Out of MVP scope. Quantum hardware backends are non-reproducible by nature (hardware entropy); the architectural implications of a non-reproducible backend on the evidence system are deferred beyond MVP. | ADR-007 |
+
+**3.11.3 Accepted Python adapter backends:**
+
+| Backend ID | Display Name | Category | Solver Specification Status |
+|---|---|---|---|
+| `qaoa-qiskit` | QAOA (Qiskit, Local Simulator) | `quantum_inspired_stochastic` | Accepted — SPEC-018 |
+
+SPEC-018 (QAOA Solver Backend, Accepted 2026-06-20) is the first individual Python backend specification conforming to SPEC-017. It declares `BACKEND_SPAWN_KEY = 20260620`, implements the three-phase PCG64 PRNG model per SPEC-017 FR-9, and supports the `quantum_inspired_stochastic` outcome matrix per FR-5.1. Future Python backend specifications (SPEC-019+) must declare spawn keys distinct from `20260620`.
 
 **Acceptance Criteria:**
 - All three MVP backends have Accepted individual solver specifications before any backend implementation begins

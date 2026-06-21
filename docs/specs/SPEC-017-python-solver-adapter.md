@@ -971,7 +971,7 @@ This feature is complete when:
 - ADR-005 is at Accepted status referencing SPEC-017 *(complete — 2026-06-20)*
 - SPEC-004 OQ-1 is closed referencing SPEC-017 *(deferred follow-on — see Documentation Updates Required)*
 - OQ-1 (`transport_overhead_buffer_ms`) is resolved and the Worker HTTP client timeout is configured
-- At least one individual Python backend specification (SPEC-018) conforming to SPEC-017 is Accepted
+- At least one individual Python backend specification (SPEC-018) conforming to SPEC-017 is Accepted *(satisfied — SPEC-018 Accepted 2026-06-20)*
 - The `python-adapter` Docker Compose service is operational with health checking
 - The Worker successfully dispatches SolverRequests to and receives SolverResponses from the adapter across all test contracts in the Testability section
 - All required adapter structured log events are emitted and correlatable by `job_id` and `decision_id`
