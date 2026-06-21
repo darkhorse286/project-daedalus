@@ -450,9 +450,9 @@ A provider outage occurs when the cloud quantum execution service is unavailable
 
 **Provider outage during hardware execution:**
 - **Detection:** Provider API becomes unreachable while the job is executing.
-- **Outcome:** `Timeout`, `failure_code = "ExecutionTimeout"`
+- **Outcome:** `Timeout`, `failure_code = "ExecutionTimeout"`, `qaoa.hardware.failure_classification = "provider_outage"` (FR-15.1)
 - **Behavior:** Result retrieval may have produced partial results. If any complete RoutePlan was decoded before the outage, it is included in the Timeout response. Given the investment of hardware execution time, this situation is classified as `Timeout` rather than `Failed`, allowing the best-so-far to be returned if available.
-- **Note:** This is the only case where `Timeout` is returned due to an infrastructure failure rather than a time budget event.
+- **Note:** This is the only case where `Timeout` is returned due to an infrastructure failure rather than a time budget event. The `qaoa.hardware.failure_classification` field in extension_metadata (FR-15.1) is the distinguishing marker that separates this infrastructure-failure Timeout from a time-budget Timeout. This usage is authorized by SPEC-004 FR-10 (quantum hardware anytime exception).
 
 **Outage classification in evidence:** Provider outage during execution produces `Timeout` with `qaoa.hardware.failure_classification = "provider_outage"` (FR-15.1). This makes provider-outage Timeouts distinguishable from time-budget Timeouts in evidence and supports post-incident analysis.
 
@@ -948,6 +948,7 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 
 **SPEC-004:**
 - OQ-2 (actual execution cost reporting) is the first concrete scenario requiring resolution. SPEC-019's monetary cost reporting obligation makes OQ-2 non-hypothetical. A `reported_cost` field in ExecutionStatistics should be considered before SPEC-019 moves to Proposed.
+- FR-10 (Timeout Behavior): SPEC-019 FR-12 uses `Timeout` for provider outage during hardware execution — the only case in this contract where `Timeout` is produced by an infrastructure failure rather than a time budget event. The purpose is to preserve best-so-far results when partial hardware execution has occurred. The outcome is distinguished from time-budget Timeouts by `qaoa.hardware.failure_classification = "provider_outage"` in extension_metadata (FR-15.1). SPEC-004 FR-10 must explicitly acknowledge this Timeout usage for `quantum_hardware` anytime backends before SPEC-019 advances to Proposed. This amendment does not add new SolverOutcome values, does not change the SolverResponse schema, and does not alter Timeout semantics for non-hardware backends.
 
 **SPEC-011 FR-3.1 (DeterminismClass controlled vocabulary):**
 - The `determinism_class` metadata field's controlled vocabulary (SPEC-011 FR-3.1) currently defines two valid values: `Deterministic` and `Stochastic (reproducible)`. This specification declares `determinism_class = "Stochastic (non-reproducible)"`, which is described as the `quantum_hardware` category's determinism class in SPEC-011 FR-2.1 but is not listed in FR-3.1's controlled vocabulary. SPEC-011 FR-3.1 must be amended to add `Stochastic (non-reproducible)` as a third valid DeterminismClass value with definition: "Non-reproducible by nature; hardware entropy precludes reproducibility from `execution_seed` alone. Applies to `quantum_hardware` category backends (SPEC-011 FR-2.1)." This amendment is required before SPEC-019 transitions to Proposed.
@@ -965,7 +966,7 @@ The `solver.execute` span is emitted by the Worker (SPEC-004 FR-15). The backend
 - The `transport_overhead_buffer_ms` value in SPEC-017 OQ-1 was calibrated for local computation serialization overhead. Hardware backends require additional time for provider API cancellation before self-terminating; this latency may exceed the current calibrated buffer. If OQ-4 resolution identifies provider cancellation round-trip times that exceed the current buffer, SPEC-017 OQ-1 must be reopened to assess whether a hardware-specific `transport_overhead_buffer_ms` value is required.
 
 **ADR-007:**
-- SPEC-019 is the formal hardware execution specification anticipated by ADR-007. ADR-007's next review trigger ("IBM Quantum Runtime access becomes available at acceptable cost and queue latency") applies. ADR-007's Documentation Updates section should reference SPEC-019 as the planned realization once access conditions are satisfied.
+- SPEC-019 is the formal hardware execution specification anticipated by ADR-007. ADR-007 must be updated to name SPEC-019 as the formal planned realization of the quantum hardware execution path. This update is required before SPEC-019 transitions to Proposed. The update does not change ADR-007's core hardware deferral decision; implementation remains gated on the ADR-007 review trigger ("IBM Quantum Runtime access becomes available at acceptable cost and queue latency") being satisfied, and SPEC-019 does not imply hardware execution is part of the current MVP until those conditions are met.
 
 **SPEC-018:**
 - No content changes required. SPEC-019 defines a separate backend that reuses SPEC-018's QUBO representation and decoding model. SPEC-018 may note in its Documentation Updates section that SPEC-019 is the hardware execution counterpart.
