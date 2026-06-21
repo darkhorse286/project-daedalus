@@ -167,7 +167,7 @@ Classification is determined by the backend's algorithm, not by runtime configur
 **Acceptance Criteria:**
 - Every solver specification declares exactly one backend category from the table in FR-2.1
 - No MVP backend specifies a category not in this table
-- No `classical_deterministic` or `quantum_inspired_stochastic` backend claims infeasibility proof capability
+- No `classical_deterministic`, `quantum_inspired_stochastic`, or `quantum_hardware` backend claims infeasibility proof capability
 
 **3.2.4 Python Adapter — transport and deployment note:**
 
@@ -190,7 +190,7 @@ Every backend solver specification must document the following metadata fields. 
 | `display_name` | string | Human-readable name used in evidence reports and structured logs. May include spaces and mixed case. |
 | `backend_category` | BackendCategory | Classification from FR-2. One of: `classical_deterministic`, `quantum_inspired_stochastic`, `exact`, `quantum_hardware`. The Python Adapter is a transport mechanism, not an algorithmic category; see FR-2.4. |
 | `implementation_language` | string | Primary implementation language: `C++`, `Python`, or `Other`. MVP backends are `C++`. |
-| `determinism_class` | DeterminismClass | One of: `Deterministic` (identical output for identical input) or `Stochastic (reproducible)` (identical output for identical input and `execution_seed`). |
+| `determinism_class` | DeterminismClass | One of: `Deterministic` (identical output for identical input); `Stochastic (reproducible)` (identical output for identical input and `execution_seed`); or `Stochastic (non-reproducible)` (output is not reproducible even given identical inputs and `execution_seed`; applies to `quantum_hardware` category backends per FR-2.1). |
 | `supported_contract_version` | uint32 | The SPEC-004 contract_version this backend targets. Must match the `supported_contract_version` declared in the Backend Capability Profile (FR-4). Must equal 1 for all MVP backends (SPEC-004 FR-14). |
 | `specification_version` | uint32 | Monotonically increasing version for this individual solver specification. Starts at 1. Increment on any behavioral change. Any change to the PCG64 stream constant, supported SolverOutcome values, or capability profile fields is a behavioral change. A PCG64 stream constant change additionally requires the full ADR-010 Decision 5 breaking change procedure, which includes updating ADR-010 with an explicit change record documenting the previous and replacement value. A `specification_version` increment is one component of that procedure, not a substitute for it. |
 
@@ -250,17 +250,17 @@ The SolverOutcome values a backend must and must not return are determined by it
 
 **3.5.1 Outcome support matrix:**
 
-| Outcome | `classical_deterministic` | `quantum_inspired_stochastic` | `exact` (future) | Notes |
-|---|---|---|---|---|
-| `Succeeded` | Required | Required | Required | All backends must support `Succeeded`. |
-| `Timeout` | Required | Required | Required | All backends must detect and return `Timeout` when `execution_timeout_ms` is exceeded. |
-| `Cancelled` | Required | Required | Required | All backends must return `Cancelled` when an external cancellation signal is received. |
-| `Failed` | Required | Required | Required | All backends must return `Failed` for internal errors that prevent execution completion. |
-| `Infeasible` | **Not Supported** | **Not Supported** | Required | Exact solvers only. Heuristic backends must not return `Infeasible`. |
+| Outcome | `classical_deterministic` | `quantum_inspired_stochastic` | `exact` (future) | `quantum_hardware` | Notes |
+|---|---|---|---|---|---|
+| `Succeeded` | Required | Required | Required | Required | All backends must support `Succeeded`. |
+| `Timeout` | Required | Required | Required | Required | All backends must detect and return `Timeout` when `execution_timeout_ms` is exceeded. |
+| `Cancelled` | Required | Required | Required | Required | All backends must return `Cancelled` when an external cancellation signal is received. |
+| `Failed` | Required | Required | Required | Required | All backends must return `Failed` for internal errors that prevent execution completion. |
+| `Infeasible` | **Not Supported** | **Not Supported** | Required | **Not Supported** | Exact solvers only. Heuristic and hardware backends must not return `Infeasible`. |
 
 **3.5.2 Infeasible restriction for heuristic backends:**
 
-`classical_deterministic` and `quantum_inspired_stochastic` backends must not return `Infeasible`. Heuristic backends produce the best solution they can find; they cannot prove that no feasible solution exists. A heuristic backend that fails to find a complete solution (a degenerate case for pathological inputs) must return `Failed` with `failure_code = InternalError`, not `Infeasible`. Returning `Infeasible` without proof is a misrepresentation of the backend's output that would corrupt the Scheduler's regret analysis.
+`classical_deterministic`, `quantum_inspired_stochastic`, and `quantum_hardware` backends must not return `Infeasible`. Heuristic and hardware backends produce the best solution they can find; they cannot prove that no feasible solution exists. A heuristic or hardware backend that fails to find a complete solution must return `Failed` with `failure_code = InternalError`, not `Infeasible`. Returning `Infeasible` without proof is a misrepresentation of the backend's output that would corrupt the Scheduler's regret analysis.
 
 **3.5.3 Supported outcome declaration:**
 
@@ -268,7 +268,7 @@ Each individual solver specification must include an explicit table of supported
 
 **Acceptance Criteria:**
 - Every individual solver specification contains an explicit supported SolverOutcome table
-- No `classical_deterministic` or `quantum_inspired_stochastic` specification lists `Infeasible` as supported
+- No `classical_deterministic`, `quantum_inspired_stochastic`, or `quantum_hardware` specification lists `Infeasible` as supported
 - Every specification lists `Succeeded`, `Timeout`, `Cancelled`, and `Failed` as supported
 
 ---
@@ -316,7 +316,7 @@ Each individual `quantum_inspired_stochastic` solver specification must:
 
 Each individual solver specification must include a dedicated **Seed Usage Policy** section containing:
 
-- The determinism class of this backend (Deterministic or Stochastic reproducible)
+- The determinism class of this backend (one of: `Deterministic`, `Stochastic (reproducible)`, or `Stochastic (non-reproducible)` per FR-3.1)
 - For stochastic backends: the PCG64 stream constant, a description of the PRNG draw ordering, and an explicit statement that `execution_seed` is the exclusive entropy source
 - For deterministic backends: an explicit statement that `execution_seed` is accepted in the SolverRequest but not used for any PRNG operation, and that output is deterministic unconditionally
 
@@ -498,7 +498,7 @@ The following backends are in scope for the MVP. This inventory is authoritative
 | Backend | Deferral Reason | Governing ADR |
 |---|---|---|
 | Python Adapter | Transport protocol resolved — SPEC-017 (Accepted 2026-06-20) defines JSON over HTTP transport and the full adapter behavioral contract, resolving ADR-005 OQ-1. ADR-005 is Accepted. Individual Python backend specifications (SPEC-018+) may now be written; each will declare an algorithmic category from FR-2.1 (see FR-2.4) and must conform to SPEC-011 framework requirements through the mechanisms defined in SPEC-017. Python backend support exists. SPEC-018 (QAOA Solver Backend) is Accepted and is the first individual Python backend specification. See FR-11.3. | ADR-005, SPEC-017 |
-| Quantum Hardware | Out of MVP scope. Quantum hardware backends are non-reproducible by nature (hardware entropy); the architectural implications of a non-reproducible backend on the evidence system are deferred beyond MVP. | ADR-007 |
+| Quantum Hardware | Out of MVP scope. Quantum hardware backends are non-reproducible by nature (hardware entropy); the architectural implications of a non-reproducible backend on the evidence system are deferred beyond MVP. SPEC-019 (Quantum Hardware Solver Backend, Draft) is the planned individual solver specification for this backend; implementation is gated on the ADR-007 review trigger being satisfied. | ADR-007 |
 
 **3.11.3 Accepted Python adapter backends:**
 

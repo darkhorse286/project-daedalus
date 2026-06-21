@@ -296,6 +296,8 @@ A Timeout response that includes a solution is not lower quality than a Succeede
 
 For iterative improvement heuristics (e.g., simulated annealing), anytime behavior — where the backend maintains a running best-complete-solution and can return it at any point — is the preferred implementation approach.
 
+**Quantum hardware anytime exception:** For `quantum_hardware` category backends (SPEC-011 FR-2.1) that implement anytime behavior, `Timeout` with `failure_code = ExecutionTimeout` may be produced by a provider infrastructure failure during hardware execution when hardware execution has already begun and partial results may be recoverable. This exception applies only when the backend has invested real QPU execution time and best-so-far preservation is required. It does not apply to infrastructure failures before hardware execution begins (provider outage at job submission or during queue wait produce `Failed` with `InternalError`). It does not generalize infrastructure failures into `Timeout` for any other backend category. A backend using this exception must distinguish the infrastructure-failure Timeout from a time-budget Timeout through an extension_metadata field; for SPEC-019 (Quantum Hardware Solver Backend), the distinguishing field is `qaoa.hardware.failure_classification = "provider_outage"`.
+
 `execution_timeout_ms = 0` is invalid. The Worker must always provide a positive value.
 
 **Acceptance Criteria:**

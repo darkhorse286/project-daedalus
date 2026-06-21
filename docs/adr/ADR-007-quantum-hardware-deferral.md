@@ -118,7 +118,7 @@ The MVP cannot make quantum hardware execution claims. Technical writing based o
 
 Future hardware integration may require changes to the solver contract defined in ADR-008.
 
-Hardware execution remains deferred. SPEC-019 or later may introduce IBM Quantum Runtime or equivalent hardware backends if access conditions improve and the thesis requires hardware demonstration.
+Hardware execution remains deferred. SPEC-019 (Quantum Hardware Solver Backend) is the formal planned specification for IBM Quantum Runtime or equivalent hardware execution. Implementation is gated on this ADR's review trigger being satisfied. SPEC-019 does not imply hardware execution is part of the current MVP.
 
 ## Accepted Risks
 
@@ -172,6 +172,7 @@ Any technical writing based on MVP results must explicitly state that hardware e
 - Architecture documentation (addressed by this ADR)
 - SPEC-017 (Python Solver Adapter) — defines the Python adapter boundary through which SPEC-018 executes
 - SPEC-018 (QAOA Solver Backend) — the concrete realization of Qiskit Aer local simulation accepted by this ADR
+- SPEC-019 (Quantum Hardware Solver Backend, Draft) — the formal planned realization of the quantum hardware execution path anticipated by this ADR. Implementation remains gated on this ADR's review trigger being satisfied. SPEC-019 does not imply hardware execution is part of the current MVP.
 - Technical reports or blog posts based on MVP results must reference this limitation
 
 ---
