@@ -8,7 +8,7 @@ Proposed
 
 **Related Feature(s):** Benchmark and Experiment Harness (SPEC-020)
 
-**Related ADR(s):** ADR-004, ADR-008, ADR-009, ADR-010
+**Related ADR(s):** ADR-004, ADR-008, ADR-009, ADR-010, ADR-011
 
 ---
 
@@ -80,6 +80,8 @@ The API's persistence responsibility for experiment state is not a violation of 
 
 In Generated Mode experiments, for each (problem_config_index, repetition_index) combination, the harness generates exactly one routing problem instance with one problem_id. All jobs submitted for backends in the solver set for that (problem_config_index, repetition_index) reference that same problem_id. This is the instance-sharing invariant (SPEC-020 FR-4).
 
+In Fixed Mode experiments, the experiment manifest references pre-existing `problem_id` values (routing problems submitted in prior sessions). Within each repetition, all backends in the solver set reference the same fixed `problem_id`. Across repetitions for the same (problem_config_index, backend) pairing, the same `problem_id` is reused. The many-jobs-per-routing-problem cardinality therefore arises in both workload modes: in Generated Mode from cross-backend sharing within a repetition, and in Fixed Mode from both cross-backend sharing within a repetition and cross-repetition reuse for the same backend. The relaxation defined in this decision applies in both modes.
+
 This decision relaxes the one-problem-one-job constraint in experiment context only:
 
 - **SPEC-008 FR-7** ("At MVP scope, each problem is associated with exactly one job") is relaxed from a universal constraint to a default for non-experiment job submissions. In experiment context, the constraint does not apply.
@@ -88,7 +90,7 @@ This decision relaxes the one-problem-one-job constraint in experiment context o
 
 **Schema status:** SPEC-012 FR-6 (jobs table) does not impose a UNIQUE constraint on `jobs.problem_id`. The existing schema already supports multiple jobs referencing the same routing problem. The one-problem-one-job restriction exists only in prose (SPEC-008 FR-7, SPEC-001 Assumptions); it is not a physical schema constraint. No schema migration is required to implement instance-sharing.
 
-**Why the invariant is required:** SPEC-007 FR-7 establishes that `hindsight_quality = total_route_distance_km` is dimensionally comparable only within the same routing problem. Two jobs submitting identical problem content with distinct problem_ids produce geometrically identical routing problems but independent solver executions; cross-solver comparison of their `hindsight_quality` values is technically valid. However, this approach requires the harness to generate and persist N copies of each problem geometry per backend — creating N-fold redundancy with no evidence benefit and making "same problem" an application-layer assertion rather than a schema-enforced guarantee. The instance-sharing invariant eliminates the redundancy while preserving the comparability requirement: one problem instance, shared across all backends in a repetition, is both correct and efficient.
+**Why the invariant is a correctness requirement:** SPEC-007 FR-7 establishes that `hindsight_quality = total_route_distance_km` is dimensionally comparable only within the same routing problem. In Project DAEDALUS, a routing problem is identified by its `problem_id` (SPEC-001 FR-1). SPEC-001 Non-Requirements are explicit: "Each submission creates a new problem with a new problem_id." Two submissions of identical problem content are therefore two distinct routing problems in system terms. Comparing `hindsight_quality` across jobs with distinct problem_ids — even when problem geometry is byte-for-byte identical — violates SPEC-007 FR-7 because the system identifies those submissions as different routing problems. The instance-sharing invariant is a correctness requirement: sharing one problem_id across all backends in a (problem_config_index, repetition_index) is the only architecture that produces cross-solver quality comparisons valid under SPEC-007 FR-7.
 
 ## Decision 4: Worker Remains Experiment-Unaware
 
@@ -97,6 +99,8 @@ The Worker executes individual jobs. The Worker has no knowledge of experiments,
 This decision maintains the Worker's existing operational boundary (SPEC-005): consume a job from the queue, load the problem and scheduler configuration, invoke Core, execute the selected solver backend, persist evidence, generate a report, and mark the job complete. No new Worker responsibilities are introduced for experiment execution.
 
 **Consequence for harness architecture:** Because the Worker is experiment-unaware, the harness cannot rely on Worker-side coordination for trial sequencing or experiment progress. The CLI polling model (Decision 1) is the necessary consequence of Worker experiment-unawareness: the CLI monitors job status endpoints to detect trial completion and trigger evidence collection.
+
+**Experiment-to-job linkage direction:** The `jobs` table record carries no experiment reference field. The experiment-to-job linkage exists exclusively in the experiment-owned trial record (API, persisted via SPEC-012-R1), which holds the `job_id` assigned at trial submission. The Worker does not populate any experiment identifier when creating or updating job records. This is the direct consequence of Worker experiment-unawareness: the job record is experiment-agnostic, and the trial record is the authoritative link between an experiment trial and its executing job. SPEC-012-R1 must not add an `experiment_id` column to the `jobs` table; doing so would require the Worker to populate it, violating this decision.
 
 ## Decision 5: Evidence Collection Occurs Through API-Mediated Collection
 
@@ -158,6 +162,26 @@ The coordinator's responsibilities are fully satisfiable by CLI + API at MVP sca
 
 ---
 
+## Alternative 2: CLI-Owned Local State (SPEC-016 OQ-3 Model)
+
+### Description
+
+The experiment results are owned by the CLI process and persisted locally. When an experiment completes, the CLI writes a `<name>.result.json` file containing the trial outcomes. This is the model described in SPEC-016 OQ-3 prior to SPEC-020: "Local manifest only. Experiment results are captured at run time and saved to `<name>.result.json`. No API persistence of experiment records is required at MVP scope." Under this model, the API submits individual jobs and serves job status; the CLI owns experiment state and orchestration; no new API endpoints are required for experiment persistence.
+
+### Benefits
+
+No API persistence schema is required for experiment state. No new API endpoints are needed beyond those already defined in SPEC-008. SPEC-016 OQ-3 is satisfied as originally stated without supersession. The API implementation footprint is unchanged. This is the lowest-change path from the pre-SPEC-020 model.
+
+### Drawbacks
+
+The CLI process is the sole state authority. If the CLI exits mid-experiment, all state is lost: submitted trial outcomes, collected evidence, and partial aggregates cannot be recovered without re-running the experiment from the beginning. Multi-session replay — resuming a partially-complete experiment after CLI restart — is structurally impossible because no durable state exists outside the CLI process. Benchmark-level aggregation across multiple experiments (SPEC-020 FR-2, FR-14 Artifact 4) cannot be computed because there is no shared queryable store across separate CLI invocations. API-served artifact retrieval is not possible because artifacts exist only as local files inaccessible to the API. The local file model is structurally incompatible with SPEC-020's domain model in four ways: reproducibility requires queryable manifests; benchmark summaries require cross-experiment aggregation; artifact retrieval requires API backing; trial evidence requires durable linkage to the Evidence Log independent of CLI process lifetime.
+
+### Reason Not Selected
+
+The SPEC-016 OQ-3 model was written before SPEC-020 existed. SPEC-020's accepted domain model — reproducible experiments, durable trial records, benchmark-level aggregation, API-served artifacts — cannot be satisfied by local state regardless of implementation quality. The four structural incompatibilities identified above are not solvable by making the local file more sophisticated; they require persistent state that survives the CLI session and is queryable across invocations. Decision 2 (API as durable state authority) is the only model consistent with SPEC-020's accepted requirements.
+
+---
+
 ## Alternative 3: Submit Identical Problem Content with Distinct Problem_IDs per Backend
 
 ### Description
@@ -170,11 +194,11 @@ No conflict with SPEC-001 Assumptions or SPEC-008 FR-7. No prose amendment requi
 
 ### Drawbacks
 
-N distinct problem submissions per repetition for N backends. For an experiment with 5 backends, 5 identical routing problems are persisted per repetition — consuming storage, generating audit records, and requiring problem load at job execution time without evidence benefit. Cross-solver quality comparison is technically valid (identical geometry), but the problems are distinct database records with distinct problem_ids, making evidence traceability more complex. If any backend's problem submission fails, that backend's trial references a different problem record than others in the same repetition. The harness must reconcile "same content, different problem_id" as equivalent for comparison purposes, which is an application-layer assertion rather than a schema-enforced guarantee.
+Submitting identical problem content with distinct problem_ids produces distinct routing problems under SPEC-001: each submission creates a new problem with a new problem_id. Comparing `hindsight_quality` across jobs with distinct problem_ids violates SPEC-007 FR-7 regardless of content identity, because SPEC-007 FR-7's "same routing problem" is defined by the system identifier (`problem_id`), not by content equivalence. Beyond the correctness failure: N distinct problem submissions per repetition for N backends consumes N-fold storage, generates N-fold audit records, and requires N problem loads at job execution time without evidence benefit. If any backend's problem submission fails, that backend's trial references a different problem record than others in the same repetition, creating an irreconcilable traceability gap.
 
 ### Reason Not Selected
 
-The instance-sharing invariant is architecturally cleaner and less error-prone. One problem_id per (problem_config_index, repetition_index) makes the "same problem" relationship explicit in the schema. The redundant-persistence approach trades schema clarity for prose compatibility — a poor tradeoff when SPEC-012 already supports multiple jobs per problem without constraint.
+This alternative produces architecturally invalid experiment results. Comparing `hindsight_quality` values across distinct problem_ids violates SPEC-007 FR-7 as a correctness matter, not a preference. An experiment that uses this approach cannot make valid cross-solver quality comparisons regardless of how careful the implementation is. The schema clarity and efficiency benefits of instance-sharing are secondary; the primary reason this alternative is rejected is that it makes the experiment's core evidence invalid.
 
 ---
 
@@ -224,7 +248,7 @@ The constraint is authoritative and accepted. API-mediated collection (Decision 
 
 - The CLI's orchestration scope (already established in SPEC-016's scope table) is formally confirmed as the execution executor, with a bounded, scoped exception to the single-invocation assumption.
 - The API's persistence responsibility for experiment state follows naturally from its existing role as the system's durable state authority (ADR-004). No new architectural patterns are introduced.
-- The instance-sharing invariant (Decision 3) eliminates N-fold problem record redundancy while satisfying the SPEC-007 FR-7 cross-solver comparability requirement. The SPEC-012 schema already supports it without constraint change.
+- The instance-sharing invariant (Decision 3) satisfies the correctness requirement imposed by SPEC-007 FR-7: `hindsight_quality` is comparable only within the same routing problem, identified by `problem_id`. Instance-sharing is the only architecture under which experiment cross-solver comparisons are valid; the SPEC-012 schema already supports it without constraint change.
 - Worker experiment-unawareness (Decision 4) preserves the Worker's clean per-job boundary and avoids coupling C++ Worker implementation to experiment schema evolution.
 - API-mediated evidence collection (Decision 5) satisfies SPEC-016's direct-database-access constraint and SPEC-006's Evidence Log write-authority restriction simultaneously.
 - No new deployment unit (Decision 6) keeps the MVP nine-container Docker Compose topology stable.
@@ -240,6 +264,7 @@ The constraint is authoritative and accepted. API-mediated collection (Decision 
 
 - The scoped exception to SPEC-016's single-invocation assumption applies to `daedalus benchmark run` only. Accidental misapplication to other CLI commands is a governance risk, not a technical risk; the exception is bounded by this ADR.
 - Evidence collection latency — the delay between job terminal state and API evidence collection completion — creates a window in which experiment state and the Evidence Log are temporarily inconsistent. This is an expected and acceptable operational condition at MVP scale.
+- CLI interruption mid-experiment is an accepted reliability risk. If the CLI process exits during a benchmark run, trials already submitted continue executing in the Worker and their Evidence Log records are written normally. However, no component automatically triggers API evidence collection for those trials after they reach terminal state, and no component submits the remaining unsubmitted trials. The experiment remains in `Running` status in the API indefinitely without operator intervention. This includes the specific sub-case where all submitted trials complete in terminal state but the CLI exits before triggering the experiment's transition to `Completed` status: the experiment remains in `Running` despite all trials being done, and the experiment summary artifact (SPEC-020 FR-14 Artifact 3) and benchmark summary updates are not produced. The API, as state authority (Decision 2), holds sufficient information to detect this condition — all trial records in terminal status against the planned trial count — but whether the API self-transitions the experiment to `Completed` or requires a CLI trigger is deferred to SPEC-008-R1. Because Decision 2 preserves all durable state — the manifest, submitted trial records, and their `job_id` mappings — the information required for recovery is available. Recovery tooling (CLI restart semantics, partial-experiment resume) is an implementation concern deferred to SPEC-020 implementation planning. This risk is accepted for MVP given the developer-tool nature of the CLI and the expectation that MVP experiment workloads are tractable within a single session.
 
 ---
 
@@ -253,7 +278,7 @@ The constraint is authoritative and accepted. API-mediated collection (Decision 
 | Worker (C++ Runtime) | No | Worker remains job-scoped and experiment-unaware |
 | Core (C++ Domain) | No | No changes |
 | Evidence Log (SPEC-006) | No | API reads from Evidence Log; write authority is not changed |
-| Observability | Yes | Experiment progress events, trial progress events, evidence completeness metrics (SPEC-020 FR-15) |
+| Observability | Yes | Experiment progress events, trial progress events, evidence completeness metrics (SPEC-020 FR-15); new CLI→API experiment endpoint interactions (manifest submission, evidence collection trigger) require W3C TraceContext propagation per ADR-011 |
 | Docker Compose Topology | No | No new containers; existing nine-container topology is unchanged |
 | Solver Contract (ADR-008) | No | Solver backends remain experiment-unaware; the solver contract is not changed |
 | Randomness (ADR-010) | No | SPEC-020 FR-8 trial seed derivation is ADR-010 compliant; ADR-010 is not changed |
@@ -300,6 +325,7 @@ The constraint is authoritative and accepted. API-mediated collection (Decision 
 - This ADR does not resolve SPEC-020 OQ-8 (experiment cancellation). A mid-experiment CLI interruption leaves in-flight trials executing without a harness to collect evidence or submit remaining trials. Recovery behavior is an implementation concern deferred to SPEC-020 implementation planning.
 - This ADR does not define the trial seed derivation algorithm. Seed derivation is governed by SPEC-020 FR-8 (ADR-010 compliant, uniqueness and determinism required) and is an implementation planning decision.
 - The scope of the SPEC-001 Assumptions amendment is narrow: the one-problem-one-job cardinality assumption is relaxed for experiment context. SPEC-001's routing problem model (FR-1 through FR-16), solver contract (ADR-008), and Evidence Log integration (SPEC-006) are not changed.
+- Decision 5 (API-mediated evidence collection) creates an accepted read dependency between the API's evidence collection path and the Evidence Log table structure (SPEC-012). When the Evidence Log schema evolves through SPEC-012 amendments, the API's evidence collection endpoint must be assessed for compatibility. This coupling is a direct architectural consequence of Decision 5 and is not a design defect; it is noted here so that future SPEC-012 amendments evaluate the API evidence collection path as part of their impact analysis.
 
 ---
 
@@ -311,6 +337,8 @@ The following specification amendments are required before experiment harness im
 - FR-7: Remove "each problem is associated with exactly one job" as a universal constraint. Replace with the scoped constraint: in standard job submissions, each routing problem is associated with exactly one job; in experiment context (ADR-012, SPEC-020 FR-4), a routing problem may be referenced by multiple jobs
 - New functional requirements for: experiment manifest submission endpoint, benchmark manifest submission endpoint, experiment status retrieval endpoint, trial evidence collection trigger endpoint, trial results retrieval endpoint, experiment summary retrieval endpoint, benchmark summary retrieval endpoint
 - Remove or scope any language reflecting the SPEC-016 OQ-3 "no API persistence of experiment records" position
+- The trial evidence collection trigger endpoint must be idempotent: repeated calls for the same `trial_id` / `job_id` must not produce duplicate evidence records and must yield the same resulting trial evidence state. Idempotency is required to support CLI retry on network failure and CLI restart during experiment recovery. The upsert approach must align with SPEC-012 FR-12's idempotency pattern for Worker-written evidence records
+- The experiment status endpoint design must address whether the API self-detects all-trials-terminal and transitions the experiment to `Completed` status independently of a CLI trigger. This behavior would make the Running → Completed transition robust to the specific CLI interruption sub-case where all trials complete but the CLI exits before initiating the transition (see Accepted Risks)
 
 **SPEC-001 Assumptions Amendment (Required — Blocked by this ADR):**
 - Remove or scope the assumption: "A routing problem is created once and associated with exactly one job. No routing problem is shared between jobs."
@@ -320,6 +348,7 @@ The following specification amendments are required before experiment harness im
 **SPEC-012-R1 (Required — Blocked by this ADR):**
 - Define experiment persistence tables: experiments, benchmark manifests, trial records, artifact storage
 - These tables are not Evidence Log tables (SPEC-006) and are not governed by SPEC-006 write-authority restrictions
+- The existing `jobs` table requires no new experiment-reference column. The experiment-to-job linkage is held in experiment trial records (via `job_id`), not in the job record. SPEC-012-R1 must not add an `experiment_id` column to the `jobs` table; doing so would require the Worker to populate it, violating Decision 4 (Worker experiment-unawareness)
 
 **SPEC-016-R1 (Required — Blocked by this ADR):**
 - Add `daedalus benchmark run <manifest.json>` command (or extend `daedalus experiment run` to accept the SPEC-020 manifest format)
@@ -348,7 +377,7 @@ The following specification amendments are required before experiment harness im
 - Reliability Engineering
 - Scientific Computing
 
-Designing the execution architecture for a multi-backend experiment harness requires reasoning simultaneously about component boundary preservation (Worker experiment-unawareness), cross-specification conflict resolution (cardinality constraints across five accepted specifications, evidence write authority), and the tradeoff between orchestration simplicity (CLI polling) and reliability (server-side durability). The instance-sharing invariant decision demonstrates the ability to identify a subtle correctness requirement (cross-solver quality comparability under SPEC-007 FR-7), trace it to its specification source, and resolve a multi-specification prose conflict in a schema-compatible way without requiring physical database changes.
+Designing the execution architecture for a multi-backend experiment harness requires reasoning simultaneously about component boundary preservation (Worker experiment-unawareness), cross-specification conflict resolution (cardinality constraints across five accepted specifications, evidence write authority), and the tradeoff between orchestration simplicity (CLI polling) and reliability (server-side durability). The instance-sharing invariant decision demonstrates the ability to identify that SPEC-007 FR-7's comparability constraint is a correctness requirement — not a preference — trace it to its specification source and system identity model (SPEC-001 problem_id semantics), and resolve a multi-specification prose conflict in a schema-compatible way without requiring physical database changes.
 
 ---
 
@@ -358,7 +387,7 @@ Designing the execution architecture for a multi-backend experiment harness requ
 
 **Decision 2:** The API is the durable state authority for all experiment state. SPEC-016 OQ-3 (local manifest only) is superseded. All experiment manifests, trial records, aggregate evidence, and artifacts are persisted through the API.
 
-**Decision 3:** In experiment context, a routing problem may be referenced by multiple jobs. The SPEC-001 one-problem-one-job cardinality assumption and SPEC-008 FR-7 policy are relaxed in experiment context only. The SPEC-012 schema already supports this without constraint change.
+**Decision 3:** In experiment context, a routing problem may be referenced by multiple jobs. The SPEC-001 one-problem-one-job cardinality assumption and SPEC-008 FR-7 policy are relaxed in experiment context only. The SPEC-012 schema already supports this without constraint change. Instance-sharing is a correctness requirement: comparing `hindsight_quality` across jobs with distinct problem_ids violates SPEC-007 FR-7 because the system identifies routing problems by problem_id, not content identity.
 
 **Decision 4:** The Worker is experiment-unaware. From the Worker's perspective, experiment-submitted jobs are indistinguishable from standard submissions. Worker responsibilities are not extended for experiment execution.
 
