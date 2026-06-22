@@ -6,7 +6,7 @@
 
 **Title:** Benchmark and Experiment Harness
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
@@ -307,7 +307,7 @@ A trial is a single execution of one solver against one routing problem instance
 - A trial transitions to `Completed` when the associated job reaches a terminal state in the Evidence Log (SPEC-006 FR-4)
 - A `SchedulerRejected` trial does not submit a job; the Scheduler's rejection reason is recorded in the trial record
 - A `HarnessError` trial records the failure reason; the harness continues with remaining trials
-- The total number of trials in an experiment equals `planned_trial_count` from the experiment manifest
+- The total number of submitted trials in an experiment equals `planned_trial_count` from the experiment manifest in the absence of partial workload generation failure; in partial failure cases, the total equals `effective_trial_count` (see FR-3 and Failure Modes)
 
 ---
 
@@ -475,7 +475,7 @@ The experiment harness manages the experiment through a defined lifecycle. The l
 |---|---|---|
 | `Created` | Manifest persisted; workload validation in progress; no trials submitted | No |
 | `Running` | One or more trials are in a non-terminal state | No |
-| `Completed` | All planned trials have reached a terminal trial status | Yes |
+| `Completed` | All submitted trials have reached a terminal trial status | Yes |
 | `Failed` | The experiment could not be started due to a configuration or infrastructure error | Yes |
 
 **Transition rules:**
@@ -565,7 +565,7 @@ Computed across all (problem, solver) pairings when the experiment reaches `Comp
 | Field | Type | Description |
 |---|---|---|
 | `experiment_id` | UUID | |
-| `trials_planned` | uint32 | From manifest |
+| `trials_planned` | uint32 | Equals `planned_trial_count` in the normal case; equals `effective_trial_count` after partial workload generation failure (see FR-3 and Failure Modes). Sourced from experiment runtime state, not the immutable manifest field. |
 | `trials_completed` | uint32 | Trials in terminal state (all statuses) |
 | `per_solver_summary` | list[SolverSummary] | One entry per `backend_id` in the solver set: outcome distribution totals across all problems and repetitions, combined runtime statistics |
 | `cross_solver_comparison` | list[ProblemComparison] | One entry per problem: for each backend in the solver set, the `quality_stats` and `runtime_stats` for that (problem, solver) pairing, ranked by `mean_km` (ascending) among quality-eligible entries |
@@ -753,7 +753,7 @@ Evidence completeness is observable as a derived metric from the running trial c
 
 **What constitutes successful experiment completion:**
 - `ExperimentStatus = Completed`
-- All `planned_trial_count` trials are in a terminal trial status
+- All submitted trials are in a terminal trial status
 - The experiment summary artifact has been produced
 
 **What constitutes partial completion:**
