@@ -6,7 +6,7 @@
 
 **Title:** Benchmark and Experiment Harness
 
-**Status:** Draft
+**Status:** Proposed
 
 **Author:** Darkhorse286
 
@@ -363,6 +363,8 @@ A generated-workload experiment is fully replayable given:
 1. The experiment manifest (including `experiment_seed`, `generation_config`, `solver_set`, `repetition_count`)
 2. The same SPEC-002 generator implementation
 3. The same seed derivation algorithm
+
+The seed derivation algorithm version must be recorded in the experiment state (in the API's experiment record) so that replay instructions are complete. Without the algorithm version, a researcher cannot confirm which derivation function was used, and replay fidelity cannot be guaranteed.
 
 A fixed-workload experiment is fully replayable given the `problem_ids` remain queryable and the solver backends have not changed their algorithms.
 
@@ -1037,7 +1039,7 @@ The experiment harness submits routing jobs on behalf of the experiment submitte
 
 **Experiment scope:** A large experiment can generate a high volume of job submissions (`planned_trial_count` jobs). Rate limiting and experiment-size constraints are deferred (OQ-5) but should be addressed before exposing experiment submission to untrusted callers.
 
-**Cost exposure:** Experiments that include `quantum_hardware` backends may incur monetary cost (SPEC-019 extension_metadata `qaoa.hardware.estimated_cost`). Cost evidence is included in trial records. No cost cap or pre-authorization mechanism is defined in this specification; see OQ-9.
+**Cost exposure:** Experiments that include `quantum_hardware` backends may incur monetary cost (SPEC-019 extension_metadata `qaoa.hardware.estimated_cost`). Cost evidence is included in trial records. No cost cap or pre-authorization mechanism is defined in this specification; see OQ-9. Additionally, no experiment-level cancellation mechanism is defined (OQ-8); a hardware experiment that begins cannot be halted at the harness level once the CLI process has started the submission loop. The absence of a cost cap and the absence of an abort mechanism are compounding risks for hardware experiments.
 
 **Seed handling:** Experiment seeds are non-sensitive configuration values. They may appear in logs and artifact outputs. No special secret handling is required.
 
@@ -1061,7 +1063,7 @@ Do not invent specific latency targets. These areas require measurement during i
 
 - docs/architecture.md: Add Benchmark and Experiment Harness to Major Components; add experiment artifacts to the data flow description
 - SPEC-002: Confirm GenerationConfig fields are compatible with the harness WorkloadSetDefinition (FR-4 Mode B); confirm that SPEC-002 generation from a derived seed with fixed structural parameters produces the expected instance
-- SPEC-008 (API Control Plane): SPEC-020 defines the functional requirements for the following new API endpoints; their addition requires a SPEC-008 amendment: experiment manifest submission, benchmark manifest submission, experiment status retrieval, trial results retrieval, trial evidence collection (CLI-triggered after job terminal state), experiment summary retrieval, benchmark summary retrieval. SPEC-020 owns these functional requirements; SPEC-008 owns the HTTP interface contracts (method, request/response schema, error codes). These backend API contracts are not owned by SPEC-021.
+- SPEC-008 (API Control Plane): SPEC-020 defines the functional requirements for the following new API endpoints; their addition requires a SPEC-008 amendment: experiment manifest submission, benchmark manifest submission, experiment status retrieval, trial results retrieval, trial evidence collection (CLI-triggered after job terminal state), experiment summary retrieval, benchmark summary retrieval. SPEC-020 owns these functional requirements; SPEC-008 owns the HTTP interface contracts (method, request/response schema, error codes). These backend API contracts are not owned by SPEC-021. The SPEC-008 amendment is a governance artifact subject to Engineering Review, Architecture Review, and Acceptance Review; it should be drafted alongside or immediately after SPEC-020 acceptance.
 - SPEC-016 (CLI): SPEC-016 FR-1 defines an existing `daedalus experiment run <file>` command for single-problem, multi-configuration experiments. SPEC-020's experiment model (workload sets, solver sets, repetitions, benchmark manifests) is a superset of this simpler concept. A SPEC-016 amendment is required to either: (a) extend `experiment run` to accept the SPEC-020 manifest format; or (b) introduce a distinct command (e.g., `daedalus benchmark run <manifest.json>`) for SPEC-020 experiments while preserving the simpler existing command. The CLI is the harness orchestration executor; the SPEC-016 amendment must account for the long-running CLI session requirement for hardware experiments.
 - SPEC-001 (Routing Problem Model): Add an optional experiment provenance field to routing problem submissions so that harness-generated problems (Generated Mode) are distinguishable from regular job submissions by carrying the generating `experiment_id`. Amendment scope is minimal (one optional field); routing problem semantics, solver contract, and Evidence Log are unaffected.
 - SPEC-021 (pending specification): Define API endpoint contracts for all experiment and benchmark artifact operations
@@ -1083,13 +1085,11 @@ This blocks implementation. The harness cannot be built without a defined persis
 
 ---
 
-## OQ-2 (Non-Blocking): Experiment Persistence Store
+## OQ-2 (Resolved): Experiment Persistence Store
 
-Should experiment manifests, trial records, and artifact summaries be stored in the existing PostgreSQL instance (alongside the Evidence Log) or in a separate store?
+**Resolved by ADR-004.** ADR-004 commits PostgreSQL as the persistence technology for all durable storage in Project DAEDALUS. Experiment manifests, trial records, and artifact summaries use the existing PostgreSQL instance. No separate data store is introduced for experiment persistence at MVP scope. This is not an open decision.
 
-Using the existing PostgreSQL instance preserves the single-datastore design. A separate store (object storage, time-series database) may be warranted for large-scale experiments. This is a prerequisite decision for OQ-1.
-
-**Classification:** Non-Blocking (implementation planning decision; prerequisite for OQ-1)
+**Resolution:** Existing PostgreSQL instance. Extension of SPEC-012 to cover experiment manifests, trial records, and artifact storage is the expected resolution path for OQ-1.
 
 ---
 
@@ -1143,7 +1143,7 @@ SPEC-019 declares `is_provisional = true` until qualification criteria are satis
 
 No mechanism exists to cancel an experiment in `Running` status. An in-progress experiment has no defined abort path; CLI process termination does not cancel submitted jobs, and the harness has no mechanism to stop submitting new trials in response to an external signal. Individual jobs may be cancelled via SPEC-008, but this does not halt the experiment. For hardware experiments with significant queue wait times and monetary cost, the absence of experiment-level cancellation is a production readiness concern.
 
-**Classification:** Non-Blocking (deferred; most consequential for hardware experiment operations)
+**Classification:** Non-Blocking for Draft and Proposed. Blocks production enablement for experiments containing `quantum_hardware` backends. The limitation is acceptable for MVP but must be resolved before hardware-backed experiments are exposed beyond controlled developer use.
 
 ---
 
