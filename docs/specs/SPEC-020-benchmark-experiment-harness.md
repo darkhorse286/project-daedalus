@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-21
 
-**Last Updated:** 2026-06-21
+**Last Updated:** 2026-06-22
 
 **Supersedes:** None
 
@@ -78,6 +78,8 @@ The harness supports all three trial cardinality combinations:
 - One problem, many solvers: workload set with one problem, solver set with multiple backends
 - Many problems, one solver: workload set with multiple problems, solver set with one backend
 - Many problems, many solvers: workload set with multiple problems, solver set with multiple backends (the canonical benchmarking configuration)
+
+**Harness execution model:** The harness orchestration loop runs in the CLI process. SPEC-016 owns "Experiment orchestration (multi-job submission and result collection)" and is the designated execution owner. The CLI submits the experiment manifest to the API, iterates through the trial set in defined submission order, submits each trial as a job via the SPEC-008 job submission endpoint, and polls the API job status endpoints for trial completion. When a trial job reaches a terminal state, the CLI instructs the API to read the associated Evidence Log records and persist collected evidence in the trial record. The API persists all experiment state: the manifest, trial records, collected evidence, computed statistics, and artifact payloads. All durable state is API-backed; the CLI process is the orchestration executor but not the state authority.
 
 ---
 
@@ -199,7 +201,7 @@ The experiment manifest is the authoritative, immutable record of an experiment'
 | `reproducibility_class` | "fully_reproducible" \| "partially_reproducible" \| "non_reproducible" | System-derived | Derived from the union of backend determinism classes in the solver set (FR-9). |
 | `created_at` | timestamp | System-generated | |
 
-The experiment manifest is immutable after creation. No field may be modified after the experiment is submitted.
+The experiment manifest is immutable after creation. No field may be modified after the experiment is submitted. The `planned_trial_count` field represents the originally intended number of trials at manifest creation time. In cases of partial workload generation failure (see Failure Modes), the actual number of trials submitted may be less than `planned_trial_count`; the experiment's runtime state tracks this as an `effective_trial_count` distinct from the immutable manifest field.
 
 **Acceptance Criteria:**
 - The experiment manifest is persisted before any trials are submitted
@@ -233,7 +235,11 @@ The workload set is a SPEC-002 generation configuration. The harness submits rou
 | `generation_config` | GenerationConfig | Yes | SPEC-002 generation configuration: scenario type, stop count range, fleet parameters, time window parameters, and all parameters required by SPEC-002 FR-1 through FR-5 |
 | `instance_count` | uint32 | Yes | Number of distinct routing problem instances to generate per repetition. Minimum 1. |
 
-In generated workload mode, the harness generates `instance_count × repetition_count` routing problem instances total before trial execution begins. Instance seeds are derived per-repetition from the experiment_seed (FR-8). Different repetitions of the same problem configuration use different seeds, producing different routing problem instances with the same structural parameters.
+In generated workload mode, the harness generates `instance_count × repetition_count` routing problem instances total before trial execution begins. Instance seeds are derived per (problem_config_index, repetition_index) pair from the experiment_seed (FR-8). Different repetitions of the same problem configuration use different seeds, producing different routing problem instances with the same structural parameters.
+
+For each (problem_config_index, repetition_index) combination, the harness generates exactly one routing problem instance and assigns it a single `problem_id`. All backends in the solver set for that (problem_config_index, repetition_index) submit trials against the same `problem_id`. This instance-sharing invariant is required for cross-solver quality comparisons to be valid within-problem comparisons (SPEC-007 FR-7): within each repetition index, all backends evaluated the same problem geometry.
+
+Trials are submitted in (problem_config_index ascending, repetition_index ascending, solver_set_index ascending) order. For a given (problem_config_index, repetition_index), all backends are submitted before advancing to the next repetition index. In Generated Mode, this ensures that each problem instance is fully submitted to all backends before the next instance is generated. Trial submission order is an observable harness behavior and must be consistent across experiment runs.
 
 **Problem count by mode:**
 
@@ -339,7 +345,7 @@ The experiment seed is the top-level entropy source for the experiment. The seed
 The `experiment_seed` is a non-negative 64-bit unsigned integer supplied at experiment submission time. It is recorded in the experiment manifest. Providing the same `experiment_seed` with the same experiment manifest is the necessary and sufficient condition for replaying a generated-workload experiment with identical problem instances.
 
 **Per-trial seed (repetition seeds) in generated workload mode:**
-In generated workload mode, the harness derives a distinct trial seed for each (problem_config_index, repetition_index) pair. Trial seeds must satisfy the following properties:
+In generated workload mode, the harness derives a distinct trial seed for each (problem_config_index, repetition_index) pair. The trial seed identifies one routing problem instance; it is not derived per backend. All backends in the solver set for the same (problem_config_index, repetition_index) pair use the same derived trial seed and therefore the same `problem_id`, consistent with the instance-sharing invariant established in FR-4. Trial seeds must satisfy the following properties:
 - Determinism: the same (experiment_seed, problem_config_index, repetition_index) triple always produces the same trial seed
 - Uniqueness: no two trials within the same experiment share the same trial seed
 - ADR-010 compliance: the trial seed is submitted as the routing problem's `seed` field, becoming the `execution_seed` passed to the solver by the Worker (ADR-010 Decision 4, SPEC-005 FR-7)
@@ -442,7 +448,7 @@ A trial whose `execution_timeout_ms` budget is exhausted during queue waiting (S
 Trials that complete with `solver_outcome = Failed` contribute to the `trials_failed` outcome count. They do not contribute to quality statistics (FR-13). They are part of the experiment evidence and are included in the experiment summary.
 
 **Missing result handling:**
-If the harness cannot retrieve the Evidence Log record for a completed job (Evidence Log read failure), the trial is marked with `status = HarnessError` and a `harness_failure_reason`. The trial does not contribute to quality statistics. The experiment continues. HarnessError trials are reported in the experiment summary as a count distinct from `trials_failed`.
+If the harness cannot retrieve the Evidence Log record for a completed job, the harness retries the read up to 3 times with exponential backoff starting at 500 ms before classifying the trial. If the record remains unavailable after retry exhaustion, the trial is marked with `status = HarnessError` and a `harness_failure_reason` identifying the read failure. The trial does not contribute to quality statistics. The experiment continues. HarnessError trials are reported in the experiment summary as a count distinct from `trials_failed`.
 
 **Effect on experiment validity:**
 Hardware failures at any rate do not invalidate the experiment at the harness level. An experiment where all hardware trials fail still reaches `Completed` status and produces summary artifacts documenting the full outcome distribution. The experiment summary reports the evidence as it is, including the failure distribution, for the researcher to evaluate.
@@ -477,10 +483,10 @@ The experiment harness manages the experiment through a defined lifecycle. The l
 - The `Failed` experiment status is distinct from trials with `solver_outcome = Failed`; a `Completed` experiment may contain many trials with `solver_outcome = Failed`
 
 **Successful experiment completion:**
-An experiment reaches `Completed` status when all `planned_trial_count` trials have reached a terminal trial status. This is the mechanical completion criterion. It does not imply that the trials produced sufficient quality-eligible evidence to support the experiment's research question.
+An experiment reaches `Completed` status when all submitted trials have reached a terminal trial status. For experiments without partial generation failure, this equals `planned_trial_count`. For experiments where partial workload generation failure reduced the actual number of trials submitted (see Failure Modes and FR-3), the experiment completes when all actually-submitted trials have reached a terminal trial status; the manifest's `planned_trial_count` is not the completion criterion in this case. This is the mechanical completion criterion. It does not imply that the trials produced sufficient quality-eligible evidence to support the experiment's research question.
 
 **Partial completion:**
-An experiment in `Running` status with some trials in terminal states and others still in progress is partially complete. Intermediate summary statistics computed during partial completion are labeled as provisional. The final experiment summary is produced only when the experiment reaches `Completed` status.
+An experiment in `Running` status with some trials in terminal states and others still in progress is partially complete. The trial results collection (Artifact 2) reflects all trials that have reached terminal status and is queryable at any point during execution. No experiment summary artifact (Artifact 3) is produced during the `Running` state. Summary statistics are not pre-computed during execution; they are derived at `Completed` time from the full trial results collection. The final experiment summary artifact is produced once, when the experiment reaches `Completed` status.
 
 **Failed experiment:**
 The experiment transitions to `Failed` status when:
@@ -625,6 +631,8 @@ All trials in a pairing contribute to the outcome distribution counts regardless
 **Cross-solver comparison validity:**
 `hindsight_quality` values are dimensionally comparable only within the same routing problem (SPEC-007 FR-7). The harness produces cross-solver comparisons at the per-problem level. Aggregating `hindsight_quality` across problems with different geometries is not performed by the harness.
 
+In Generated Mode, the per-(problem_slot, solver) QualityStats aggregate across `repetition_count` routing problem instances generated from the same structural parameters. Cross-solver comparisons within a problem slot are valid: the instance-sharing invariant (FR-4) guarantees that for each repetition index, all backends executed against the same generated problem instance (same `problem_id`). The QualityStats distribution reflects each solver's quality behavior across a sample drawn from the problem class defined by the generation configuration; it is not a within-a-single-problem comparison.
+
 **No advanced statistical tests:**
 The harness computes descriptive statistics only: mean, median, min, max, standard deviation. Hypothesis testing, confidence intervals, p-values, and significance thresholds are not computed. These are deferred to OQ-4.
 
@@ -749,7 +757,7 @@ Evidence completeness is observable as a derived metric from the running trial c
 **What constitutes partial completion:**
 - `ExperimentStatus = Running`
 - Some trials have reached terminal status; others have not
-- Intermediate results are observable but are not final
+- The trial results collection (Artifact 2) reflects completed trials and is queryable; no experiment summary artifact (Artifact 3) exists in this state
 
 **What constitutes a failed experiment:**
 - `ExperimentStatus = Failed`
@@ -869,7 +877,7 @@ Cause: SPEC-002 cannot generate one or more problem instances from the derived s
 
 Expected behavior: If no instances can be generated, the experiment transitions to `Failed`. If some instances are generated and others fail, the harness proceeds with available instances and records the partial generation failure.
 
-Expected fallback: The experiment continues if at least one instance is available; `planned_trial_count` is updated to reflect the actual number of generated instances.
+Expected fallback: The experiment continues if at least one instance is available. The manifest's `planned_trial_count` is not modified. The experiment's runtime state records the partial generation failure and tracks an `effective_trial_count` reflecting the actual number of trials to be submitted. The experiment summary's `trials_planned` field reflects the effective count, not `planned_trial_count`.
 
 ---
 
@@ -925,7 +933,7 @@ Expected fallback: None. HarnessError trials are counted in the experiment summa
 | Observability | Yes — experiment progress events, trial progress events, evidence completeness metrics |
 | Configuration | Yes — hardware policy, retry limits, seed derivation algorithm |
 | Report Generator (SPEC-009) | No — individual evidence reports are generated per job as normal; the harness references them by job_id |
-| CLI (SPEC-016) | Yes — new commands for experiment and benchmark submission |
+| CLI (SPEC-016) | Yes — CLI is the harness orchestration executor (SPEC-016 owns "Experiment orchestration: multi-job submission and result collection"). The CLI runs the trial submission loop, polls job status endpoints, and notifies the API when each trial reaches terminal status. A SPEC-016 amendment is required for experiment and benchmark manifest submission commands; see Documentation Updates Required. |
 
 The experiment harness is a new system component with new persistence requirements. Its schema is not covered by the existing Evidence Log specification (SPEC-006) or the routing problem schema (SPEC-012). A new persistence schema or an extension to SPEC-012 is required (OQ-1).
 
@@ -1029,7 +1037,7 @@ The experiment harness submits routing jobs on behalf of the experiment submitte
 
 **Experiment scope:** A large experiment can generate a high volume of job submissions (`planned_trial_count` jobs). Rate limiting and experiment-size constraints are deferred (OQ-5) but should be addressed before exposing experiment submission to untrusted callers.
 
-**Cost exposure:** Experiments that include `quantum_hardware` backends may incur monetary cost (SPEC-019 extension_metadata `qaoa.hardware.estimated_cost`). Experiment submitters must be aware of this before submitting hardware-inclusive experiments. Cost evidence is included in trial records.
+**Cost exposure:** Experiments that include `quantum_hardware` backends may incur monetary cost (SPEC-019 extension_metadata `qaoa.hardware.estimated_cost`). Cost evidence is included in trial records. No cost cap or pre-authorization mechanism is defined in this specification; see OQ-9.
 
 **Seed handling:** Experiment seeds are non-sensitive configuration values. They may appear in logs and artifact outputs. No special secret handling is required.
 
@@ -1053,8 +1061,9 @@ Do not invent specific latency targets. These areas require measurement during i
 
 - docs/architecture.md: Add Benchmark and Experiment Harness to Major Components; add experiment artifacts to the data flow description
 - SPEC-002: Confirm GenerationConfig fields are compatible with the harness WorkloadSetDefinition (FR-4 Mode B); confirm that SPEC-002 generation from a derived seed with fixed structural parameters produces the expected instance
-- SPEC-008 (API Control Plane): Add experiment submission endpoint, benchmark manifest submission endpoint, experiment status endpoint, trial results endpoint, experiment summary endpoint, benchmark summary endpoint (interface definitions pending SPEC-021)
-- SPEC-016 (CLI): Add experiment submission command and benchmark manifest command
+- SPEC-008 (API Control Plane): SPEC-020 defines the functional requirements for the following new API endpoints; their addition requires a SPEC-008 amendment: experiment manifest submission, benchmark manifest submission, experiment status retrieval, trial results retrieval, trial evidence collection (CLI-triggered after job terminal state), experiment summary retrieval, benchmark summary retrieval. SPEC-020 owns these functional requirements; SPEC-008 owns the HTTP interface contracts (method, request/response schema, error codes). These backend API contracts are not owned by SPEC-021.
+- SPEC-016 (CLI): SPEC-016 FR-1 defines an existing `daedalus experiment run <file>` command for single-problem, multi-configuration experiments. SPEC-020's experiment model (workload sets, solver sets, repetitions, benchmark manifests) is a superset of this simpler concept. A SPEC-016 amendment is required to either: (a) extend `experiment run` to accept the SPEC-020 manifest format; or (b) introduce a distinct command (e.g., `daedalus benchmark run <manifest.json>`) for SPEC-020 experiments while preserving the simpler existing command. The CLI is the harness orchestration executor; the SPEC-016 amendment must account for the long-running CLI session requirement for hardware experiments.
+- SPEC-001 (Routing Problem Model): Add an optional experiment provenance field to routing problem submissions so that harness-generated problems (Generated Mode) are distinguishable from regular job submissions by carrying the generating `experiment_id`. Amendment scope is minimal (one optional field); routing problem semantics, solver contract, and Evidence Log are unaffected.
 - SPEC-021 (pending specification): Define API endpoint contracts for all experiment and benchmark artifact operations
 - SPEC-022 (pending specification): Define visualization requirements for experiment summary and benchmark summary artifacts
 
@@ -1066,7 +1075,7 @@ Do not invent specific latency targets. These areas require measurement during i
 
 What is the persistence schema for experiment manifests, trial records, and experiment artifacts?
 
-The experiment harness introduces new persistence requirements not covered by the existing Evidence Log schema (SPEC-006) or the routing problem schema (SPEC-012). A separate schema specification or an extension to SPEC-012 is required before implementation can proceed.
+The experiment harness introduces new persistence requirements not covered by the existing Evidence Log schema (SPEC-006) or the routing problem schema (SPEC-012). SPEC-012 is the project persistence authority (per ADR-004: single PostgreSQL instance for MVP). Extension of SPEC-012 to cover experiment manifests, trial records, and artifact storage is the expected resolution path. A new schema specification is an alternative if the experiment schema warrants a separate governance lifecycle.
 
 This blocks implementation. The harness cannot be built without a defined persistence layer.
 
@@ -1130,6 +1139,22 @@ SPEC-019 declares `is_provisional = true` until qualification criteria are satis
 
 ---
 
+## OQ-8 (Non-Blocking): Experiment Cancellation
+
+No mechanism exists to cancel an experiment in `Running` status. An in-progress experiment has no defined abort path; CLI process termination does not cancel submitted jobs, and the harness has no mechanism to stop submitting new trials in response to an external signal. Individual jobs may be cancelled via SPEC-008, but this does not halt the experiment. For hardware experiments with significant queue wait times and monetary cost, the absence of experiment-level cancellation is a production readiness concern.
+
+**Classification:** Non-Blocking (deferred; most consequential for hardware experiment operations)
+
+---
+
+## OQ-9 (Non-Blocking): Hardware Experiment Cost Controls
+
+No cost pre-authorization, acknowledgment step, or cumulative cost cap is defined in this specification. The `qaoa.hardware.estimated_cost` extension_metadata field (SPEC-019) makes per-trial cost estimates available in the trial evidence record, but the harness does not halt execution when cumulative estimated cost exceeds any threshold. Hardware cost controls are a production readiness concern for experiments that include `quantum_hardware` backends.
+
+**Classification:** Non-Blocking (deferred to production readiness phase)
+
+---
+
 # Acceptance Checklist
 
 - [ ] Problem is clearly defined.
@@ -1147,6 +1172,11 @@ SPEC-019 declares `is_provisional = true` until qualification criteria are satis
 - [ ] Hardware reproducibility classification is explicitly defined.
 - [ ] Statistical analysis model excludes advanced tests.
 - [ ] Artifact ownership boundaries relative to SPEC-021 and SPEC-022 are defined.
+- [ ] Harness execution component is identified as CLI-driven orchestration (SPEC-016 executor, API state authority).
+- [ ] SPEC-016 existing `experiment run` command relationship is addressed in Documentation Updates Required.
+- [ ] `planned_trial_count` immutability is consistent with partial generation failure handling (`effective_trial_count` in runtime state).
+- [ ] Generated Mode instance-sharing invariant is specified: one problem instance per (problem_config_index, repetition_index), shared across all backends (FR-4, FR-8).
+- [ ] Trial submission ordering is specified: (problem_config_index asc, repetition_index asc, solver_set_index asc) (FR-4).
 
 ---
 
