@@ -8,7 +8,7 @@ Proposed
 
 **Related Feature(s):** Benchmark and Experiment Harness (SPEC-020)
 
-**Related ADR(s):** ADR-004, ADR-008, ADR-009, ADR-010, ADR-011
+**Related ADR(s):** ADR-004, ADR-008, ADR-010, ADR-011
 
 ---
 
@@ -108,7 +108,7 @@ The experiment harness collects per-trial evidence by triggering the API to read
 
 **SPEC-006 FR-1.3 compliance:** SPEC-006 FR-1.3 states "No component other than the Worker (SPEC-005) may write to Evidence Log artifact tables after job creation." The API-mediated collection does not write to Evidence Log tables. The API reads from Evidence Log tables (reading is unrestricted per SPEC-006 FR-1.3, which restricts writing only) and writes the collected evidence to experiment trial records — a separate table category governed by SPEC-012-R1, not SPEC-006.
 
-**SPEC-016 Constraints compliance:** SPEC-016 Constraints state "The CLI must not access PostgreSQL directly. All data access is through the Daedalus API." The CLI triggers evidence collection through the API; it does not read PostgreSQL directly.
+**SPEC-016 Constraints compliance:** SPEC-016 Constraints state "The CLI must not access PostgreSQL directly. All data access is through the SPEC-008 API." The CLI triggers evidence collection through the API; it does not read PostgreSQL directly.
 
 The mechanism: when the CLI determines (via job status polling) that a trial job has reached a terminal state, the CLI calls a designated API endpoint that reads the relevant Evidence Log records for that `job_id` and persists the collected evidence in the experiment trial record. Experiment trial records are experiment persistence tables (to be defined in SPEC-012-R1), not Evidence Log tables.
 
@@ -234,7 +234,7 @@ Eliminates the need for a new API endpoint for evidence collection. The CLI can 
 
 ### Drawbacks
 
-Directly violates SPEC-016 Constraints: "The CLI must not access PostgreSQL directly. All data access is through the Daedalus API." This constraint is not an incidental preference; it enforces the API as the sole access layer for all data, enabling validation, authorization, and observability at the API boundary. Direct CLI-to-database access bypasses all three.
+Directly violates SPEC-016 Constraints: "The CLI must not access PostgreSQL directly. All data access is through the SPEC-008 API." This constraint is not an incidental preference; it enforces the API as the sole access layer for all data, enabling validation, authorization, and observability at the API boundary. Direct CLI-to-database access bypasses all three.
 
 ### Reason Not Selected
 
@@ -293,7 +293,7 @@ The constraint is authoritative and accepted. API-mediated collection (Decision 
 
 **SPEC-016 Scope Table:** "Experiment orchestration (multi-job submission and result collection)" is owned by SPEC-016. The CLI's role as orchestration executor (Decision 1) is already designated in the Accepted specification.
 
-**SPEC-016 Constraints:** "The CLI must not access PostgreSQL directly. All data access is through the Daedalus API." This constraint is the primary driver of Alternative 5B's rejection and Decision 5's structure.
+**SPEC-016 Constraints:** "The CLI must not access PostgreSQL directly. All data access is through the SPEC-008 API." This constraint is the primary driver of Alternative 5B's rejection and Decision 5's structure.
 
 **SPEC-006 FR-1.3:** "No component other than the Worker (SPEC-005) may write to Evidence Log artifact tables after job creation." Reading is unrestricted. This establishes that API-mediated evidence collection (Decision 5) complies: the API reads from Evidence Log tables and writes to experiment tables, both of which are permitted.
 
@@ -349,16 +349,17 @@ The following specification amendments are required before experiment harness im
 - Define experiment persistence tables: experiments, benchmark manifests, trial records, artifact storage
 - These tables are not Evidence Log tables (SPEC-006) and are not governed by SPEC-006 write-authority restrictions
 - The existing `jobs` table requires no new experiment-reference column. The experiment-to-job linkage is held in experiment trial records (via `job_id`), not in the job record. SPEC-012-R1 must not add an `experiment_id` column to the `jobs` table; doing so would require the Worker to populate it, violating Decision 4 (Worker experiment-unawareness)
+- Update FR-15 (Read/Write Ownership Map) to reflect that the API reads `decision_records` and `quality_evaluation_records` for trial evidence collection (Decision 5). Worker-only WRITE authority on both tables (SPEC-006 FR-1.3) is unchanged; the FR-15 update adds API read access only
 
 **SPEC-016-R1 (Required — Blocked by this ADR):**
 - Add `daedalus benchmark run <manifest.json>` command (or extend `daedalus experiment run` to accept the SPEC-020 manifest format)
 - Document the long-running CLI process exception for benchmark and experiment commands
 - Remove or scope SPEC-016 OQ-3 ("Local manifest only") — superseded by Decision 2
-- Update SPEC-016 FR-12 Assumptions to reflect that in Generated Mode, backends within the same (problem_config_index, repetition_index) use the same `problem_id`, not independently persisted copies
+- Update the SPEC-016 global Assumptions section (which states "the problems are not shared at the persistence layer — they are identical in content but independently persisted") and the FR-12 body (which states "`problem_id` is not shared across jobs per SPEC-001") to reflect that in experiment context, a routing problem may be shared across multiple jobs per Decision 3; both locations must be updated
 
 **docs/architecture.md:**
-- Add experiment and benchmark harness to the Major Components section
-- Add experiment state persistence to the API responsibilities list
+- Update the Daedalus CLI Major Component section to describe experiment orchestration as a CLI capability (benchmark run command, long-running orchestration loop). The experiment harness is not a new Major Component; it is implemented within the existing CLI and API components and is not a new deployment unit (Decision 6)
+- Update the Daedalus API Major Component section to add experiment state persistence to the API responsibilities list
 
 ---
 
@@ -367,6 +368,7 @@ The following specification amendments are required before experiment harness im
 - SPEC-020 OQ-8 resolution (experiment cancellation): may require revision to the scope of Decision 1's long-running CLI exception or introduction of a server-side alternative for hardware experiments
 - SPEC-020 OQ-5 resolution (parallel trial execution): may require reconsideration of Decision 6 (no additional deployment unit) if parallel execution requires a coordinator service
 - ADR-007 review trigger satisfied (IBM Quantum Runtime integration begins): multi-hour hardware queue waits may make Assumption 2 (CLI process availability) untenable; server-side orchestration becomes a stronger candidate at that time
+- A non-CLI caller (dashboard, API client, automation service) requires experiment submission capability: Decision 1's CLI-as-executor model requires re-evaluation when the orchestration loop cannot run in a long-lived CLI process owned by the submitting caller
 
 ---
 
@@ -401,4 +403,4 @@ Designing the execution architecture for a multi-backend experiment harness requ
 
 **Evidence Supporting the Decisions:** SPEC-020 FR-4 (instance-sharing invariant), SPEC-007 FR-7 (cross-solver comparability constraint), SPEC-016 scope table (CLI orchestration owner), SPEC-006 FR-1.3 (Evidence Log write authority), SPEC-012 FR-6 (no UNIQUE constraint on `jobs.problem_id`), SPEC-020 Domain Concept (Decisions 1 and 2 explicitly stated), SPEC-020 Non-Requirements (Decision 4 explicitly stated).
 
-**Next Review Trigger:** SPEC-020 OQ-8 (experiment cancellation) resolution; SPEC-020 OQ-5 (parallel execution) resolution; ADR-007 review trigger satisfied (hardware integration begins).
+**Next Review Trigger:** SPEC-020 OQ-8 (experiment cancellation) resolution; SPEC-020 OQ-5 (parallel execution) resolution; ADR-007 review trigger satisfied (hardware integration begins); non-CLI experiment submission required (dashboard, API client, automation service).
