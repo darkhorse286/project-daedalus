@@ -658,6 +658,10 @@ All API error responses use a consistent structured JSON format. This model appl
 | 409 | `JOB_ALREADY_TERMINAL` | Cancellation requested for a terminal job |
 | 409 | `BENCHMARK_ALREADY_EXISTS` | Benchmark manifest submission uses a `benchmark_id` already in use (FR-19) |
 | 409 | `JOB_NOT_TERMINAL` | Evidence collection requested for a trial whose job has not yet reached terminal state (FR-21) |
+| 409 | `TRIAL_ALREADY_SUBMITTED` | Trial submission linkage requested for a trial whose `job_id` is already set; trial has already been linked to a job (FR-25) |
+| 409 | `JOB_PROBLEM_MISMATCH` | Trial submission linkage requested with a `job_id` whose `problem_id` does not match the trial's `problem_id`; instance-sharing invariant violation (ADR-012 Decision 3) (FR-25) |
+| 409 | `TRIAL_NOT_SUBMITTED` | Evidence collection requested for a trial whose `job_id` is null; trial has not been linked to a job via FR-25 (FR-21) |
+| 409 | `EXPERIMENT_NOT_ACTIVE` | Trial submission linkage requested for an experiment whose status is not `Created` or `Running`; trial submission is not permitted on terminal experiments (FR-25) |
 | 500 | `INTERNAL_ERROR` | Unexpected server error (PostgreSQL unavailable, publication failure, evidence collection infrastructure failure, etc.) |
 
 **Acceptance Criteria:**
@@ -730,7 +734,7 @@ The API's idempotency behavior varies by endpoint class.
 
 **Trial results retrieval (`GET /v1/experiments/{experiment_id}/trials`):** Idempotent.
 
-**Trial submission linkage (`POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit`):** Not idempotent. A trial may be linked to exactly one `job_id`. A call for a trial with an existing `job_id` returns `409 Conflict` with `error_code = TRIAL_ALREADY_SUBMITTED`.
+**Trial submission linkage (`POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit`):** Not idempotent. A trial may be linked to exactly one `job_id`. A call for a trial with an existing `job_id` returns `409 Conflict` with `error_code = TRIAL_ALREADY_SUBMITTED`; a call for an experiment whose status is not in `{Created, Running}` returns `409 Conflict` with `error_code = EXPERIMENT_NOT_ACTIVE`.
 
 **Trial evidence collection trigger (`POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`):** Idempotent. Repeated calls for the same `trial_id` when evidence has already been collected return `200 OK` with the existing evidence state without re-reading or re-writing. This supports CLI retry on network failure and CLI restart during experiment recovery (ADR-012 SPEC-008-R1 idempotency requirement). The upsert approach aligns with SPEC-012 FR-12's idempotency pattern.
 
@@ -744,6 +748,8 @@ The API's idempotency behavior varies by endpoint class.
 - A `POST /v1/jobs/{job_id}/cancel` on an already-terminal job returns `409 Conflict`, not `202 Accepted`
 - A second `POST /v1/benchmarks` with the same `benchmark_id` returns `409 Conflict`
 - Repeated `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence` calls return `200 OK` and do not duplicate evidence records
+- A call to `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` for a trial whose `job_id` is already set returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED`
+- A call to `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` for an experiment whose `status` is not in `{Created, Running}` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`
 
 ---
 
@@ -1017,7 +1023,7 @@ The API exposes an endpoint for retrieving the current status and trial progress
 |---|---|---|
 | `pending` | integer | Trials in `Pending` trial_status |
 | `submitted` | integer | Trials in `Submitted` trial_status |
-| `executing` | integer | Trials in `Executing` trial_status |
+| `executing` | integer | Trials in `Executing` trial_status. Reserved for future progress reporting; always `0` at MVP scope because no SPEC-008 endpoint transitions `trial_status` to `Executing` |
 | `completed` | integer | Trials in `Completed` trial_status |
 | `scheduler_rejected` | integer | Trials in `SchedulerRejected` trial_status |
 | `harness_error` | integer | Trials in `HarnessError` trial_status |
@@ -1053,6 +1059,7 @@ After creating an experiment and receiving trial records (FR-18), the CLI submit
 | Rule | Condition | Rejection |
 |---|---|---|
 | Experiment exists | `experiment_id` not found in `experiments` | HTTP 404, `error_code = EXPERIMENT_NOT_FOUND` |
+| Experiment is active | `experiments.status` not in `{Created, Running}` | HTTP 409, `error_code = EXPERIMENT_NOT_ACTIVE` |
 | Trial belongs to experiment | `trial_id` not found in `experiment_trials` for this experiment | HTTP 404, `error_code = TRIAL_NOT_FOUND` |
 | Trial not yet submitted | `experiment_trials.job_id` is not null | HTTP 409, `error_code = TRIAL_ALREADY_SUBMITTED` |
 | Job exists | `job_id` not found in `jobs` | HTTP 404, `error_code = JOB_NOT_FOUND` |
@@ -1063,18 +1070,19 @@ After creating an experiment and receiving trial records (FR-18), the CLI submit
 The API performs the following sequence:
 
 1. Validates experiment exists; returns HTTP 404 with `error_code = EXPERIMENT_NOT_FOUND` if not.
-2. Validates trial belongs to experiment; returns HTTP 404 with `error_code = TRIAL_NOT_FOUND` if not.
-3. Validates `experiment_trials.job_id` is null; returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED` if already set.
-4. Validates the referenced `job_id` exists in `jobs`; returns HTTP 404 with `error_code = JOB_NOT_FOUND` if not.
-5. Validates `jobs.problem_id` equals `experiment_trials.problem_id`; returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH` if not. This enforces the instance-sharing invariant (ADR-012 Decision 3): all backends for a given trial share the same routing problem.
-6. Sets `experiment_trials.job_id = job_id` and transitions `trial_status` from `Pending` to `Submitted`.
-7. If this is the first submitted trial for the experiment (experiment is in `Created` status): transitions `experiments.status` from `Created` to `Running` and sets `experiments.started_at`.
-8. Returns HTTP 200 with the updated trial state.
+2. Validates `experiments.status ∈ {Created, Running}`; returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE` if not. This prevents trial submission linkage on experiments that have already reached a terminal status (`Completed`, `Failed`).
+3. Validates trial belongs to experiment; returns HTTP 404 with `error_code = TRIAL_NOT_FOUND` if not.
+4. Validates `experiment_trials.job_id` is null; returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED` if already set.
+5. Validates the referenced `job_id` exists in `jobs`; returns HTTP 404 with `error_code = JOB_NOT_FOUND` if not.
+6. Validates `jobs.problem_id` equals `experiment_trials.problem_id`; returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH` if not. This enforces the instance-sharing invariant (ADR-012 Decision 3): all backends for a given trial share the same routing problem.
+7. Sets `experiment_trials.job_id = job_id` and transitions `trial_status` from `Pending` to `Submitted`.
+8. If this is the first submitted trial for the experiment (experiment is in `Created` status): transitions `experiments.status` from `Created` to `Running` and sets `experiments.started_at`.
+9. Returns HTTP 200 with the updated trial state.
 
 **HTTP status:**
 - `200 OK`: trial successfully linked to job
 - `404 Not Found`: experiment not found (`EXPERIMENT_NOT_FOUND`), trial not found (`TRIAL_NOT_FOUND`), or job not found (`JOB_NOT_FOUND`)
-- `409 Conflict`: trial already has a `job_id` (`TRIAL_ALREADY_SUBMITTED`) or `job.problem_id ≠ trial.problem_id` (`JOB_PROBLEM_MISMATCH`)
+- `409 Conflict`: experiment is not in an active state (`EXPERIMENT_NOT_ACTIVE`), trial already has a `job_id` (`TRIAL_ALREADY_SUBMITTED`), or `job.problem_id ≠ trial.problem_id` (`JOB_PROBLEM_MISMATCH`)
 
 **Response body (200):**
 
@@ -1090,6 +1098,7 @@ The API performs the following sequence:
 
 **Acceptance Criteria:**
 - A call that successfully links a trial to a job returns HTTP 200 with `trial_status = "Submitted"`
+- A call for an experiment whose `status` is not `Created` or `Running` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`
 - A call for a trial whose `job_id` is already set returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED`
 - A call with a `job_id` whose `problem_id` does not match the trial's `problem_id` returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH`
 - The first successful trial submission for an experiment transitions `experiments.status` from `Created` to `Running` and sets `started_at`
@@ -1112,16 +1121,17 @@ When the CLI determines (via job status polling) that a trial's associated job h
 The API performs the following sequence:
 
 1. Validates that the experiment exists and the trial belongs to it.
-2. Validates that the trial's `job_id` is non-null. If null, the trial has not been linked to a job via FR-25 and evidence collection cannot proceed; returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`.
-3. Validates that the trial's associated job has reached a terminal state (`jobs.status = Completed` or `jobs.status = Failed`). If the job is not yet terminal, returns HTTP 409 with `error_code = JOB_NOT_TERMINAL`.
-4. Reads `solver_run_records` for the `job_id`: `solver_outcome`, `execution_duration_ms`, `route_plan`, `extension_metadata`. Absent when `jobs.status = Failed` at an early failure stage.
-5. Reads `quality_evaluation_records` for the `job_id`: `hindsight_quality`, `quality_metrics` (for `quality_comparison_eligible`, `time_window_feasible`). Absent when no quality evaluation was performed.
-6. Writes collected evidence to the `experiment_trials` row: updates `trial_status` to `Completed`, sets evidence scalar columns and `evidence_payload`, sets `evidence_status`, sets `evidence_collected_at`. If no `solver_run_records` exist for the `job_id` and the job's status is `Completed` (job completed but Worker wrote no Evidence Log records — abnormal but possible), `evidence_status` is set to `Missing`.
-7. Checks whether all trials for the experiment are in a terminal `trial_status` (`Completed`, `SchedulerRejected`, or `HarnessError`). If yes, triggers the experiment completion sequence (see below).
+2. Checks `experiment_trials.evidence_status`. If `Collected` or `Missing`, returns HTTP 200 with the existing evidence state without proceeding further (idempotency short-circuit; precedes all Evidence Log reads).
+3. Validates that the trial's `job_id` is non-null. If null, the trial has not been linked to a job via FR-25 and evidence collection cannot proceed; returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`.
+4. Validates that the trial's associated job has reached a terminal state (`jobs.status = Completed` or `jobs.status = Failed`). If the job is not yet terminal, returns HTTP 409 with `error_code = JOB_NOT_TERMINAL`.
+5. Reads `solver_run_records` for the `job_id`: `solver_outcome`, `execution_duration_ms`, `route_plan`, `extension_metadata`. Absent when `jobs.status = Failed` at an early failure stage. `solution_present` is derived as `route_plan IS NOT NULL`; no additional table read is performed.
+6. Reads `quality_evaluation_records` for the `job_id`: `hindsight_quality`, `quality_metrics` (for `quality_comparison_eligible`, `time_window_feasible`). Absent when no quality evaluation was performed.
+7. Writes collected evidence to the `experiment_trials` row: updates `trial_status` to `Completed`, sets evidence scalar columns and `evidence_payload`, sets `evidence_status`, sets `evidence_collected_at`. If no `solver_run_records` exist for the `job_id` and the job's status is `Completed` (job completed but Worker wrote no Evidence Log records — abnormal but possible), `evidence_status` is set to `Missing`.
+8. Checks whether all trials for the experiment are in a terminal `trial_status` (`Completed`, `SchedulerRejected`, or `HarnessError`). If yes, and only if `experiments.status = 'Running'`, triggers the experiment completion sequence (see below). If `experiments.status` is already `Completed`, step 8 is a no-op; the experiment completion sequence is not triggered. This guard prevents a duplicate ExperimentSummary INSERT (SPEC-012 FR-22 UNIQUE constraint) when an `Error`-status trial is retried after the experiment has already transitioned to `Completed`.
 
 **Experiment auto-completion:**
 When step 7 determines all trials are terminal, the API automatically:
-- Computes QualityStatsAggregate artifacts for all (problem, solver) pairings with sufficient evidence (SPEC-020 FR-12, FR-13)
+- Computes QualityStatsAggregate artifacts for all (problem, solver) pairings with sufficient evidence (SPEC-020 FR-12, FR-13); verifies no existing `experiment_artifacts` row for `(experiment_id, problem_id, backend_id)` before INSERT per SPEC-012 FR-22.4 (application-layer idempotency guard)
 - Computes the ExperimentSummary artifact (SPEC-020 FR-14 Artifact 3)
 - Persists both to `experiment_artifacts` (SPEC-012 FR-22)
 - Transitions the experiment to `Completed` and sets `completed_at`
@@ -1132,9 +1142,9 @@ The experiment status in the response reflects the post-collection state. The au
 **Idempotency:**
 This endpoint's idempotency behavior varies by `evidence_status`:
 
-- **`Collected`:** Idempotent. Repeated calls return HTTP 200 with the existing evidence state without re-reading Evidence Log tables or re-writing trial evidence. This supports CLI retry on network failure and CLI restart during experiment recovery (ADR-012 SPEC-008-R1 idempotency requirement). The idempotency check precedes all Evidence Log reads.
-- **`Error`:** Retryable. A prior call that resulted in `evidence_status = Error` indicates a transient failure during Evidence Log reads. Repeated calls re-attempt Evidence Log reads and may produce a different `evidence_status` on success. The CLI may retry evidence collection for `Error` trials.
-- **`Missing`:** Terminal. A prior call that resulted in `evidence_status = Missing` indicates Evidence Log records are absent for a completed job. Repeated calls return HTTP 200 with the existing `Missing` state without re-reading Evidence Log tables. `Missing` evidence is not retryable.
+1. **`Collected`:** Idempotent. Repeated calls return HTTP 200 with the existing evidence state without re-reading Evidence Log tables or re-writing trial evidence. This supports CLI retry on network failure and CLI restart during experiment recovery (ADR-012 SPEC-008-R1 idempotency requirement). The idempotency check precedes all Evidence Log reads.
+2. **`Error`:** Retryable. A prior call that resulted in `evidence_status = Error` indicates a transient failure during Evidence Log reads. Repeated calls re-attempt Evidence Log reads and may produce a different `evidence_status` on success. The CLI may retry evidence collection for `Error` trials.
+3. **`Missing`:** Terminal. A prior call that resulted in `evidence_status = Missing` indicates Evidence Log records are absent for a completed job. Repeated calls return HTTP 200 with the existing `Missing` state without re-reading Evidence Log tables. `Missing` evidence is not retryable.
 
 **SPEC-006 FR-1.3 compliance:** The API reads from Evidence Log tables (`solver_run_records`, `quality_evaluation_records`) and writes to `experiment_trials` (an experiment persistence table per SPEC-012 FR-21, not an Evidence Log table). No write to any Evidence Log table occurs. Worker-only write authority on Evidence Log tables is preserved (SPEC-006 FR-1.3).
 
@@ -1164,8 +1174,10 @@ This endpoint's idempotency behavior varies by `evidence_status`:
 **Acceptance Criteria:**
 - Repeated calls for a trial with `evidence_status = Collected` return HTTP 200 with the existing evidence state without modification
 - A call when the trial's job is not yet in terminal state returns HTTP 409 with `error_code = JOB_NOT_TERMINAL`
+- A collect-evidence request for a trial whose `job_id` is null returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`
 - Evidence is read from `solver_run_records` and `quality_evaluation_records`; no Evidence Log table is written
 - When this call causes the last trial to reach terminal trial_status, the experiment auto-transitions to `Completed` and `experiment_status = "Completed"` in the response
+- Auto-completion produces one QualityStatsAggregate artifact for each eligible (problem, solver) scope and does not produce duplicate artifacts for an existing scope (SPEC-012 FR-22.4)
 - The ExperimentSummary artifact and benchmark summary update are computed atomically with the experiment status transition
 - `experiment_status` in the response reflects the post-collection state of the experiment
 
@@ -1587,6 +1599,10 @@ The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark 
 
 41. **Integration: Trial submission linkage — first trial transitions experiment to Running** — `POST /v1/experiments/{id}/trials/{id}/submit` for the first trial in a `Created` experiment returns `experiment_status = "Running"` in the response body, and `GET /v1/experiments/{id}` reflects `status = "Running"`.
 
+42. **Unit: Trial evidence collection — null job_id** — `POST /v1/experiments/{id}/trials/{id}/collect-evidence` for a trial whose `job_id` is null (trial not yet linked via FR-25) returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`.
+
+43. **Integration: Trial submission linkage — experiment completed** — `POST /v1/experiments/{id}/trials/{id}/submit` for an experiment whose `status = Completed` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`.
+
 ---
 
 # Observability Requirements
@@ -1844,7 +1860,7 @@ This feature is complete when:
 - OQ-6 (trace context propagation) is resolved and incorporated in FR-17 — satisfied
 - OQ-7 Sub-problem A (routing problem creation without job creation) and Sub-problem B (trial record registration) are resolved before Generated Mode harness implementation begins
 - OQ-8 (SchedulerRejected/HarnessError trial notification) is resolved before full experiment lifecycle implementation begins
-- All test contracts defined in the Testability section pass (items 1 through 41)
+- All test contracts defined in the Testability section pass (items 1 through 43)
 - The `job.submit`, `experiment.submit`, `experiment.trial_submit`, `experiment.evidence_collect`, and `experiment.summarize` spans are emitted and verifiable in the OpenTelemetry Collector
 - SPEC-001 FR-17 defines `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 references SPEC-001 FR-17
 - The `jobs` table has no `experiment_id` column; Worker experiment-unawareness is verified by schema inspection
