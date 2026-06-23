@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated.)
+**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated. Acceptance Review (amendment) revisions applied: AC-SF-001 benchmark submit testability entries added; AC-SF-002 FR-12 result manifest AC and testability entry updated to include problem_id and evidence_status; AC-SF-003 experiment run JSON output mode testability entries added; AC-SF-004 submission phase error handling testability entries added; AC-SF-005 evidence_status = Error non-fatal testability entry added; AC-NTH-001 experiment summary ACs differentiate EXPERIMENT_NOT_FOUND from EXPERIMENT_SUMMARY_NOT_FOUND; AC-NTH-002 evidence_status added to cli.experiment.evidence_collect log event.)
 
 **Supersedes:** None
 
@@ -642,7 +642,7 @@ On code 6 (`experiment.status = Failed`), the same object is emitted with `"stat
 - A manifest rejected by the API for any other reason (HTTP 400) prints all `field_errors` and exits with code 2.
 - A manifest with an empty `solver_set` is rejected with code 2.
 - A manifest with `repetition_count` less than 1 is rejected with code 2.
-- When all trials complete normally: the result manifest captures `experiment_id`, `experiment_name`, `benchmark_id`, planned trial count, and per-trial `trial_id`, `job_id`, `backend_id`, `trial_status`, `solver_outcome` (when available), and `evidence_status`.
+- When all trials complete normally: the result manifest captures `experiment_id`, `experiment_name`, `benchmark_id`, planned trial count, and per-trial `trial_id`, `problem_id`, `job_id`, `backend_id`, `trial_status`, `solver_outcome` (when available), and `evidence_status`.
 - When `experiment.status = Failed`: the CLI exits with code 6.
 - When any trial's job reaches `status = Failed`: the CLI exits with code 5 (unless experiment also fails, in which case code 6 takes precedence).
 - If the output manifest file already exists, it is overwritten without prompt.
@@ -809,7 +809,7 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 | `cli.experiment.submit` | Experiment manifest submitted | `experiment_id`, `experiment_name`, `planned_trial_count` |
 | `cli.experiment.trial_submit` | Trial linked to job | `experiment_id`, `trial_id`, `job_id`, `problem_config_index`, `repetition_index`, `solver_set_index` |
 | `cli.experiment.trial_complete` | Trial job reaches terminal state | `experiment_id`, `trial_id`, `job_id`, `job_status`, `solver_outcome` |
-| `cli.experiment.evidence_collect` | Evidence collection triggered | `experiment_id`, `trial_id`, `job_id`, `http_status` |
+| `cli.experiment.evidence_collect` | Evidence collection triggered | `experiment_id`, `trial_id`, `job_id`, `http_status`, `evidence_status` |
 | `cli.experiment.complete` | Experiment reaches terminal status | `experiment_id`, `experiment_status`, `total_trials`, `elapsed_seconds` |
 | `cli.command.exit` | Command exits | `exit_code`, `duration_ms` |
 
@@ -999,8 +999,8 @@ Calls `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-23) and prints 
 | `--output <file>` | Write the summary JSON to this file. When absent, prints to stdout. |
 
 **Acceptance Criteria:**
-- An unknown `experiment_id` exits with code 1.
-- An experiment whose `status` is not `Completed` prints a not-ready message and exits with code 1.
+- An unknown `experiment_id` (HTTP 404, `error_code = EXPERIMENT_NOT_FOUND`) prints a not-found message identifying the `experiment_id` and exits with code 1.
+- An experiment that exists but whose `status` is not `Completed` (HTTP 404, `error_code = EXPERIMENT_SUMMARY_NOT_FOUND`) prints a not-yet-available message and exits with code 1.
 - When `--output <file>` is provided, the summary JSON is written to that file and the file path is printed to stdout.
 - `--output-format json` emits the raw SPEC-008 FR-23 response.
 
@@ -1361,19 +1361,33 @@ The following behaviors must be proven before this feature is considered complet
 - A manifest with an empty `solver_set` exits with code 2.
 - A manifest rejected by the API (HTTP 400) prints all `field_errors` and exits with code 2.
 - Trials are submitted in `(problem_config_index asc, repetition_index asc, solver_set_index asc)` order.
+- `POST /v1/jobs` returning HTTP 5xx during the submission phase causes the CLI to exit with code 1; the trial-link step is not attempted for the failed trial.
+- `POST /v1/jobs` network failure during the submission phase is retried once; on a second consecutive failure for the same trial, the CLI exits with code 1.
+- `POST /v1/experiments/{id}/trials/{trial_id}/submit` returning HTTP 5xx (after a successful job submit) is retried up to 3 consecutive attempts; on the third consecutive 5xx, the CLI exits with code 1.
+- `TRIAL_ALREADY_SUBMITTED` (HTTP 409) from the trial-link endpoint is treated as success-on-retry: the CLI calls `GET /v1/experiments/{id}/trials` to retrieve the already-linked `job_id` and continues to the next trial; it does not exit.
 - Evidence collection is triggered for each trial immediately when its job reaches a terminal state.
+- When collect-evidence returns HTTP 200 with `evidence_status = Error`, the CLI records the outcome in the result manifest and completion table and does not exit; the overall exit code is not affected by `evidence_status = Error`.
 - When one trial's job reaches `status = Failed`, the CLI exits with code 5 and reports all other trial outcomes.
 - When `experiment.status = Failed`, the CLI exits with code 6.
-- The experiment result manifest (`<experiment_name>.result.json`) contains: `experiment_id`, `experiment_name`, `benchmark_id` (if present), planned trial count, and per-trial `trial_id`, `job_id`, `backend_id`, `trial_status`, and `solver_outcome` (when available).
+- In `--output-format json` mode, no progress text appears on stdout during the orchestration loop.
+- In `--output-format json` mode, on exit codes 0 and 5, a single JSON result object is emitted to stdout.
+- In `--output-format json` mode, on exit code 4 (timeout) or 1 (signal), the FR-15 JSON error schema is emitted to stdout; the result object is not emitted.
+- In `--output-format json` mode, on exit code 6 (`experiment.status = Failed`), the JSON result object is emitted with `"status": "Failed"`.
+- The experiment result manifest (`<experiment_name>.result.json`) contains: `experiment_id`, `experiment_name`, `benchmark_id` (if present), planned trial count, and per-trial `trial_id`, `problem_id`, `job_id`, `backend_id`, `trial_status`, `solver_outcome` (when available), and `evidence_status`.
 - If the output manifest file already exists from a prior run, the CLI overwrites it without prompting.
 - `experiment status <experiment_id>` for an unknown experiment exits with code 1.
 - `experiment trials <experiment_id>` displays `—` for trials with `job_id = null`.
 - `experiment summary <experiment_id>` for an experiment whose status is not `Completed` exits with code 1.
+- A valid `benchmark submit` manifest (all 8 required fields present and non-empty; `controls`, `independent_variables`, and `dependent_variables` arrays each containing at least one element) produces HTTP 201 and prints `benchmark_id`, `benchmark_name`, and `created_at`; exits with code 0.
+- `benchmark submit` with a manifest missing any required field (`benchmark_id`, `benchmark_name`, `research_question`, `hypothesis`, `null_hypothesis`, `controls`, `independent_variables`, or `dependent_variables`) exits with code 2 and prints all `field_errors`.
+- `benchmark submit` with an empty string value for any required string field exits with code 2 and prints all `field_errors`.
+- `benchmark submit` with an empty array for `controls`, `independent_variables`, or `dependent_variables` exits with code 2 and prints all `field_errors`.
+- `benchmark submit` with `--output-format json` emits the raw SPEC-008 FR-19 response body as a JSON object to stdout on HTTP 201.
 - `benchmark submit` with a duplicate `benchmark_id` exits with code 1.
 - `benchmark summary <benchmark_id>` for an unknown benchmark exits with code 1.
 - After CLI exit (SIGINT or timeout), `experiment status <experiment_id>` returns the preserved experiment state.
 - Under `DAEDALUS_LOG=debug`, a `cli.experiment.trial_submit` event appears for each trial submitted in the loop.
-- Under `DAEDALUS_LOG=debug`, a `cli.experiment.evidence_collect` event appears for each trial when evidence collection is triggered.
+- Under `DAEDALUS_LOG=debug`, a `cli.experiment.evidence_collect` event appears for each trial when evidence collection is triggered; the event includes the `evidence_status` value from the collect-evidence response.
 
 ---
 
