@@ -871,7 +871,7 @@ Defines which component reads and writes each table. This is the authoritative s
 | `scheduler_configs` | CREATE + seed default | Yes (configuration retrieval endpoints) | No | Yes (configuration resolution at job consumption) |
 | `jobs` | CREATE initial row; UPDATE `cancellation_requested` | Yes (status polling; cancellation terminal-state check) | UPDATE `status`, `updated_at`, `completed_at`, `failed_at` | Yes (lifecycle state check; cancellation flag check before solver dispatch) |
 | `decision_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | Phase 1 UPSERT; Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) | Yes (loaded after Phase 1 to pass predicted values to quality evaluation) |
-| `solver_run_records` | No | Yes (`solver_outcome` for status response per SPEC-008 FR-8; `solver_outcome`, `execution_duration_ms`, and `route_plan` for trial evidence collection per ADR-012 Decision 5) | UPSERT | No |
+| `solver_run_records` | No | Yes (`solver_outcome` for status response per SPEC-008 FR-8; `solver_outcome`, `execution_duration_ms`, `route_plan`, and `extension_metadata` for trial evidence collection per ADR-012 Decision 5) | UPSERT | No |
 | `quality_evaluation_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | UPSERT | No |
 | `failure_records` | No | Yes (`failure_class` for status response; SPEC-008 FR-8) | INSERT (once) | No |
 | `report_metadata_records` | No | Yes (report discovery; `file_path` for report file serving) | UPSERT | No |
@@ -1356,6 +1356,7 @@ Two artifact types have distinct idempotency requirements:
 - The API produces one `ExperimentSummary` row per experiment when the experiment reaches `Completed` status; no second `ExperimentSummary` for the same `experiment_id` is produced
 - `experiment_artifacts` rows are never updated after creation
 - Artifact 2 (Trial Results Collection) is realized as a derived query over `experiment_trials`; no separate materialized rows exist for Artifact 2 in this table
+- The application layer enforces `QualityStatsAggregate` uniqueness by performing a pre-INSERT check for an existing `QualityStatsAggregate` row scoped to `(experiment_id, problem_id, backend_id)` within `artifact_payload` before creating a new row; retry and re-execution paths include this check (FR-22.4)
 
 ---
 
@@ -1588,6 +1589,10 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 27. **Upsert idempotency: benchmark_summaries** -- INSERT a `benchmark_summaries` row for `benchmark_id = 'bench-alpha'` with an initial `summary_payload`. Perform a second upsert for the same `benchmark_id` with an updated `summary_payload`. Verify exactly one row exists for `benchmark_id = 'bench-alpha'` with the updated `summary_payload` and that `updated_at` was updated.
 
 28. **Application behavior: benchmark_manifests immutability** -- INSERT a `benchmark_manifests` row for `benchmark_id = 'bench-alpha'`. Verify that application code enforces no UPDATE is issued against this row after creation. Immutability is an application-layer obligation; no PostgreSQL trigger enforces it at MVP scope (FR-19).
+
+29. **Schema: experiments status CHECK** -- Attempt to INSERT an `experiments` row with `status = 'Pending'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation. Verify that an `experiments` row with `status = 'Created'` is accepted.
+
+30. **Schema: ExperimentSummary partial UNIQUE constraint** -- Given an `experiment_artifacts` row for `experiment_id = E` with `artifact_type = 'ExperimentSummary'`, attempt to INSERT a second row with the same `experiment_id` and `artifact_type = 'ExperimentSummary'`. Verify PostgreSQL rejects the insert with a unique constraint violation. Verify that an `experiment_artifacts` row with `artifact_type = 'QualityStatsAggregate'` and the same `experiment_id` is accepted (partial index does not restrict non-ExperimentSummary rows).
 
 ---
 
