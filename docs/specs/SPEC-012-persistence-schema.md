@@ -871,7 +871,7 @@ Defines which component reads and writes each table. This is the authoritative s
 | `scheduler_configs` | CREATE + seed default | Yes (configuration retrieval endpoints) | No | Yes (configuration resolution at job consumption) |
 | `jobs` | CREATE initial row; UPDATE `cancellation_requested` | Yes (status polling; cancellation terminal-state check) | UPDATE `status`, `updated_at`, `completed_at`, `failed_at` | Yes (lifecycle state check; cancellation flag check before solver dispatch) |
 | `decision_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | Phase 1 UPSERT; Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) | Yes (loaded after Phase 1 to pass predicted values to quality evaluation) |
-| `solver_run_records` | No | Yes (`solver_outcome` for status response; SPEC-008 FR-8) | UPSERT | No |
+| `solver_run_records` | No | Yes (`solver_outcome` for status response per SPEC-008 FR-8; `solver_outcome`, `execution_duration_ms`, and `route_plan` for trial evidence collection per ADR-012 Decision 5) | UPSERT | No |
 | `quality_evaluation_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | UPSERT | No |
 | `failure_records` | No | Yes (`failure_class` for status response; SPEC-008 FR-8) | INSERT (once) | No |
 | `report_metadata_records` | No | Yes (report discovery; `file_path` for report file serving) | UPSERT | No |
@@ -888,6 +888,10 @@ Core (the C++ library) does not read from or write to PostgreSQL directly. Core 
 **FR-15.3: Worker does not access experiment tables:**
 
 The Worker does not read or write any experiment table (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`). The Worker executes individual jobs without experiment context (ADR-012 Decision 4). Experiment-to-job linkage flows from `experiment_trials.job_id` → `jobs.job_id`; `jobs` carries no `experiment_id` column.
+
+**FR-15.4: CLI accesses experiment tables through the API:**
+
+The CLI (SPEC-016) does not read from or write to PostgreSQL directly. All CLI access to experiment state (experiment submission, status polling, trial results) flows through SPEC-008 API endpoints. No direct CLI-to-database connections exist.
 
 **Acceptance Criteria:**
 - No component other than the API writes to `routing_problems` or `scheduler_configs`
@@ -915,6 +919,8 @@ Rows must be deleted in reverse FK dependency order:
 6. `jobs` (FKs: `routing_problems`, `scheduler_configs`)
 
 This deletion order satisfies retention-compliant deletion for the six evidence tables described above. It terminates at `jobs`. `routing_problems` is excluded from this order (see FR-16.4).
+
+**Note:** When experiment tables (FR-19–FR-23) are present and contain rows referencing `jobs` via `experiment_trials.job_id`, those `experiment_trials` rows must be deleted before `jobs` rows. See FR-16.5.1 for the cross-domain FK ordering requirement.
 
 **FR-16.2: `scheduler_configs` retention:**
 
@@ -1134,7 +1140,7 @@ The following columns are immutable after creation (SPEC-020 FR-3): `experiment_
 
 **FR-20.4: `manifest_payload` content:**
 
-`manifest_payload` is `jsonb NOT NULL`. It stores the complete immutable experiment configuration per SPEC-020 FR-3, including fields not promoted to scalar columns: the `workload_set` (WorkloadSetDefinition with `generation_config` or `problem_ids`), `solver_set` (ordered list of backend_ids), `repetition_count`, `execution_timeout_ms_per_trial`, `hardware_policy`, and `reproducibility_class`. This column doubles as Artifact 1 (SPEC-020 FR-14): the experiment manifest is persisted and retrievable as structured data from this column.
+`manifest_payload` is `jsonb NOT NULL`. It stores the complete immutable experiment configuration per SPEC-020 FR-3, including fields not promoted to scalar columns: the `workload_set` (WorkloadSetDefinition with `generation_config` or `problem_ids`), `solver_set` (ordered list of backend_ids), `repetition_count`, `execution_timeout_ms_per_trial`, `hardware_policy`, `reproducibility_class`, and `seed_derivation_algorithm_version` (required by SPEC-020 FR-8; without this field a researcher cannot confirm which seed derivation function was used, and replay fidelity cannot be guaranteed). This column doubles as Artifact 1 (SPEC-020 FR-14): the experiment manifest is persisted and retrievable as structured data from this column.
 
 Scalar columns on `experiments` (`workload_mode`, `planned_trial_count`, `scheduler_config_id`) are promoted from the manifest for operational querying without JSONB path operators.
 
@@ -1184,13 +1190,14 @@ Stores one trial record per planned trial execution (SPEC-020 FR-6). Created by 
 | `hindsight_quality` | `double precision` | NULL | | SPEC-020 FR-12; null when no quality data |
 | `quality_comparison_eligible` | `boolean` | NULL | | SPEC-020 FR-12; null before evidence collected |
 | `execution_duration_ms` | `bigint` | NULL | | SPEC-020 FR-12; null when not available |
+| `evidence_payload` | `jsonb` | NULL | | SPEC-020 FR-12; complete per-trial evidence not promoted to scalar columns; null before evidence is collected |
 | `evidence_collected_at` | `timestamptz` | NULL | | Set when evidence collection completes |
 | `created_at` | `timestamptz` | NOT NULL | | Set by API when trial is planned |
 | `updated_at` | `timestamptz` | NOT NULL | | Updated by API on each status transition |
 
 **Primary key:** `trial_id`
 
-**Unique constraint:** `UNIQUE(experiment_id, problem_id, backend_id, repetition_index)` — one trial per (experiment, routing problem instance, backend, repetition).
+**Unique constraint:** `UNIQUE(experiment_id, problem_config_index, backend_id, repetition_index)` — one trial per (experiment, workload position, backend, repetition).
 
 **Foreign keys:**
 - `experiment_id` REFERENCES `experiments(experiment_id)`
@@ -1211,17 +1218,35 @@ CHECK (trial_status IN ('Pending', 'Submitted', 'Executing', 'Completed', 'Sched
 CHECK (evidence_status IN ('Collected', 'Missing', 'Error'))
 ```
 
+Expected `evidence_status` by terminal `trial_status`:
+
+| `trial_status` | Expected `evidence_status` | Notes |
+|---|---|---|
+| `SchedulerRejected` | null | No evidence to collect; trial never submitted to the Evidence Log |
+| `HarnessError` (submission failure) | null | Trial submission failed before a job was created in the Evidence Log |
+| `HarnessError` (evidence collection failure) | `'Error'` | Job completed but evidence retrieval from the Evidence Log failed |
+| `Completed` | `'Collected'` | Evidence retrieved successfully from the Evidence Log |
+| `Completed` | `'Missing'` | Job completed but the Evidence Log record was absent at collection time |
+| `Completed` | `'Error'` | Evidence collection encountered an infrastructure error |
+
 **FR-21.4: Worker experiment-unawareness:**
 
 `experiment_trials` is not read or written by the Worker. The Worker executes jobs without knowledge of the enclosing experiment. The experiment-to-job linkage flows from `experiment_trials.job_id` → `jobs.job_id`, not from `jobs` to any experiment table. No `experiment_id` column is added to the `jobs` table (ADR-012 Decision 4 and Constraint 10).
 
 **FR-21.5: UNIQUE constraint and instance-sharing invariant:**
 
-`UNIQUE(experiment_id, problem_id, backend_id, repetition_index)` enforces the instance-sharing invariant from SPEC-020 FR-4:
-- In **Generated Mode**: for each `(problem_config_index, repetition_index)`, the harness generates one routing problem with one `problem_id` shared across all backends. All backends submit trials against the same `problem_id` for that repetition → distinct `backend_id` values differentiate the rows.
-- In **Fixed Mode**: all `repetition_count` repetitions for a `(problem_id, backend_id)` pairing reuse the same `problem_id` → `repetition_index` differentiates them.
+`UNIQUE(experiment_id, problem_config_index, backend_id, repetition_index)` enforces the instance-sharing invariant from SPEC-020 FR-4.
 
-The UNIQUE constraint enforces that no two trials in the same experiment can target the same routing problem instance with the same backend in the same repetition, which is the correctness requirement from SPEC-007 FR-7 (cross-solver quality comparisons must be within-problem comparisons).
+`problem_config_index` — not `problem_id` — is the key column because:
+- `problem_config_index` is the position in the workload set (0-based index into `problem_ids` in Fixed Mode, or into the generated instance list in Generated Mode). It is distinct by construction regardless of whether multiple positions reference the same `problem_id`.
+- `problem_id` is the routing problem's identity. In Fixed Mode, the `problem_ids` list may validly contain duplicate `problem_id` values at different positions (e.g., to test the same routing problem under different repetition patterns within one experiment). Using `problem_id` in the constraint would cause a spurious conflict for two trials at different workload positions that both reference the same `problem_id` with the same `backend_id` and `repetition_index`.
+- Using `problem_config_index` ensures the constraint prevents duplicate trial records for the same workload position, backend, and repetition — the semantically correct identity — without incorrectly blocking valid Fixed Mode workloads.
+
+Constraint behavior by mode:
+- In **Generated Mode**: for each `(problem_config_index, repetition_index)`, the harness generates one routing problem with one `problem_id` shared across all backends. All backends submit trials for the same workload position and repetition → distinct `backend_id` values differentiate the rows.
+- In **Fixed Mode**: all `repetition_count` repetitions for a `(problem_config_index, backend_id)` pairing are differentiated by `repetition_index`. Duplicate `problem_id` values at different `problem_config_index` positions are permitted and correctly handled.
+
+The constraint satisfies the correctness requirement from SPEC-007 FR-7: cross-solver quality comparisons must be within-problem comparisons. In Generated Mode, the shared `problem_id` per `(problem_config_index, repetition_index)` pairing — enforced at the application layer when problem instances are created — guarantees this. The UNIQUE constraint prevents accidental duplication of that invariant-respecting structure.
 
 **FR-21.6: `job_id` FK and retention ordering:**
 
@@ -1231,8 +1256,37 @@ The UNIQUE constraint enforces that no two trials in the same experiment can tar
 
 `trial_seed` is a `uint64` value stored as `bigint` using the two's complement convention from FR-4.3.
 
+**FR-21.8: Per-trial evidence: scalar columns vs `evidence_payload`:**
+
+SPEC-020 FR-12 defines the complete per-trial evidence field set. SPEC-012 realizes this in two tiers:
+
+**Scalar columns** (promoted for direct querying and statistical aggregation):
+
+| Column | SPEC-020 FR-12 field |
+|---|---|
+| `solver_outcome` | SolverOutcome |
+| `solution_present` | solution_present |
+| `time_window_feasible` | time_window_feasible |
+| `hindsight_quality` | total_route_distance_km / hindsight_quality |
+| `quality_comparison_eligible` | quality_comparison_eligible |
+| `execution_duration_ms` | execution_duration_ms |
+
+**`evidence_payload` JSONB** (remaining SPEC-020 FR-12 fields not promoted to scalar columns):
+
+| JSON key | SPEC-020 FR-12 field | Notes |
+|---|---|---|
+| `max_route_distance_km` | QualityMetrics.max_route_distance_km | Null when simulation not performed |
+| `routes_used` | QualityMetrics.routes_used | Null when simulation not performed |
+| `time_window_violation_count` | QualityMetrics.time_window_violation_count | Null when simulation not performed |
+| `hardware_queue_wait_ms` | extension_metadata.hardware_queue_wait_ms | Null for non-quantum backends |
+| `hardware_calibration_id` | extension_metadata.hardware_calibration_id | Null for non-quantum backends |
+| `hardware_estimated_cost` | extension_metadata.hardware_estimated_cost | Null for non-quantum backends |
+| `hardware_provider_backend` | extension_metadata.hardware_provider_backend | Null for non-quantum backends |
+
+`evidence_payload` is null before evidence collection. After evidence collection, it contains the structured JSONB object with the fields above (individual fields null when their source data is unavailable). A complete SPEC-020 FR-14 Artifact 2 record for a trial is the union of the scalar evidence columns and the `evidence_payload` fields for that `trial_id`.
+
 **Acceptance Criteria:**
-- `UNIQUE(experiment_id, problem_id, backend_id, repetition_index)` enforces one trial per (experiment, routing problem instance, backend, repetition)
+- `UNIQUE(experiment_id, problem_config_index, backend_id, repetition_index)` enforces one trial per (experiment, workload position, backend, repetition); `problem_config_index` is used instead of `problem_id` to correctly handle Fixed Mode workloads with duplicate `problem_id` values at different positions (FR-21.5)
 - `trial_status` is constrained to the six values in FR-21.2; `'Failed'` is not a valid `trial_status`
 - `job_id` is nullable; null for `Pending` trials and `SchedulerRejected` trials
 - No Worker reads or writes to this table
@@ -1272,11 +1326,25 @@ CHECK (artifact_type IN ('QualityStatsAggregate', 'ExperimentSummary'))
 
 `ExperimentSummary`: full experiment summary per SPEC-020 FR-14 Artifact 3. One row per experiment; produced when the experiment reaches `Completed` status. The `artifact_payload` carries the complete experiment summary: trial results collection, per-(problem, solver) aggregate evidence, per-experiment aggregate evidence, and cross-solver comparison.
 
+**Schema evolution:** The `artifact_type` CHECK constraint is an enumerated text constraint. Any artifact type introduced by a future SPEC-020 revision requires a SPEC-012 amendment to extend this constraint. New artifact types must not be written to `experiment_artifacts` without a corresponding SPEC-012 revision that defines the new type's `artifact_payload` schema and idempotency behavior.
+
 **FR-22.3: Artifact 2 (Trial Results Collection) realization decision:**
 
-SPEC-020 FR-14 Artifact 2 is "one TrialResult record per trial containing all per-trial evidence fields." SPEC-012 realizes Artifact 2 as a derived query over `experiment_trials` filtered to terminal-status trials, not as separate rows in `experiment_artifacts`. Materializing Artifact 2 as separate rows would duplicate all evidence fields already stored in `experiment_trials`. The queryability requirement ("queryable at any point during experiment execution") is satisfied by querying `experiment_trials WHERE trial_status IN ('Completed', 'SchedulerRejected', 'HarnessError')`.
+SPEC-020 FR-14 Artifact 2 is "one TrialResult record per trial containing all per-trial evidence fields defined in FR-12." SPEC-012 realizes Artifact 2 as a derived query over `experiment_trials` filtered to terminal-status trials, not as separate rows in `experiment_artifacts`. A complete Artifact 2 record for a trial is the union of:
+- the scalar evidence columns on `experiment_trials` (`solver_outcome`, `solution_present`, `time_window_feasible`, `hindsight_quality`, `quality_comparison_eligible`, `execution_duration_ms`), and
+- the `evidence_payload` JSONB column, which stores the remaining SPEC-020 FR-12 fields not promoted to scalar columns (see FR-21.8).
+
+The queryability requirement ("queryable at any point during experiment execution") is satisfied by querying `experiment_trials WHERE trial_status IN ('Completed', 'SchedulerRejected', 'HarnessError')` selecting both scalar columns and `evidence_payload`. Materializing Artifact 2 as separate rows in `experiment_artifacts` would duplicate data already stored in `experiment_trials`.
 
 This is a SPEC-012 physical realization decision under the FR-1 authority boundary. SPEC-020 FR-14 remains authoritative for Artifact 2's semantic content; SPEC-012 owns the decision not to materialize it as separate rows.
+
+**FR-22.4: Idempotency constraints:**
+
+Two artifact types have distinct idempotency requirements:
+
+**ExperimentSummary** — at most one `ExperimentSummary` row may exist per experiment. This is enforced by a partial UNIQUE constraint on `(experiment_id)` filtered to `artifact_type = 'ExperimentSummary'`. A second `ExperimentSummary` INSERT for the same `experiment_id` fails at the schema level.
+
+**QualityStatsAggregate** — one row exists per `(experiment_id, problem_id, backend_id)` aggregate scope. The aggregate scope key is embedded in `artifact_payload`; no schema-level UNIQUE constraint covers this scope. The application layer must enforce idempotency by verifying no existing `QualityStatsAggregate` row exists for the `(experiment_id, problem_id, backend_id)` scope before INSERT. Retry and re-execution paths must include this check rather than blindly inserting.
 
 **Immutability:** `experiment_artifacts` rows are written once and never updated.
 
@@ -1314,6 +1382,8 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 **FR-23.3: Upsert semantics:**
 
 `benchmark_summaries` uses INSERT ON CONFLICT (`benchmark_id`) DO UPDATE semantics: the first experiment completion under a `benchmark_id` creates the row; each subsequent completion replaces `summary_payload` and `updated_at` with the updated summary incorporating the newly completed experiment. This is the only experiment table that uses upsert rather than CREATE-once semantics.
+
+**Recompute invariant:** The `summary_payload` produced on each upsert must be computed from all experiments under the `benchmark_id` that have reached `Completed` status at the time of computation, not only from the newly completed experiment. An append-only implementation risks losing contributions from experiments that completed concurrently. The application must re-derive the full benchmark summary from all completed member experiments on each upsert.
 
 **Acceptance Criteria:**
 - One row per `benchmark_id`; upsert replaces `summary_payload` and `updated_at` on each member experiment completion
@@ -1503,6 +1573,18 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 21. **Integration: Schedule stage failure evidence** -- Execute a job that fails at the Schedule stage (NoEligibleSolver). Verify `jobs.status = Failed`, `decision_records` has one row (Scheduler ran), `failure_records` has one row with `failure_stage = Schedule`, and `solver_run_records` has no row for this `job_id`.
 
 22. **Observability query: incomplete Phase 2 writes** -- Given a test scenario where Phase 2 UPDATE did not complete, verify that the query `SELECT d.job_id FROM decision_records d JOIN solver_run_records s ON d.job_id = s.job_id WHERE d.actual_outcome IS NULL` returns the `job_id` of the affected job.
+
+23. **Schema: experiment_trials FK enforcement** -- Attempt to INSERT an `experiment_trials` row with an `experiment_id` that does not exist in `experiments`. Verify PostgreSQL rejects the insert with a FK violation error.
+
+24. **Schema: experiment_trials UNIQUE constraint** -- Given an `experiment_trials` row for `(experiment_id = E, problem_config_index = 0, backend_id = 'classical-vrp', repetition_index = 0)`, attempt to INSERT a second row with the same `(experiment_id, problem_config_index, backend_id, repetition_index)` values. Verify PostgreSQL rejects the insert with a unique constraint violation. Verify that a row with `problem_config_index = 1` and all other values identical is accepted (different workload position).
+
+25. **Schema: trial_status CHECK rejects Failed** -- Attempt to INSERT an `experiment_trials` row with `trial_status = 'Failed'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation.
+
+26. **Schema: experiments workload_mode CHECK** -- Attempt to INSERT an `experiments` row with `workload_mode = 'Random'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation.
+
+27. **Upsert idempotency: benchmark_summaries** -- INSERT a `benchmark_summaries` row for `benchmark_id = 'bench-alpha'` with an initial `summary_payload`. Perform a second upsert for the same `benchmark_id` with an updated `summary_payload`. Verify exactly one row exists for `benchmark_id = 'bench-alpha'` with the updated `summary_payload` and that `updated_at` was updated.
+
+28. **Application behavior: benchmark_manifests immutability** -- INSERT a `benchmark_manifests` row for `benchmark_id = 'bench-alpha'`. Verify that application code enforces no UPDATE is issued against this row after creation. Immutability is an application-layer obligation; no PostgreSQL trigger enforces it at MVP scope (FR-19).
 
 ---
 
