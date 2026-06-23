@@ -867,7 +867,7 @@ Defines which component reads and writes each table. This is the authoritative s
 
 | Table | API Writes | API Reads | Worker Writes | Worker Reads |
 |---|---|---|---|---|
-| `routing_problems` | CREATE (once at submission) | No | No | Yes (problem load at job consumption) |
+| `routing_problems` | CREATE (once at submission) | Yes (Fixed Mode workload set validation: pre-creation check that all `problem_ids` exist in `routing_problems` before trial records are created per SPEC-020 FR-4) | No | Yes (problem load at job consumption) |
 | `scheduler_configs` | CREATE + seed default | Yes (configuration retrieval endpoints) | No | Yes (configuration resolution at job consumption) |
 | `jobs` | CREATE initial row; UPDATE `cancellation_requested` | Yes (status polling; cancellation terminal-state check) | UPDATE `status`, `updated_at`, `completed_at`, `failed_at` | Yes (lifecycle state check; cancellation flag check before solver dispatch) |
 | `decision_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | Phase 1 UPSERT; Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) | Yes (loaded after Phase 1 to pass predicted values to quality evaluation) |
@@ -1312,6 +1312,9 @@ Stores computed artifacts for an experiment: per-(problem, solver) quality and r
 | `created_at` | `timestamptz` | NOT NULL | | Set by API at artifact creation |
 
 **Primary key:** `artifact_id`
+
+**Unique constraints:**
+- `UNIQUE (experiment_id) WHERE artifact_type = 'ExperimentSummary'` — at most one ExperimentSummary artifact per experiment (partial index; enforces the one-per-experiment invariant at the schema level)
 
 **Foreign keys:**
 - `experiment_id` REFERENCES `experiments(experiment_id)`
@@ -1773,22 +1776,22 @@ No specific latency targets are defined for persistence operations at this stage
 - [x] Security considerations address `execution_seed`, `violated_stop_ids`, raw problem data, `file_path`, and `extension_metadata`
 - [x] Performance considerations are documented
 - [x] Documentation updates are identified
-- [ ] OQ-1 (default config UUID stability) classified as Implementation Planning Decision, blocking for implementation
-- [ ] OQ-2 (schema migration tooling) classified as ADR Candidate, not blocking for Draft
-- [ ] OQ-3 (Phase 2 incomplete write detection) classified as Implementation Planning Decision, not blocking
-- [ ] OQ-4 (capability profile schema contingency) classified as contingent on SPEC-003 OQ-2, not blocking
-- [ ] `benchmark_manifests` table is fully defined including text PK rationale and no-FK-to-experiments design (FR-19)
-- [ ] `experiments` table is fully defined including `manifest_payload`, ExperimentStatus lifecycle, and mutable/immutable column boundary (FR-20)
-- [ ] `experiment_trials` table is fully defined including instance-sharing UNIQUE constraint, Worker experiment-unawareness, and cross-domain FK ordering note (FR-21)
-- [ ] `experiment_artifacts` table is fully defined including Artifact 2 realization decision (FR-22)
-- [ ] `benchmark_summaries` table is fully defined including upsert semantics and no-FK design (FR-23)
-- [ ] FR-15 updated: API Reads = Yes for `decision_records` and `quality_evaluation_records`; all five experiment tables included in ownership map with correct write/read ownership
-- [ ] FR-15.3 documents Worker experiment-table exclusion
-- [ ] FR-16.5 defines experiment table retention (indefinite at MVP; no deletion mechanism) and deletion order for future use
-- [ ] FR-16.5.1 documents cross-domain FK ordering consequence for future evidence retention implementation
-- [ ] FR-14.2 creation order updated to include all thirteen tables
-- [ ] Constraints 9 and 10 document experiment table write authority and jobs table no-experiment-id rule
-- [ ] SPEC-020 OQ-1 resolution documented in Documentation Updates Required
+- [x] OQ-1 (default config UUID stability) classified as Implementation Planning Decision, blocking for implementation
+- [x] OQ-2 (schema migration tooling) classified as ADR Candidate, not blocking for Draft
+- [x] OQ-3 (Phase 2 incomplete write detection) classified as Implementation Planning Decision, not blocking
+- [x] OQ-4 (capability profile schema contingency) classified as contingent on SPEC-003 OQ-2, not blocking
+- [x] `benchmark_manifests` table is fully defined including text PK rationale and no-FK-to-experiments design (FR-19)
+- [x] `experiments` table is fully defined including `manifest_payload`, ExperimentStatus lifecycle, and mutable/immutable column boundary (FR-20)
+- [x] `experiment_trials` table is fully defined including instance-sharing UNIQUE constraint, Worker experiment-unawareness, and cross-domain FK ordering note (FR-21)
+- [x] `experiment_artifacts` table is fully defined including Artifact 2 realization decision (FR-22)
+- [x] `benchmark_summaries` table is fully defined including upsert semantics and no-FK design (FR-23)
+- [x] FR-15 updated: API Reads = Yes for `decision_records` and `quality_evaluation_records`; all five experiment tables included in ownership map with correct write/read ownership
+- [x] FR-15.3 documents Worker experiment-table exclusion
+- [x] FR-16.5 defines experiment table retention (indefinite at MVP; no deletion mechanism) and deletion order for future use
+- [x] FR-16.5.1 documents cross-domain FK ordering consequence for future evidence retention implementation
+- [x] FR-14.2 creation order updated to include all thirteen tables
+- [x] Constraints 9 and 10 document experiment table write authority and jobs table no-experiment-id rule
+- [x] SPEC-020 OQ-1 resolution documented in Documentation Updates Required
 
 ---
 
