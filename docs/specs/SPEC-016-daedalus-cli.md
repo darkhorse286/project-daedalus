@@ -12,15 +12,15 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-20 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified)
+**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded.)
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009
+**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-012
 
-**Related Specs:** SPEC-001, SPEC-002, SPEC-003, SPEC-005, SPEC-008, SPEC-009
+**Related Specs:** SPEC-001, SPEC-002, SPEC-003, SPEC-005, SPEC-008, SPEC-009, SPEC-012, SPEC-020
 
 ---
 
@@ -69,10 +69,12 @@ The CLI is the primary interface for developers, automation, and benchmark scrip
 | Synthetic workload generation | SPEC-002 |
 | Job execution, solver selection, quality evaluation | SPEC-005, Worker |
 | Report generation and content | SPEC-009 |
+| Experiment and benchmark lifecycle: state, trial records, artifact production | SPEC-008, SPEC-012 |
+| Experiment execution model, trial set, and artifact requirements | SPEC-020 |
 | Wrapping SPEC-008 API calls for developer and automation use | **SPEC-016 (this spec)** |
 | Hosting the SPEC-002 workload generator (OQ-2 resolution) | **SPEC-016 (this spec)** |
 | Structured output formats for human and machine consumers | **SPEC-016 (this spec)** |
-| Experiment orchestration (multi-job submission and result collection) | **SPEC-016 (this spec)** |
+| Experiment orchestration executor: trial submission loop, polling, evidence collection trigger | **SPEC-016 (this spec)** (ADR-012 Decision 1) |
 
 The CLI does not invoke solver backends directly, does not run workers, and does not read from PostgreSQL. All system interaction is through the Daedalus API.
 
@@ -90,7 +92,8 @@ The CLI does not invoke solver backends directly, does not run workers, and does
 | `job` | Job lifecycle management: status, polling, cancellation |
 | `report` | Report discovery and retrieval |
 | `config` | Scheduler configuration management |
-| `experiment` | Multi-job experiment orchestration |
+| `experiment` | Experiment orchestration, state retrieval, and summary access |
+| `benchmark` | Benchmark manifest submission and summary retrieval |
 
 **Full command inventory:**
 
@@ -108,7 +111,12 @@ The CLI does not invoke solver backends directly, does not run workers, and does
 | `daedalus config list` | List all stored scheduler configurations |
 | `daedalus config get <config_id>` | Retrieve a specific scheduler configuration |
 | `daedalus config default` | Print the default scheduler configuration |
-| `daedalus experiment run <file>` | Run a named experiment: submit a problem with multiple configurations and collect results |
+| `daedalus experiment run <manifest>` | Submit a SPEC-020 experiment manifest and drive the full trial orchestration loop |
+| `daedalus experiment status <experiment_id>` | Print the current status and trial counts for an experiment |
+| `daedalus experiment trials <experiment_id>` | List per-trial status for an experiment |
+| `daedalus experiment summary <experiment_id>` | Retrieve the experiment summary artifact |
+| `daedalus benchmark submit <file>` | Submit a benchmark manifest to create a named benchmark container |
+| `daedalus benchmark summary <benchmark_id>` | Retrieve the benchmark summary artifact |
 
 **Global flags** (available on all commands):
 
@@ -513,70 +521,102 @@ Prints the resolved CLI configuration (FR-2) and the API's default scheduler con
 
 ## FR-12: Experiment Run Command
 
-**Description:** `daedalus experiment run <experiment_file>` submits a routing problem (or generates one) with multiple scheduler configurations and collects results for all submitted jobs. This command supports demonstrating the project thesis by comparing scheduler decisions across objective modes.
+**Description:** `daedalus experiment run <manifest>` is the primary experiment orchestration entry point. It reads a SPEC-020-conforming experiment manifest from `<manifest>`, submits it to `POST /v1/experiments` (SPEC-008 FR-18), and executes the full trial orchestration loop (FR-18) until all trials reach terminal state or the timeout expires.
 
-**Experiment file format:**
+All experiment state is durably persisted by the API (ADR-012 Decision 2). The CLI's responsibility is to drive the orchestration loop and surface progress and results. The API is the state authority; the CLI is the executor.
+
+**Manifest format (SPEC-020 / SPEC-008 FR-18):**
+
+| Field | Required | Description |
+|---|---|---|
+| `experiment_name` | Yes | Human-readable name for this experiment |
+| `benchmark_id` | No | Associates the experiment with an existing benchmark (SPEC-008 FR-19) |
+| `workload_set` | Yes | Fixed or Generated workload set definition (see Workload Set Modes below) |
+| `solver_set` | Yes | Ordered list of `backend_id` strings (SPEC-020 FR-5) |
+| `repetition_count` | Yes | Number of repetitions per (problem, solver) combination; must be ≥ 1 |
+| `execution_timeout_ms_per_trial` | Yes | Per-trial job execution timeout in milliseconds |
+| `experiment_seed` | No | Reproducibility seed (uint64 stored as bigint per SPEC-012 FR-4.3); omit to let the API assign |
+| `scheduler_config_id` | No | Scheduler configuration applied to all trial jobs; absent uses the API default |
+| `reproducibility_class` | Yes | `fully_reproducible`, `partially_reproducible`, or `non_reproducible` (SPEC-020 FR-10) |
+
+**Workload set modes:**
+
+- **Fixed mode** (`"mode": "fixed"`): Specifies an explicit list of `problem_ids`. Each `problem_id` must reference a routing problem already persisted in the system. For each `(problem_config_index, repetition_index)`, all solvers in `solver_set` share the same `problem_id` (ADR-012 Decision 3 instance-sharing invariant; required for valid cross-solver SPEC-007 FR-7 `hindsight_quality` comparisons). This is the only workload set mode supported at MVP scope.
+- **Generated mode** (`"mode": "generated"`): Deferred pending resolution of SPEC-008 OQ-7 (the routing problem creation mechanism for generated workload sets). The CLI rejects manifests specifying `"mode": "generated"` with exit code 1 at MVP scope. See OQ-5.
+
+**Fixed mode manifest example:**
 
 ```json
 {
-  "name": "capacity-only-baseline",
-  "description": "Compare CheapestValid, Balanced, and BestQuality on a small capacity-only problem.",
-  "problem": {
-    "source": "generate",
-    "generation_config": "./configs/small-capacity-only.json"
+  "experiment_name": "capacity-only-solver-comparison-2026",
+  "benchmark_id": "capacity-comparison-2026",
+  "workload_set": {
+    "mode": "fixed",
+    "problem_ids": ["e5f6g7h8-...", "a1b2c3d4-..."]
   },
-  "scheduler_configs": [
-    { "config_id": "c1d2e3f4-..." },
-    { "config_id": "d2e3f4g5-..." },
-    {
-      "inline": {
-        "objective_mode": "BestQuality"
-      }
-    }
-  ],
-  "wait": true,
-  "wait_timeout_seconds": 600
+  "solver_set": ["backend-vrp-greedy-v1", "backend-vrp-metaheuristic-v1"],
+  "repetition_count": 3,
+  "execution_timeout_ms_per_trial": 30000,
+  "experiment_seed": 9221134881191785473,
+  "scheduler_config_id": "c1d2e3f4-...",
+  "reproducibility_class": "fully_reproducible"
 }
 ```
 
-**Problem source options:**
-- `"source": "generate"` with `generation_config`: generate a problem from a SPEC-002 config file.
-- `"source": "file"` with `"path": "./problem.json"`: read a pre-authored problem file.
+**Flags:**
 
-**Scheduler config resolution:**
-- `config_id`: references an existing stored configuration.
-- `inline`: creates a new scheduler configuration from the inline definition before submission.
+| Flag | Default | Description |
+|---|---|---|
+| `--timeout <seconds>` | 3600 | Wall-clock seconds before CLI exits. The experiment continues in the API after CLI exit. |
+| `--poll-interval <seconds>` | 2 | Job status polling interval in seconds. |
+| `--output-manifest <file>` | `<experiment_name>.result.json` | Write the result manifest to this file on completion. |
 
 **Normal behavior:**
-1. Resolve the routing problem (generate or load from file).
-2. For each scheduler config entry:
-   a. If `inline`: create the configuration via `POST /v1/scheduler-configs`; capture the new `config_id`.
-   b. Submit the routing problem with the resolved `config_id` via `POST /v1/jobs`.
-   c. Capture the `job_id`.
-3. If `wait: true`: wait for all submitted jobs to reach a terminal state (polling FR-7 behavior, bounded by `wait_timeout_seconds`).
-4. Print the experiment summary table.
-5. Write the experiment result to a JSON manifest file (default: `<experiment_name>.result.json`). If this file already exists, it is overwritten without prompt. To preserve prior results, callers must rename or relocate the existing file before re-running the experiment.
+1. Read and parse the experiment manifest from `<manifest>`.
+2. Reject `"mode": "generated"` manifests with exit code 1 before any API call.
+3. Submit to `POST /v1/experiments`; capture the returned `experiment_id`.
+4. Print the experiment ID and planned trial count.
+5. Execute the trial orchestration loop (FR-18): submit all trials, poll for terminal state, collect evidence per trial.
+6. After all trials reach terminal state: print the experiment summary table.
+7. Write the result manifest to the output manifest path (default: `<experiment_name>.result.json`). Existing files are overwritten without prompt.
 
-**Text output format (after all jobs complete):**
+**Text output format:**
 ```
-Experiment: capacity-only-baseline
-  problem_id: e5f6g7h8-...
-  generated:  2026-06-20T10:00:00Z
+Experiment submitted.
+  experiment_id:  7f8a9b0c-...
+  experiment_name: capacity-only-solver-comparison-2026
+  planned_trials:  12
 
-CONFIG ID         OBJECTIVE MODE  JOB ID          STATUS     SOLVER OUTCOME  REPORT
-c1d2e3f4-...      CheapestValid   a1b2c3d4-...    Completed  Succeeded       available
-d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       available
-(inline created)  BestQuality     c3d4e5f6-...    Completed  Timeout         available
+Submitting trials...
+  [1/12] trial a1b2c3d4-... submitted → job f1e2d3c4-...
+  ...
+
+Collecting results...
+  [1/12] job f1e2d3c4-... → Completed (Succeeded) — evidence collected
+  ...
+
+Experiment complete.
+  experiment_id: 7f8a9b0c-...
+  status:        Completed
+
+TRIAL  PROBLEM ID      BACKEND                       JOB ID          TRIAL STATUS  OUTCOME
+1      e5f6g7h8-...    backend-vrp-greedy-v1         a1b2c3d4-...    Completed     Succeeded
+2      e5f6g7h8-...    backend-vrp-metaheuristic-v1  b2c3d4e5-...    Completed     Succeeded
+...
 ```
+
+**Long-running session behavior:** `experiment run` is a scoped exception to the CLI's single-invocation posture (see Assumptions). For large experiments, the command may run for minutes to hours. The `--timeout` flag provides an upper bound. If the CLI exits before completion (timeout or signal), the experiment state is preserved by the API. See FR-21.
 
 **Acceptance Criteria:**
-- The same routing problem document is submitted for all scheduler configurations in the experiment (same `problem_id` is not shared across jobs per SPEC-001, but all jobs are submitted with identical problem content).
-- Inline scheduler configuration entries are created before the first job is submitted.
-- Job submissions proceed even if one configuration entry fails validation; the failed entry is noted in the result.
-- If `wait: true` and one or more jobs time out, the summary notes the timed-out jobs and exits with code 4.
-- The experiment result JSON manifest captures all `job_id` values, all `problem_id` values, all `config_id` values, all solver outcomes, and report availability.
-- An experiment with no scheduler configuration entries is rejected with a usage error before any API call.
-- Inline scheduler configuration entries (`inline` key) create new persistent configurations in the system via `POST /v1/scheduler-configs` on each experiment invocation. Duplicate configurations are not detected or prevented (SPEC-008 FR-16: `POST /v1/scheduler-configs` is not idempotent). Accumulation of inline configurations across repeated experiment runs is an accepted MVP limitation. Callers who wish to avoid accumulation should pre-create configurations and reference them by `config_id`.
+- A valid Fixed mode manifest produces an experiment submission and enters the orchestration loop (FR-18).
+- A manifest specifying `"mode": "generated"` exits with code 1 before any API call.
+- A manifest rejected by the API (HTTP 400) prints all `field_errors` and exits with code 2.
+- A manifest with an empty `solver_set` is rejected with code 2.
+- A manifest with `repetition_count` less than 1 is rejected with code 2.
+- When all trials complete: the result manifest captures `experiment_id`, `experiment_name`, `benchmark_id` (if present), planned trial count, and per-trial `trial_id`, `job_id`, `backend_id`, `trial_status`, and `solver_outcome` (when available).
+- When `experiment.status = Failed`: the CLI exits with code 6.
+- When any trial's job reaches `status = Failed`: the CLI exits with code 5 (unless experiment also fails, in which case code 6 takes precedence).
+- If the output manifest file already exists, it is overwritten without prompt.
 
 ---
 
@@ -628,10 +668,11 @@ d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       ava
 |---|---|---|
 | 0 | `SUCCESS` | Command completed successfully. |
 | 1 | `ERROR` | General error: unknown command, resource not found, API unreachable, configuration error, unexpected failure. |
-| 2 | `VALIDATION_ERROR` | The submitted routing problem or configuration was rejected by the API or local pre-validation. |
+| 2 | `VALIDATION_ERROR` | The submitted routing problem, experiment manifest, or configuration was rejected by the API or local pre-validation. |
 | 3 | `GENERATION_FAILURE` | The workload generator failed (capacity infeasibility, achievability violation, invalid generation config). |
-| 4 | `WAIT_TIMEOUT` | The `job wait` or `problem run --wait` polling timeout expired before the job reached a terminal state. |
-| 5 | `JOB_FAILED` | A waited job reached the terminal state `Failed` (Worker lifecycle failure, not a solver failure). |
+| 4 | `WAIT_TIMEOUT` | The `job wait`, `problem run --wait`, or `experiment run --timeout` elapsed before the job or experiment reached a terminal state. |
+| 5 | `JOB_FAILED` | A waited job reached the terminal state `Failed` (Worker lifecycle failure, not a solver failure); or one or more trial jobs in an experiment reached `status = Failed`. |
+| 6 | `EXPERIMENT_FAILED` | The experiment itself transitioned to `status = Failed` (experiment-level infrastructure failure preventing completion). Distinct from individual trial job failures (code 5). |
 
 **Solver-level outcomes for `Completed` jobs** do not cause CLI failure. SPEC-008 FR-9 defines the complete set of `solver_outcome` values that a `Completed` job may carry: `Succeeded`, `Infeasible`, `Timeout`, `Cancelled`, `Failed`, `ContractViolation`. All six produce exit code 0 when a waited job reaches `status = Completed`. The CLI distinguishes solver-level outcomes from Worker lifecycle outcomes:
 
@@ -650,8 +691,10 @@ d2e3f4g5-...      Balanced        b2c3d4e5-...    Completed  Succeeded       ava
 **Acceptance Criteria:**
 - Every command path exits with exactly one of the defined codes.
 - Exit code 0 is used only when the command's primary operation succeeded.
-- Exit code 5 is used when a waited job reaches `status = Failed` (Worker lifecycle failure). It is not used for any `solver_outcome` value on a `Completed` job.
-- Exit code 2 is used for both local validation errors (bad generation config) and API validation errors (HTTP 400 from SPEC-008).
+- Exit code 5 is used when a waited job reaches `status = Failed` (Worker lifecycle failure), or when one or more trial jobs in an `experiment run` reach `status = Failed`. It is not used for any `solver_outcome` value on a `Completed` job.
+- Exit code 6 is used when `experiment.status = Failed` and takes precedence over exit code 5 when both conditions are true.
+- Exit code 2 is used for both local validation errors (bad generation config, invalid manifest) and API validation errors (HTTP 400 from SPEC-008).
+- Exit code 4 is used when `experiment run --timeout` expires before the experiment reaches terminal state.
 - Exit codes are consistent across `text` and `json` output formats.
 - Exit code 0 is produced for a waited job with `solver_outcome = ContractViolation` (a `Completed` job with an invalid solver response).
 - Exit code 0 is produced for a waited job with `solver_outcome = Failed` (a `Completed` job with a solver execution failure).
@@ -718,6 +761,8 @@ Error: validation failed (exit 2)
 
 **Description:** The CLI is a developer tool with no OpenTelemetry instrumentation obligation. It does not emit OTel spans. It does not contribute to the system's distributed trace.
 
+For experiment endpoint interactions (manifest submission, trial submission, evidence collection trigger), W3C TraceContext propagation is handled at the API layer per ADR-011 and ADR-012. The CLI does not inject `traceparent` headers and does not generate trace context. The API creates trace roots for all experiment endpoint calls. `request_id` values from SPEC-008 FR-14 error responses are propagated through CLI output per FR-13 and FR-15, enabling post-hoc correlation with API traces.
+
 The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=debug` is set in the environment. These events are diagnostic aids for CLI development and troubleshooting.
 
 **Log events:**
@@ -730,16 +775,215 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 | `cli.generation.start` | Generator invoked | `scenario_type`, `seed`, `stop_count` |
 | `cli.generation.complete` | Generator returned | `difficulty_tier`, `time_windowed_stop_count`, `total_demand` |
 | `cli.poll.tick` | Status poll completed | `job_id`, `status`, `elapsed_seconds` |
+| `cli.experiment.submit` | Experiment manifest submitted | `experiment_id`, `experiment_name`, `planned_trial_count` |
+| `cli.experiment.trial_submit` | Trial linked to job | `experiment_id`, `trial_id`, `job_id`, `problem_config_index`, `repetition_index`, `solver_set_index` |
+| `cli.experiment.trial_complete` | Trial job reaches terminal state | `experiment_id`, `trial_id`, `job_id`, `job_status`, `solver_outcome` |
+| `cli.experiment.evidence_collect` | Evidence collection triggered | `experiment_id`, `trial_id`, `job_id`, `http_status` |
+| `cli.experiment.complete` | Experiment reaches terminal status | `experiment_id`, `experiment_status`, `total_trials`, `elapsed_seconds` |
 | `cli.command.exit` | Command exits | `exit_code`, `duration_ms` |
 
-**Log safety:** Log events must not include routing problem coordinate arrays, full stop lists, or `execution_seed` values. Job identifiers and stop counts are safe to log.
+**Log safety:** Log events must not include routing problem coordinate arrays, full stop lists, or `execution_seed` values. Job identifiers, trial identifiers, stop counts, and experiment identifiers are safe to log.
 
 **Acceptance Criteria:**
 - No OTel spans are emitted by the CLI.
+- The CLI does not inject `traceparent` or `tracestate` headers into outgoing API requests.
 - Debug log events appear on stderr only when `DAEDALUS_LOG=debug` is set.
 - Debug log events are suppressed when `DAEDALUS_LOG` is unset or set to any other value.
 - Debug log events are valid JSON, one event per line.
 - Log events never include routing problem coordinate arrays.
+- `cli.experiment.trial_submit` events appear for each trial in the orchestration loop.
+- `cli.experiment.evidence_collect` events appear for each trial when evidence collection is triggered.
+
+---
+
+## FR-17: Benchmark Manifest Submission Command
+
+**Description:** `daedalus benchmark submit <file>` submits a benchmark manifest to `POST /v1/benchmarks` (SPEC-008 FR-19), creating a named benchmark container. Benchmarks group related experiments under a stable identifier. A benchmark is created before the experiments that reference it via `benchmark_id`.
+
+**Benchmark manifest format:**
+
+| Field | Required | Description |
+|---|---|---|
+| `benchmark_id` | Yes | Stable, human-readable identifier (e.g., `capacity-comparison-2026`). Must be unique across all benchmarks. |
+| `benchmark_name` | Yes | Display name for the benchmark. |
+| `description` | No | Optional free-text description. |
+
+**Example:**
+
+```json
+{
+  "benchmark_id": "capacity-comparison-2026",
+  "benchmark_name": "Capacity-Only vs Time-Window Comparison",
+  "description": "Systematic comparison of solver performance on capacity-only and time-windowed VRP problems."
+}
+```
+
+**Normal behavior:**
+1. Read and parse the benchmark manifest from `<file>`.
+2. Submit to `POST /v1/benchmarks`.
+3. On HTTP 201: print `benchmark_id`, `benchmark_name`, `created_at`.
+4. On HTTP 409: print the conflict (benchmark already exists) and exit with code 1.
+
+**Text output format:**
+```
+Benchmark submitted.
+  benchmark_id:   capacity-comparison-2026
+  benchmark_name: Capacity-Only vs Time-Window Comparison
+  created_at:     2026-06-23T10:00:00Z
+```
+
+**Acceptance Criteria:**
+- A valid benchmark manifest produces HTTP 201 and prints the response fields.
+- A duplicate `benchmark_id` returns HTTP 409; CLI prints the conflict and exits with code 1.
+- A manifest missing `benchmark_id` or `benchmark_name` is rejected with HTTP 400; CLI prints field errors and exits with code 2.
+
+---
+
+## FR-18: Experiment Trial Orchestration Loop
+
+**Description:** The trial orchestration loop is the internal execution behavior of `daedalus experiment run` (FR-12) after manifest submission. The CLI iterates over all planned trials and drives each from `Pending` through submission, execution, and evidence collection.
+
+**Trial retrieval:** Immediately after manifest submission, the CLI calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-24) to retrieve the complete planned trial set.
+
+**Trial submission order (SPEC-020 FR-3):** Trials are submitted in ascending order of `(problem_config_index, repetition_index, solver_set_index)`. All trials are submitted sequentially before polling begins.
+
+**Per-trial submission:**
+
+For each trial in submission order:
+1. Submit a job via `POST /v1/jobs`, specifying the trial's `problem_id` (from the Fixed workload set) and the experiment's `scheduler_config_id`.
+2. Link the trial to the job by calling `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` with the returned `job_id` (SPEC-008 FR-25).
+3. Proceed to the next trial without waiting for the current job to execute.
+
+**Polling phase:**
+
+After all trials are submitted, the CLI enters the polling phase:
+- At each poll interval, check the job status of each non-terminal trial via `GET /v1/jobs/{job_id}`.
+- When a trial's job reaches a terminal state (`Completed` or `Failed`): immediately call `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence` (SPEC-008 FR-21).
+- A `JOB_NOT_TERMINAL` (HTTP 409) from collect-evidence is a transient condition; retry at the next poll interval.
+- Continue polling until all trials are terminal and evidence collection has been attempted for each.
+
+**Experiment completion monitoring:**
+
+After all trials have evidence collection attempted, the CLI polls `GET /v1/experiments/{experiment_id}` until `experiment.status` is `Completed` or `Failed`. The API auto-transitions the experiment on the API side (SPEC-008 FR-21 auto-completion); the CLI confirms the final status.
+
+**Idempotency:** Trial submission (SPEC-008 FR-25) and evidence collection (SPEC-008 FR-21) are idempotent at the API layer. The CLI relies on this to safely retry on transient errors. Full automatic CLI resumption after process interruption is deferred to post-MVP implementation planning per ADR-012.
+
+**Acceptance Criteria:**
+- Trials are submitted in `(problem_config_index asc, repetition_index asc, solver_set_index asc)` order.
+- All trials are submitted before polling begins.
+- Evidence collection is triggered per trial immediately when that trial's job reaches a terminal state.
+- The CLI does not call collect-evidence for a trial whose `job_id` is null.
+- `JOB_NOT_TERMINAL` from collect-evidence is retried at the next poll interval; it does not cause exit.
+- Experiment auto-completion status is confirmed via `GET /v1/experiments/{experiment_id}` after all trials report terminal.
+- When any trial's job reaches `status = Failed`, evidence collection is still attempted for that trial. The final exit code reflects the worst outcome (code 5 for any trial `status = Failed`; code 6 for `experiment.status = Failed`; code 6 takes precedence).
+
+---
+
+## FR-19: Experiment State Retrieval Commands
+
+**Description:** Three `experiment` subcommands retrieve experiment state from the API without orchestrating a run. These are the read-only complement to `experiment run`.
+
+### `daedalus experiment status <experiment_id>`
+
+Calls `GET /v1/experiments/{experiment_id}` (SPEC-008 FR-20) and prints the current status and trial counts.
+
+**Text output format:**
+```
+EXPERIMENT ID                         NAME                                  STATUS   TRIALS  COMPLETE
+7f8a9b0c-...                          capacity-only-solver-comparison-2026  Running  12      7
+```
+
+**Acceptance Criteria:**
+- An unknown `experiment_id` exits with code 1.
+- Outputs include `status`, `planned_trial_count`, and count of trials in terminal state.
+- `--output-format json` emits the raw SPEC-008 FR-20 response object.
+
+---
+
+### `daedalus experiment trials <experiment_id>`
+
+Calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-24) and prints the per-trial status table.
+
+**Text output format:**
+```
+TRIAL ID         PROBLEM ID      BACKEND                       JOB ID          TRIAL STATUS  JOB STATUS   OUTCOME
+a1b2c3d4-...     e5f6g7h8-...    backend-vrp-greedy-v1         f1e2d3c4-...    Completed     Completed    Succeeded
+b2c3d4e5-...     e5f6g7h8-...    backend-vrp-metaheuristic-v1  —               Pending       —            —
+```
+
+**Acceptance Criteria:**
+- An unknown `experiment_id` exits with code 1.
+- Trials with `job_id = null` (not yet submitted) display `—` in the `JOB ID`, `JOB STATUS`, and `OUTCOME` columns.
+- `--output-format json` emits the raw SPEC-008 FR-24 response array.
+
+---
+
+### `daedalus experiment summary <experiment_id>`
+
+Calls `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-26) and prints or saves the experiment summary artifact.
+
+**Flags:**
+
+| Flag | Description |
+|---|---|
+| `--output <file>` | Write the summary JSON to this file. When absent, prints to stdout. |
+
+**Acceptance Criteria:**
+- An unknown `experiment_id` exits with code 1.
+- An experiment whose `status` is not `Completed` prints a not-ready message and exits with code 1.
+- When `--output <file>` is provided, the summary JSON is written to that file and the file path is printed to stdout.
+- `--output-format json` emits the raw SPEC-008 FR-26 response.
+
+---
+
+## FR-20: Benchmark Summary Retrieval Command
+
+**Description:** `daedalus benchmark summary <benchmark_id>` calls `GET /v1/benchmarks/{benchmark_id}/summary` (SPEC-008 FR-27) and prints or saves the benchmark summary artifact.
+
+**Flags:**
+
+| Flag | Description |
+|---|---|
+| `--output <file>` | Write the summary JSON to this file. When absent, prints to stdout. |
+
+**Text output format (summary not yet available):**
+```
+Benchmark summary for capacity-comparison-2026 is not yet available.
+  Completed experiments: 2 of 4.
+```
+
+**Acceptance Criteria:**
+- An unknown `benchmark_id` exits with code 1.
+- When no experiments under the benchmark have completed, prints a not-ready message and exits with code 1.
+- When `--output <file>` is provided, the summary JSON is written to that file.
+- `--output-format json` emits the raw SPEC-008 FR-27 response.
+
+---
+
+## FR-21: Long-Running Session and Interruption Handling
+
+**Description:** `daedalus experiment run` (FR-12) is a scoped exception to the CLI's general single-invocation posture. All other commands complete in seconds. `experiment run` may run for minutes to hours depending on experiment size and solver execution time.
+
+**Session lifetime:** The CLI process remains alive throughout the trial orchestration loop. The wall-clock duration is bounded by `--timeout <seconds>` (default: 3600).
+
+**Timeout behavior:** When the `--timeout` duration expires mid-experiment:
+1. The CLI prints the current trial progress (submitted count, terminal count, pending count).
+2. The CLI exits with code 4.
+3. All submitted trial jobs continue executing in the system. Experiment state is preserved in PostgreSQL (ADR-012 Decision 2).
+
+**SIGINT / SIGTERM handling:** When the CLI receives SIGINT (Ctrl-C) or SIGTERM:
+1. The CLI prints the `experiment_id` and last-known trial progress.
+2. The CLI exits with code 1.
+3. Running trial jobs are not cancelled. The experiment state in the API is unaffected.
+
+**State preservation guarantee:** The API is the durable state authority (ADR-012 Decision 2). After CLI exit for any reason, the developer can query progress via `experiment status <experiment_id>` and `experiment trials <experiment_id>`. Full automatic CLI resumption of a partially-completed experiment is deferred to post-MVP implementation planning per ADR-012.
+
+**Acceptance Criteria:**
+- When `--timeout` expires mid-experiment, the CLI exits with code 4 after printing current trial counts.
+- When SIGINT is received, the CLI exits with code 1 after printing the `experiment_id` and progress state.
+- After CLI exit, experiment state is recoverable via `experiment status <experiment_id>`.
+- The CLI does not issue a cancellation request for the experiment or its trial jobs on interrupted exit.
+- The `experiment run` long-running behavior does not apply to any other CLI command. All other commands are single-invocation.
 
 ---
 
@@ -769,9 +1013,9 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 - The Docker Compose environment is the expected deployment context for local development. The default `http://localhost:5000` API URL is consistent with the Docker Compose port mapping.
 - The SPEC-002 generator is embedded as a library within the CLI binary. No separate generator process is required.
 - The system clock on the machine running the CLI is approximately synchronized. Timestamps printed by the CLI are derived from API responses, not the local clock.
-- The CLI is single-invocation per command. It does not run as a daemon or background process.
+- The CLI is single-invocation per command, with one scoped exception: `daedalus experiment run` is a long-running process that may remain active for minutes to hours (FR-21). All other commands complete in a short, bounded time. The CLI does not run as a daemon or background process outside of `experiment run`.
 - Report files produced by the Report Generator are HTML and are served verbatim by the API. The CLI does not attempt to parse or render HTML in the terminal.
-- The `experiment run` command submits all jobs using the same generated problem content but as distinct job submissions. Because each `POST /v1/jobs` produces a distinct `problem_id`, the problems are not shared at the persistence layer — they are identical in content but independently persisted.
+- In the SPEC-020 experiment model (FR-12 Fixed mode), all solvers in the `solver_set` targeting the same `(problem_config_index, repetition_index)` share one `problem_id` (ADR-012 Decision 3 instance-sharing invariant). This is a deliberate design: shared problem instances are required for valid cross-solver `hindsight_quality` comparisons (SPEC-007 FR-7). This supersedes the previous assumption that each job submission produces a distinct `problem_id`.
 
 ---
 
@@ -792,7 +1036,8 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 |---|---|---|---|
 | Routing problem file | Developer, automation script | JSON per SPEC-001 FR-11 | `problem submit` and `problem run` (when `source: file`) |
 | Generation config file | Developer, automation script | JSON per SPEC-002 FR-2 | `problem generate` and `problem run` |
-| Experiment file | Developer, automation script | JSON per FR-12 schema | `experiment run` |
+| Experiment manifest | Developer, automation script | JSON per SPEC-020 FR-2 / SPEC-008 FR-18 schema | `experiment run` (FR-12) |
+| Benchmark manifest | Developer, automation script | JSON per FR-17 schema | `benchmark submit` (FR-17) |
 | Scheduler config file | Developer, automation script | JSON per FR-11 schema | `config create` |
 | CLI flags | Command line | Per-command flag definitions | Override all other sources per FR-2 |
 | Environment variables | Shell environment | `DAEDALUS_API_URL`, `DAEDALUS_LOG` | Configuration discovery per FR-2 |
@@ -810,7 +1055,9 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 | Generated routing problem document | Developer, file system | JSON per SPEC-001 FR-11 | `--output` flag or stdout |
 | Generation manifest | Developer, file system | JSON per SPEC-002 FR-8 | `--manifest` flag (FR-4); `--save-generation-manifest` flag (FR-5) |
 | Report file | Developer, browser | `text/html` from API | `--output` flag or stdout |
-| Experiment result manifest | Developer, CI | JSON | `<name>.result.json` |
+| Experiment result manifest | Developer, CI | JSON | `<experiment_name>.result.json` (FR-12 `--output-manifest`) |
+| Experiment summary artifact | Developer, CI | JSON per SPEC-008 FR-26 | `experiment summary --output <file>` (FR-19) |
+| Benchmark summary artifact | Developer, CI | JSON per SPEC-008 FR-27 | `benchmark summary --output <file>` (FR-20) |
 | Submission manifest | Developer, CI | JSON | `--save-manifest` flag |
 | Debug log events | Developer | JSON lines on stderr | When `DAEDALUS_LOG=debug` |
 
@@ -872,12 +1119,39 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 
 ---
 
-### Experiment Partial Failure
+### Experiment Partial Failure (Trial-Level)
 
-**Cause:** One or more jobs in an experiment reach `status = Failed`, or wait timeout expires for one or more jobs.
-**Expected behavior:** The experiment summary table notes the failed or timed-out jobs. The CLI exits with the highest exit code observed across all jobs (code 4 for timeout, code 5 for Worker failure). Successfully completed jobs are still reported.
-**Expected fallback:** Investigate the failed jobs individually using `job status <job_id>`.
-**User-visible result:** Experiment summary table with per-job status; non-zero exit code reflecting the worst outcome.
+**Cause:** One or more trial jobs in a `daedalus experiment run` reach `status = Failed` (Worker lifecycle failure).
+**Expected behavior:** Evidence collection is still attempted for failed trial jobs. The experiment summary table notes the failed trials. The CLI exits with code 5. Successfully completed trials are still reported.
+**Expected fallback:** Investigate the failed trial jobs individually using `job status <job_id>`.
+**User-visible result:** Experiment summary table with per-trial status; exit code 5.
+
+---
+
+### Experiment Infrastructure Failure
+
+**Cause:** The experiment itself transitions to `status = Failed` at the API level (e.g., a persistent infrastructure failure preventing trial orchestration from completing).
+**Expected behavior:** The CLI prints the experiment failure status and exits with code 6. Code 6 takes precedence over code 5 when both conditions are present.
+**Expected fallback:** Query `experiment status <experiment_id>` for API-level error context.
+**User-visible result:** `Experiment 7f8a9b0c-... transitioned to Failed. Use 'daedalus experiment status <experiment_id>' for details.`
+
+---
+
+### Experiment Run Interrupted
+
+**Cause:** The CLI process is interrupted (SIGINT, SIGTERM) or the `--timeout` duration expires before all trials complete.
+**Expected behavior:** The CLI prints the `experiment_id` and current progress, then exits with code 1 (signal) or code 4 (timeout). Trial jobs in flight are not cancelled. Experiment state in the API is preserved.
+**Expected fallback:** Query `experiment status <experiment_id>` and `experiment trials <experiment_id>` to review current state. Resume or re-attempt is a post-MVP capability.
+**User-visible result:** `Experiment run interrupted. experiment_id: 7f8a9b0c-.... Submitted: 8/12 trials. Completed: 5/12. Use 'daedalus experiment status' to check progress.`
+
+---
+
+### Experiment Manifest Rejected
+
+**Cause:** The submitted experiment manifest is rejected by the API with HTTP 400 (invalid field values, unknown `problem_id`, unregistered `backend_id`, etc.).
+**Expected behavior:** The CLI prints all `field_errors` from the API response and exits with code 2. No trial jobs are submitted.
+**Expected fallback:** Correct the manifest and resubmit.
+**User-visible result:** Structured field error list identifying each invalid field.
 
 ---
 
@@ -990,7 +1264,7 @@ The following behaviors must be proven before this feature is considered complet
 
 ## Exit Code Behaviors
 
-- Every command exits with exactly one of the defined codes (0–5).
+- Every command exits with exactly one of the defined codes (0–6).
 - Exit code 0 for successful submission (no `--wait`).
 - Exit code 0 for a waited job that completes with `solver_outcome = Infeasible`.
 - Exit code 0 for a waited job that completes with `solver_outcome = Timeout`.
@@ -998,17 +1272,31 @@ The following behaviors must be proven before this feature is considered complet
 - Exit code 0 for a waited job that completes with `solver_outcome = Failed` (solver-level failure within a `Completed` job; distinct from `status = Failed`).
 - Exit code 0 for a waited job that completes with `solver_outcome = ContractViolation`.
 - Exit code 5 only for a job that reaches `status = Failed` (Worker lifecycle failure).
+- Exit code 6 only when `experiment.status = Failed` (experiment-level infrastructure failure). Code 6 takes precedence over code 5.
+- Exit code 4 when `experiment run --timeout` expires before experiment reaches terminal state.
 - Exit code 2 for any API validation error (HTTP 400).
 - Exit code 3 for any generator construction self-check failure.
 
 ## Experiment Behaviors
 
-- An experiment file with two scheduler configs submits two jobs with identical problem content.
-- A generation failure in an experiment exits with code 3 before any job is submitted.
-- An experiment with `wait: true` collects results from all jobs.
-- When one job reaches `Failed` in an experiment, the CLI exits with code 5 and reports all other job outcomes.
-- The experiment result manifest (`<name>.result.json`) contains: the experiment `name`, the generation config or problem file source, all submitted `job_id` values, all resolved `config_id` values, all `solver_outcome` values (for completed jobs), and all `report_available` flags.
-- If `<name>.result.json` already exists from a prior run, the CLI overwrites it without prompting.
+- A valid Fixed mode manifest submits to `POST /v1/experiments` and enters the trial orchestration loop.
+- A manifest specifying `"mode": "generated"` exits with code 1 before any API call is issued.
+- A manifest with an empty `solver_set` exits with code 2.
+- A manifest rejected by the API (HTTP 400) prints all `field_errors` and exits with code 2.
+- Trials are submitted in `(problem_config_index asc, repetition_index asc, solver_set_index asc)` order.
+- Evidence collection is triggered for each trial immediately when its job reaches a terminal state.
+- When one trial's job reaches `status = Failed`, the CLI exits with code 5 and reports all other trial outcomes.
+- When `experiment.status = Failed`, the CLI exits with code 6.
+- The experiment result manifest (`<experiment_name>.result.json`) contains: `experiment_id`, `experiment_name`, `benchmark_id` (if present), planned trial count, and per-trial `trial_id`, `job_id`, `backend_id`, `trial_status`, and `solver_outcome` (when available).
+- If the output manifest file already exists from a prior run, the CLI overwrites it without prompting.
+- `experiment status <experiment_id>` for an unknown experiment exits with code 1.
+- `experiment trials <experiment_id>` displays `—` for trials with `job_id = null`.
+- `experiment summary <experiment_id>` for an experiment whose status is not `Completed` exits with code 1.
+- `benchmark submit` with a duplicate `benchmark_id` exits with code 1.
+- `benchmark summary <benchmark_id>` for an unknown benchmark exits with code 1.
+- After CLI exit (SIGINT or timeout), `experiment status <experiment_id>` returns the preserved experiment state.
+- Under `DAEDALUS_LOG=debug`, a `cli.experiment.trial_submit` event appears for each trial submitted in the loop.
+- Under `DAEDALUS_LOG=debug`, a `cli.experiment.evidence_collect` event appears for each trial when evidence collection is triggered.
 
 ---
 
@@ -1043,9 +1331,11 @@ The following questions must be answerable by a developer running the CLI:
 
 # Performance Considerations
 
-**Polling interval:** The default `--poll-interval 2` seconds for `job wait` is a balance between responsiveness and API load. Polling more frequently than once per second is discouraged for automation scripts running many concurrent experiments.
+**Polling interval:** The default `--poll-interval 2` seconds for `job wait` and `experiment run` is a balance between responsiveness and API load. Polling more frequently than once per second is discouraged for automation scripts running many concurrent experiments.
 
-**Experiment concurrency:** `experiment run` submits all jobs sequentially, not concurrently. Concurrent submission is not required at MVP scope and simplifies error handling.
+**Experiment trial submission:** `experiment run` submits all trial jobs sequentially, not concurrently. Concurrent submission is not required at MVP scope and simplifies error handling and submission-order guarantees (SPEC-020 FR-3).
+
+**Experiment duration:** `experiment run` is a long-running command. Wall-clock duration is proportional to `planned_trial_count × execution_timeout_ms_per_trial`. The `--timeout` flag (default: 3600 seconds) bounds the CLI process lifetime, not individual trial execution. Experiments requiring more than one hour of total execution should increase `--timeout` accordingly.
 
 **Generator performance:** The SPEC-002 generator is expected to complete in milliseconds at all MVP stop counts. No CLI-level timeout is required for generation.
 
@@ -1055,10 +1345,11 @@ The following questions must be answerable by a developer running the CLI:
 
 # Documentation Updates Required
 
-- **README.md**: Add a CLI Quick Start section demonstrating: `docker compose up`, `daedalus problem run <config>`, `daedalus report show <job_id>`. This is the primary portfolio demonstration path.
-- **docs/architecture.md**: The System Context diagram shows `CLI → API`. SPEC-016 is the authoritative definition of the CLI component. The architecture description of the CLI can reference SPEC-016.
+- **README.md**: Add a CLI Quick Start section demonstrating: `docker compose up`, `daedalus problem run <config>`, `daedalus report show <job_id>`. This is the primary portfolio demonstration path. Also add a Benchmarking Quick Start demonstrating: `daedalus benchmark submit <manifest>`, `daedalus experiment run <manifest>`, `daedalus experiment summary <id>`.
+- **docs/architecture.md**: The System Context diagram shows `CLI → API`. SPEC-016 is the authoritative definition of the CLI component. Update the CLI description to note that it is the experiment orchestration executor per ADR-012 Decision 1.
 - **SPEC-002 OQ-2**: Mark as resolved. The generator is embedded in the CLI binary (CLI layer option). No SPEC-002 revision is required; the resolution is noted in SPEC-016 FR-4 and the Architectural Impact section.
-- **SPEC-008 Documentation Updates Required**: A CLI Specification reference was listed as pending. SPEC-016 satisfies this item. SPEC-008 FR-2 is the HTTP contract the CLI wraps.
+- **SPEC-008 Documentation Updates Required**: A CLI Specification reference was listed as pending. SPEC-016 satisfies this item. SPEC-008 FR-2 is the HTTP contract the CLI wraps. SPEC-008 Related Specs should be updated to include SPEC-016.
+- **ADR-012**: SPEC-016 amendment satisfies the SPEC-016-R1 requirements listed in ADR-012 Consequences. Mark SPEC-016-R1 items as resolved in ADR-012 Implementation Tracking (if that section exists) or note completion in a future ADR-012 revision.
 
 ---
 
@@ -1103,17 +1394,13 @@ SPEC-016 also requires support for optional `?status=` and `?limit=` query param
 
 ---
 
-### OQ-3: Experiment Result Persistence
+### OQ-3: Experiment Result Persistence *(Superseded)*
 
-**Question:** Should experiment results be persisted beyond the local filesystem manifest file, for example in PostgreSQL via the API?
+**Status: Superseded by ADR-012 Decision 2.**
 
-**Why it matters:** The `experiment run` command produces a local JSON manifest. If the manifest is lost, the experiment results are only recoverable by re-querying individual job statuses. For long-running experiments or CI pipelines, a server-side experiment record would enable retrieval after the CLI session ends.
+This question asked whether experiment results should be persisted beyond the local CLI filesystem. ADR-012 Decision 2 resolves it: the API is the durable state authority for all experiment state. Experiment records, trial records, and artifacts are persisted in PostgreSQL via the SPEC-008 / SPEC-012 data model. The CLI's local result manifest (`<experiment_name>.result.json`) is an additional convenience output; it is not the authoritative source. State is recoverable via `experiment status` and `experiment trials` after any CLI exit.
 
-**MVP position:** Local manifest only. Experiment results are captured at run time and saved to `<name>.result.json`. No API persistence of experiment records is required at MVP scope.
-
-**Owner:** Project Owner decision if API persistence of experiments is desired. The CLI specification does not require it.
-
-**Blocking:** Not blocking for MVP.
+**No further action required on this question.**
 
 ---
 
@@ -1135,6 +1422,22 @@ SPEC-016 also requires support for optional `?status=` and `?limit=` query param
 
 ---
 
+### OQ-5: Generated Mode Implementation (SPEC-008 OQ-7 Dependency)
+
+**Question:** When and how will Generated Mode workload sets (SPEC-020 FR-5, SPEC-008 FR-18) be implemented in the CLI?
+
+**Why it matters:** `daedalus experiment run` (FR-12) currently rejects manifests with `"mode": "generated"` at MVP scope. Generated Mode requires a mechanism for the CLI (or API) to create routing problems on behalf of the experiment at manifest submission time. This mechanism is not yet defined.
+
+**Dependency:** Resolution of SPEC-008 OQ-7 (generated workload set routing problem creation mechanism). SPEC-016 cannot implement Generated Mode until SPEC-008 OQ-7 is resolved and the API contract for it is defined.
+
+**MVP position:** Generated Mode is deferred. The CLI exits with code 1 on a `"mode": "generated"` manifest.
+
+**Owner:** SPEC-008 owns the API contract for generated workload sets. SPEC-016 amendment required once SPEC-008 OQ-7 is resolved.
+
+**Blocking:** Blocking for Generated Mode CLI support only. Not blocking for Fixed Mode or any other CLI command.
+
+---
+
 # Acceptance Checklist
 
 - [x] Problem is clearly defined.
@@ -1146,13 +1449,17 @@ SPEC-016 also requires support for optional `?status=` and `?limit=` query param
 - [x] Observability requirements exist.
 - [x] Security considerations exist.
 - [x] Documentation updates are identified.
-- [x] Exit codes are defined.
+- [x] Exit codes are defined (codes 0–6).
 - [x] Output formats are defined for both text and JSON modes.
 - [x] SPEC-002 OQ-2 (generator process location) is resolved.
+- [x] OQ-3 resolved — experiment result persistence superseded by ADR-012 Decision 2 (API is durable state authority).
+- [x] ADR-012 CLI requirements (SPEC-016-R1) applied: benchmark command group added; long-running exception documented; OQ-3 superseded; problem-sharing assumption updated.
+- [x] SPEC-020 orchestration model applied: SPEC-020 manifest format, trial submission order, evidence collection trigger, instance-sharing invariant documented.
+- [x] Trace propagation posture documented (ADR-011, ADR-012): CLI does not inject trace context; API owns trace roots.
 - [ ] OQ-1 resolved — `GET /v1/jobs` list endpoint added to SPEC-008 via future revision (blocking for `job list` command only; endpoint contract owned by SPEC-008, not SPEC-016).
 - [ ] OQ-2 resolved — CLI implementation language (blocking for implementation).
-- [ ] OQ-3 resolved — experiment result persistence (non-blocking at MVP).
 - [ ] OQ-4 resolved — `--wait` default behavior (non-blocking; current spec uses opt-in).
+- [ ] OQ-5 resolved — Generated Mode implementation (depends on SPEC-008 OQ-7; non-blocking for Fixed Mode).
 
 ---
 
@@ -1168,13 +1475,21 @@ This feature is complete when:
 - `job status`, `job wait`, and `job cancel` (FR-6, FR-7, FR-8) correctly interact with SPEC-008 FR-8, FR-11.
 - `report show` (FR-10) retrieves and writes the HTML report via SPEC-008 FR-12, FR-13.
 - `config create`, `config list`, `config get`, `config default` (FR-11) correctly interact with SPEC-008 FR-10.
-- `experiment run` (FR-12) submits a problem with multiple configurations, collects results, and writes the experiment manifest.
-- All exit codes (FR-14) are consistent across command paths and verified by testability behaviors.
+- `experiment run` (FR-12) accepts a SPEC-020 Fixed mode manifest, submits it to `POST /v1/experiments`, drives the trial orchestration loop (FR-18), collects evidence per trial, confirms experiment auto-completion, and writes the result manifest.
+- `experiment run` rejects Generated mode manifests with exit code 1 (OQ-5 dependency).
+- `experiment run` exits with code 6 on `experiment.status = Failed`; code 5 on any trial `status = Failed`; code 4 on `--timeout` expiry.
+- `benchmark submit` (FR-17) submits a benchmark manifest and prints the response.
+- `experiment status`, `experiment trials`, `experiment summary` (FR-19) retrieve experiment state from the API.
+- `benchmark summary` (FR-20) retrieves the benchmark summary artifact.
+- Long-running session and interruption handling (FR-21) is verified: SIGINT exits with code 1; timeout exits with code 4; experiment state is preserved in the API after CLI exit.
+- Experiment observability events (FR-16) are emitted under `DAEDALUS_LOG=debug` for each trial submission and evidence collection.
+- All exit codes (FR-14, codes 0–6) are consistent across command paths and verified by testability behaviors.
 - All error outputs (FR-15) are structured and do not expose internal details.
 - OQ-2 (implementation language) is resolved and the implementation language is recorded.
 - `job list` (FR-9) is either implemented (if OQ-1 is resolved) or explicitly deferred with a note.
 - The generated routing problem document produced by `problem generate` passes SPEC-001 domain validation when submitted to the API.
 - The portfolio demonstration path — `daedalus problem run <config> --wait` followed by `daedalus report show <job_id>` — completes end-to-end against a running Docker Compose environment.
+- The benchmark demonstration path — `daedalus benchmark submit <manifest>`, `daedalus experiment run <manifest>`, `daedalus experiment summary <id>` — completes end-to-end against a running Docker Compose environment.
 - Engineering review passes.
 - Architecture review passes.
 - Specification status is updated to Verified.
