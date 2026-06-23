@@ -530,14 +530,16 @@ All experiment state is durably persisted by the API (ADR-012 Decision 2). The C
 | Field | Required | Description |
 |---|---|---|
 | `experiment_name` | Yes | Human-readable name for this experiment |
-| `benchmark_id` | No | Associates the experiment with an existing benchmark (SPEC-008 FR-19) |
+| `benchmark_id` | **Yes** | Groups this experiment under a named benchmark (SPEC-008 FR-18, SPEC-008 FR-19). The `benchmark_id` string must be non-empty; a `benchmark_manifests` record for that ID is not required to exist before experiment submission. |
 | `workload_set` | Yes | Fixed or Generated workload set definition (see Workload Set Modes below) |
-| `solver_set` | Yes | Ordered list of `backend_id` strings (SPEC-020 FR-5) |
+| `solver_set` | Yes | Ordered list of `backend_id` strings (SPEC-020 FR-5); minimum 1 element |
 | `repetition_count` | Yes | Number of repetitions per (problem, solver) combination; must be ≥ 1 |
-| `execution_timeout_ms_per_trial` | Yes | Per-trial job execution timeout in milliseconds |
-| `experiment_seed` | No | Reproducibility seed (uint64 stored as bigint per SPEC-012 FR-4.3); omit to let the API assign |
+| `execution_timeout_ms_per_trial` | Yes | Per-trial job execution timeout in milliseconds; must be positive |
+| `experiment_seed` | **Yes** | Top-level entropy source for trial seed derivation (uint64 as bigint per SPEC-012 FR-4.3, SPEC-020 FR-8). Required by SPEC-008 FR-18; must be non-negative. |
+| `seed_derivation_algorithm_version` | **Yes** | Version identifier for the seed derivation algorithm used by the CLI to compute per-trial seeds from `experiment_seed` (SPEC-012 FR-20.4). Enables reproducibility verification across CLI versions. |
 | `scheduler_config_id` | No | Scheduler configuration applied to all trial jobs; absent uses the API default |
-| `reproducibility_class` | Yes | `fully_reproducible`, `partially_reproducible`, or `non_reproducible` (SPEC-020 FR-10) |
+| `reproducibility_class` | Yes | `fully_reproducible`, `partially_reproducible`, or `non_reproducible` (SPEC-020 FR-10). Derived by the CLI from the union of `determinism_class` values across `solver_set` backends. |
+| `hardware_policy` | No | Retry and failure handling for `quantum_hardware` backend trials (SPEC-008 FR-18, SPEC-020 FR-10). Defaults apply when absent. |
 
 **Workload set modes:**
 
@@ -558,6 +560,7 @@ All experiment state is durably persisted by the API (ADR-012 Decision 2). The C
   "repetition_count": 3,
   "execution_timeout_ms_per_trial": 30000,
   "experiment_seed": 9221134881191785473,
+  "seed_derivation_algorithm_version": "1.0",
   "scheduler_config_id": "c1d2e3f4-...",
   "reproducibility_class": "fully_reproducible"
 }
@@ -605,18 +608,46 @@ TRIAL  PROBLEM ID      BACKEND                       JOB ID          TRIAL STATU
 ...
 ```
 
+**JSON output format (`--output-format json`):** In JSON mode, all text progress output is suppressed during the orchestration loop. On normal completion (exit code 0 or 5), the CLI emits a single JSON object to stdout:
+
+```json
+{
+  "experiment_id": "7f8a9b0c-...",
+  "experiment_name": "capacity-only-solver-comparison-2026",
+  "benchmark_id": "capacity-comparison-2026",
+  "status": "Completed",
+  "planned_trial_count": 12,
+  "trials": [
+    {
+      "trial_id": "a1b2c3d4-...",
+      "problem_id": "e5f6g7h8-...",
+      "backend_id": "backend-vrp-greedy-v1",
+      "trial_status": "Completed",
+      "job_id": "f1e2d3c4-...",
+      "solver_outcome": "Succeeded",
+      "evidence_status": "Collected"
+    }
+  ]
+}
+```
+
+On code 6 (`experiment.status = Failed`), the same object is emitted with `"status": "Failed"`. On exit code 4 (timeout) or 1 (signal), no JSON object is emitted; the standard JSON error schema from FR-15 is emitted instead, with `request_id: null` (no API error response triggered the exit).
+
 **Long-running session behavior:** `experiment run` is a scoped exception to the CLI's single-invocation posture (see Assumptions). For large experiments, the command may run for minutes to hours. The `--timeout` flag provides an upper bound. If the CLI exits before completion (timeout or signal), the experiment state is preserved by the API. See FR-21.
 
 **Acceptance Criteria:**
 - A valid Fixed mode manifest produces an experiment submission and enters the orchestration loop (FR-18).
 - A manifest specifying `"mode": "generated"` exits with code 1 before any API call.
-- A manifest rejected by the API (HTTP 400) prints all `field_errors` and exits with code 2.
+- A manifest missing `benchmark_id`, `experiment_seed`, or `seed_derivation_algorithm_version` is rejected by the API with HTTP 400; CLI prints all `field_errors` and exits with code 2.
+- A manifest rejected by the API for any other reason (HTTP 400) prints all `field_errors` and exits with code 2.
 - A manifest with an empty `solver_set` is rejected with code 2.
 - A manifest with `repetition_count` less than 1 is rejected with code 2.
-- When all trials complete: the result manifest captures `experiment_id`, `experiment_name`, `benchmark_id` (if present), planned trial count, and per-trial `trial_id`, `job_id`, `backend_id`, `trial_status`, and `solver_outcome` (when available).
+- When all trials complete normally: the result manifest captures `experiment_id`, `experiment_name`, `benchmark_id`, planned trial count, and per-trial `trial_id`, `job_id`, `backend_id`, `trial_status`, `solver_outcome` (when available), and `evidence_status`.
 - When `experiment.status = Failed`: the CLI exits with code 6.
 - When any trial's job reaches `status = Failed`: the CLI exits with code 5 (unless experiment also fails, in which case code 6 takes precedence).
 - If the output manifest file already exists, it is overwritten without prompt.
+- In `--output-format json` mode, no progress text appears on stdout during the orchestration loop. A single JSON result object is emitted on stdout on successful completion (exit codes 0 and 5). On exit code 4 or 1, the JSON error schema from FR-15 is emitted.
+- No result manifest is written to disk on timeout (exit code 4) or signal (exit code 1). Experiment state is recoverable via `experiment status` and `experiment trials`.
 
 ---
 
@@ -836,6 +867,7 @@ Benchmark submitted.
 - A valid benchmark manifest produces HTTP 201 and prints the response fields.
 - A duplicate `benchmark_id` returns HTTP 409; CLI prints the conflict and exits with code 1.
 - A manifest missing `benchmark_id` or `benchmark_name` is rejected with HTTP 400; CLI prints field errors and exits with code 2.
+- `--output-format json` emits the raw SPEC-008 FR-19 response body as a JSON object to stdout.
 
 ---
 
@@ -843,7 +875,7 @@ Benchmark submitted.
 
 **Description:** The trial orchestration loop is the internal execution behavior of `daedalus experiment run` (FR-12) after manifest submission. The CLI iterates over all planned trials and drives each from `Pending` through submission, execution, and evidence collection.
 
-**Trial retrieval:** Immediately after manifest submission, the CLI calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-24) to retrieve the complete planned trial set.
+**Trial retrieval:** Immediately after manifest submission, the CLI calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22) to retrieve the complete planned trial set. The response includes all `trial_id`, `problem_id`, `backend_id`, and `solver_set_index` values for each planned trial.
 
 **Trial submission order (SPEC-020 FR-3):** Trials are submitted in ascending order of `(problem_config_index, repetition_index, solver_set_index)`. All trials are submitted sequentially before polling begins.
 
@@ -854,17 +886,24 @@ For each trial in submission order:
 2. Link the trial to the job by calling `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` with the returned `job_id` (SPEC-008 FR-25).
 3. Proceed to the next trial without waiting for the current job to execute.
 
+**Per-backend job targeting — unresolved dependency (ENG-003 / OQ-6):** The current `POST /v1/jobs` contract (SPEC-008 FR-2) accepts `problem_id` and `scheduler_config_id` but provides no `backend_id` field. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy — there is no mechanism in the current API contract to guarantee that the job submitted for a `backend-vrp-greedy-v1` trial is actually processed by that backend rather than another eligible backend. Per-backend job routing is therefore an unresolved implementation dependency. See OQ-6. Until OQ-6 is resolved, multi-backend experiments cannot guarantee correct per-backend execution.
+
+**Timeout during submission phase:** The `--timeout` clock runs from manifest submission, including the submission phase. If `--timeout` expires during the submission phase, the CLI completes the two-step submission (job submit + trial link) for the current trial, then exits with code 4 without beginning the next trial's submission. Trials already submitted and linked are preserved in the API. No result manifest is written.
+
 **Polling phase:**
 
 After all trials are submitted, the CLI enters the polling phase:
 - At each poll interval, check the job status of each non-terminal trial via `GET /v1/jobs/{job_id}`.
 - When a trial's job reaches a terminal state (`Completed` or `Failed`): immediately call `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence` (SPEC-008 FR-21).
-- A `JOB_NOT_TERMINAL` (HTTP 409) from collect-evidence is a transient condition; retry at the next poll interval.
-- Continue polling until all trials are terminal and evidence collection has been attempted for each.
+- **Retryable conditions** from collect-evidence: `JOB_NOT_TERMINAL` (HTTP 409) — retry at the next poll interval. HTTP 5xx server errors — retry at the next poll interval, up to 3 consecutive attempts; treat as fatal (exit code 1) on the third consecutive 5xx for the same trial. Network failure (TCP/DNS) — retry once at the next poll interval; treat as fatal on the second consecutive network failure for the same trial.
+- **Fatal conditions** from collect-evidence: `TRIAL_NOT_SUBMITTED` (HTTP 409) — indicates `job_id` is null despite the guard in the submission phase; this is a state inconsistency and the CLI exits with code 1.
+- `evidence_status = Error` on a completed collect-evidence call: the evidence was collected but is incomplete or invalid (SPEC-008 FR-21 idempotency states this is retryable). The CLI logs the outcome and treats the trial as evidence-collection-complete for orchestration-loop progress purposes. `evidence_status = Error` does not contribute to a non-zero exit code; it is surfaced in the result manifest and the completion table.
+- At each poll interval, additionally call `GET /v1/experiments/{experiment_id}`. If `experiment.status = Failed` is detected at any point during the polling phase, the CLI exits with code 6 immediately without waiting for remaining trials.
+- Continue polling until all trials are terminal and evidence collection has been attempted for each, or until `experiment.status = Failed` is detected.
 
 **Experiment completion monitoring:**
 
-After all trials have evidence collection attempted, the CLI polls `GET /v1/experiments/{experiment_id}` until `experiment.status` is `Completed` or `Failed`. The API auto-transitions the experiment on the API side (SPEC-008 FR-21 auto-completion); the CLI confirms the final status.
+After all trials have evidence collection attempted and `experiment.status` is not yet `Failed`, the CLI polls `GET /v1/experiments/{experiment_id}` until `experiment.status` is `Completed` or `Failed`. The API auto-transitions the experiment on the API side (SPEC-008 FR-21 auto-completion); the CLI confirms the final status. `SchedulerRejected` and `HarnessError` trial statuses are set by the API during evidence collection based on collected evidence; they require no special CLI handling and are treated as terminal `trial_status` values for orchestration-loop progress purposes.
 
 **Idempotency:** Trial submission (SPEC-008 FR-25) and evidence collection (SPEC-008 FR-21) are idempotent at the API layer. The CLI relies on this to safely retry on transient errors. Full automatic CLI resumption after process interruption is deferred to post-MVP implementation planning per ADR-012.
 
@@ -874,6 +913,11 @@ After all trials have evidence collection attempted, the CLI polls `GET /v1/expe
 - Evidence collection is triggered per trial immediately when that trial's job reaches a terminal state.
 - The CLI does not call collect-evidence for a trial whose `job_id` is null.
 - `JOB_NOT_TERMINAL` from collect-evidence is retried at the next poll interval; it does not cause exit.
+- `TRIAL_NOT_SUBMITTED` (HTTP 409) from collect-evidence causes immediate exit with code 1 (fatal state inconsistency).
+- HTTP 5xx from collect-evidence is retried up to 3 consecutive attempts per trial; on the third consecutive 5xx, the CLI exits with code 1.
+- `evidence_status = Error` on a collect-evidence response is recorded in the result manifest and completion table; it does not cause a non-zero exit code.
+- At each poll interval, `GET /v1/experiments/{experiment_id}` is called; if `experiment.status = Failed` is detected, the CLI exits with code 6.
+- If `--timeout` expires during the submission phase, the CLI completes the current trial's two-step submission and exits with code 4 without beginning the next trial.
 - Experiment auto-completion status is confirmed via `GET /v1/experiments/{experiment_id}` after all trials report terminal.
 - When any trial's job reaches `status = Failed`, evidence collection is still attempted for that trial. The final exit code reflects the worst outcome (code 5 for any trial `status = Failed`; code 6 for `experiment.status = Failed`; code 6 takes precedence).
 
@@ -902,25 +946,25 @@ EXPERIMENT ID                         NAME                                  STAT
 
 ### `daedalus experiment trials <experiment_id>`
 
-Calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-24) and prints the per-trial status table.
+Calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22) and prints the per-trial status table. All columns are derived from the SPEC-008 FR-22 response; no additional per-job API calls are issued.
 
 **Text output format:**
 ```
-TRIAL ID         PROBLEM ID      BACKEND                       JOB ID          TRIAL STATUS  JOB STATUS   OUTCOME
-a1b2c3d4-...     e5f6g7h8-...    backend-vrp-greedy-v1         f1e2d3c4-...    Completed     Completed    Succeeded
-b2c3d4e5-...     e5f6g7h8-...    backend-vrp-metaheuristic-v1  —               Pending       —            —
+TRIAL ID         PROBLEM ID      BACKEND                       JOB ID          TRIAL STATUS  EVIDENCE STATUS  OUTCOME
+a1b2c3d4-...     e5f6g7h8-...    backend-vrp-greedy-v1         f1e2d3c4-...    Completed     Collected        Succeeded
+b2c3d4e5-...     e5f6g7h8-...    backend-vrp-metaheuristic-v1  —               Pending       —                —
 ```
 
 **Acceptance Criteria:**
 - An unknown `experiment_id` exits with code 1.
-- Trials with `job_id = null` (not yet submitted) display `—` in the `JOB ID`, `JOB STATUS`, and `OUTCOME` columns.
-- `--output-format json` emits the raw SPEC-008 FR-24 response array.
+- Trials with `job_id = null` (not yet submitted) display `—` in the `JOB ID`, `EVIDENCE STATUS`, and `OUTCOME` columns.
+- `--output-format json` emits the raw SPEC-008 FR-22 response array, including all fields defined in SPEC-008 FR-22 (trial seeds, indices, evidence fields).
 
 ---
 
 ### `daedalus experiment summary <experiment_id>`
 
-Calls `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-26) and prints or saves the experiment summary artifact.
+Calls `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-23) and prints or saves the experiment summary artifact.
 
 **Flags:**
 
@@ -932,13 +976,13 @@ Calls `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-26) and prints 
 - An unknown `experiment_id` exits with code 1.
 - An experiment whose `status` is not `Completed` prints a not-ready message and exits with code 1.
 - When `--output <file>` is provided, the summary JSON is written to that file and the file path is printed to stdout.
-- `--output-format json` emits the raw SPEC-008 FR-26 response.
+- `--output-format json` emits the raw SPEC-008 FR-23 response.
 
 ---
 
 ## FR-20: Benchmark Summary Retrieval Command
 
-**Description:** `daedalus benchmark summary <benchmark_id>` calls `GET /v1/benchmarks/{benchmark_id}/summary` (SPEC-008 FR-27) and prints or saves the benchmark summary artifact.
+**Description:** `daedalus benchmark summary <benchmark_id>` calls `GET /v1/benchmarks/{benchmark_id}/summary` (SPEC-008 FR-24) and prints or saves the benchmark summary artifact.
 
 **Flags:**
 
@@ -947,16 +991,16 @@ Calls `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-26) and prints 
 | `--output <file>` | Write the summary JSON to this file. When absent, prints to stdout. |
 
 **Text output format (summary not yet available):**
+
+When SPEC-008 FR-24 returns HTTP 404 with `error_code = BENCHMARK_NOT_FOUND` (no member experiment has yet reached `Completed` status):
 ```
 Benchmark summary for capacity-comparison-2026 is not yet available.
-  Completed experiments: 2 of 4.
 ```
 
 **Acceptance Criteria:**
-- An unknown `benchmark_id` exits with code 1.
-- When no experiments under the benchmark have completed, prints a not-ready message and exits with code 1.
-- When `--output <file>` is provided, the summary JSON is written to that file.
-- `--output-format json` emits the raw SPEC-008 FR-27 response.
+- An unknown `benchmark_id` or a benchmark with no completed experiments returns HTTP 404 (`error_code = BENCHMARK_NOT_FOUND`); CLI prints the not-available message and exits with code 1.
+- When `--output <file>` is provided, the summary JSON is written to that file and the file path is printed to stdout.
+- `--output-format json` emits the raw SPEC-008 FR-24 response on HTTP 200, or the standard JSON error schema from FR-15 on HTTP 404.
 
 ---
 
@@ -967,21 +1011,27 @@ Benchmark summary for capacity-comparison-2026 is not yet available.
 **Session lifetime:** The CLI process remains alive throughout the trial orchestration loop. The wall-clock duration is bounded by `--timeout <seconds>` (default: 3600).
 
 **Timeout behavior:** When the `--timeout` duration expires mid-experiment:
-1. The CLI prints the current trial progress (submitted count, terminal count, pending count).
-2. The CLI exits with code 4.
-3. All submitted trial jobs continue executing in the system. Experiment state is preserved in PostgreSQL (ADR-012 Decision 2).
+1. If in the submission phase: complete the current trial's two-step submission (job submit + trial link for the in-progress trial), then stop without submitting further trials (see FR-18).
+2. If in the polling phase: exit at the next poll cycle boundary.
+3. Print the current trial progress (submitted count, terminal count, pending count) and the `experiment_id`.
+4. Exit with code 4. No result manifest is written.
+5. All submitted trial jobs continue executing in the system. Experiment state is preserved in PostgreSQL (ADR-012 Decision 2).
 
 **SIGINT / SIGTERM handling:** When the CLI receives SIGINT (Ctrl-C) or SIGTERM:
-1. The CLI prints the `experiment_id` and last-known trial progress.
-2. The CLI exits with code 1.
+1. Print the `experiment_id` and last-known trial progress.
+2. Exit with code 1. No result manifest is written.
 3. Running trial jobs are not cancelled. The experiment state in the API is unaffected.
+
+**Result manifest on interrupted exit:** No result manifest is written to disk on exit code 4 (timeout) or exit code 1 (signal). The developer retrieves current state via `experiment status <experiment_id>` and `experiment trials <experiment_id>`. The result manifest is written only when the CLI completes the orchestration loop normally (all trials terminal + experiment auto-completion confirmed).
 
 **State preservation guarantee:** The API is the durable state authority (ADR-012 Decision 2). After CLI exit for any reason, the developer can query progress via `experiment status <experiment_id>` and `experiment trials <experiment_id>`. Full automatic CLI resumption of a partially-completed experiment is deferred to post-MVP implementation planning per ADR-012.
 
 **Acceptance Criteria:**
-- When `--timeout` expires mid-experiment, the CLI exits with code 4 after printing current trial counts.
+- When `--timeout` expires mid-experiment, the CLI exits with code 4 after printing current trial counts and the `experiment_id`.
+- When `--timeout` expires during the submission phase, the current trial's two-step submission is completed before exiting; the next trial's submission is not begun.
 - When SIGINT is received, the CLI exits with code 1 after printing the `experiment_id` and progress state.
-- After CLI exit, experiment state is recoverable via `experiment status <experiment_id>`.
+- No result manifest is written on exit code 4 or exit code 1.
+- After CLI exit, experiment state is recoverable via `experiment status <experiment_id>` and `experiment trials <experiment_id>`.
 - The CLI does not issue a cancellation request for the experiment or its trial jobs on interrupted exit.
 - The `experiment run` long-running behavior does not apply to any other CLI command. All other commands are single-invocation.
 
@@ -1004,6 +1054,7 @@ Benchmark summary for capacity-comparison-2026 is not yet available.
 - No batch job file (submitting many problems from a single invocation without the experiment model). Use `experiment run` for multi-job orchestration.
 - No config file mutation commands. The CLI reads config files but does not write them.
 - No shell completion generation at MVP scope.
+- No automatic experiment resumption after CLI interruption. If `daedalus experiment run` exits before completion (timeout or signal), the developer must manually query state via `experiment status` and `experiment trials`. Automatic CLI resume of a partially-completed experiment is deferred to post-MVP per ADR-012.
 
 ---
 
@@ -1369,7 +1420,7 @@ The following questions must be answerable by a developer running the CLI:
 
 SPEC-016 also requires support for optional `?status=` and `?limit=` query parameters to support the `--status` and `--limit` flags in FR-9. The complete endpoint schema — including response field names, ordering, pagination, and error behavior — is owned by SPEC-008 and will be defined in a future SPEC-008 revision.
 
-**Why it matters:** SPEC-008 defines eight endpoints (FR-15 Versioning section) and does not include a job listing endpoint. The `job list` command requires this endpoint. Without it, `job list` cannot be implemented and must remain deferred.
+**Why it matters:** SPEC-008 does not include a `GET /v1/jobs` list endpoint. The `job list` command requires this endpoint. Without it, `job list` cannot be implemented and must remain deferred.
 
 **Resolution path:** A future SPEC-008 revision adds `GET /v1/jobs` to the endpoint inventory (FR-15) and defines its full contract. The CLI consumer requirements above are the minimum SPEC-008 must satisfy for SPEC-016's `job list` command to be implementable.
 
@@ -1438,6 +1489,26 @@ This question asked whether experiment results should be persisted beyond the lo
 
 ---
 
+### OQ-6: Per-Backend Job Targeting Mechanism
+
+**Question:** How does `daedalus experiment run` ensure that the job submitted for a specific trial runs on the backend identified by the trial's `backend_id`?
+
+**Why it matters:** `POST /v1/jobs` (SPEC-008 FR-2) accepts `problem_id` and `scheduler_config_id` but no `backend_id`. For an experiment with `solver_set: ["backend-vrp-greedy-v1", "backend-vrp-metaheuristic-v1"]`, the CLI submits two jobs per (problem, repetition) combination. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy for both jobs — there is no mechanism to guarantee that the job for the `backend-vrp-greedy-v1` trial actually runs on that backend. This renders multi-backend experiments non-deterministic with respect to which backend produces which trial's evidence.
+
+SPEC-008 FR-18 acknowledges this as "Backend capability-profile validation gap (F-13)." SPEC-008 FR-25 (Trial Submission Linkage) validates `problem_id` alignment but not `backend_id` alignment. Without a resolution, a multi-backend experiment produces results where the per-backend attribution is unverifiable.
+
+**Candidate resolutions (for SPEC-008-R1 scope):**
+- (a) Extend `POST /v1/jobs` with an optional `backend_id` field for experiment context that directs the Scheduler to a specific backend.
+- (b) Require each trial to use a per-backend `scheduler_config_id` (one config per backend in the `solver_set`) instead of a single experiment-wide config.
+- (c) Add backend-identity validation to SPEC-008 FR-25 (Trial Submission Linkage), rejecting the link if the job's actual backend (from the Scheduler decision record) does not match the trial's `backend_id`.
+- (d) Accept that backend targeting is best-effort at MVP and rely on Scheduler determinism for single-backend deployments; document this as an accepted risk.
+
+**Owner:** SPEC-008 owns the `POST /v1/jobs` contract and FR-25 validation. Resolution requires a SPEC-008 amendment. SPEC-016 cannot unilaterally resolve this; FR-18 documents the dependency.
+
+**Blocking:** Blocking for correct multi-backend experiment implementation. Fixed Mode experiments with a single-backend `solver_set` are unaffected. The CLI can submit and link trials without resolution; correctness of per-backend attribution is the gap.
+
+---
+
 # Acceptance Checklist
 
 - [x] Problem is clearly defined.
@@ -1460,6 +1531,7 @@ This question asked whether experiment results should be persisted beyond the lo
 - [ ] OQ-2 resolved — CLI implementation language (blocking for implementation).
 - [ ] OQ-4 resolved — `--wait` default behavior (non-blocking; current spec uses opt-in).
 - [ ] OQ-5 resolved — Generated Mode implementation (depends on SPEC-008 OQ-7; non-blocking for Fixed Mode).
+- [ ] OQ-6 resolved — per-backend job targeting mechanism (blocking for correct multi-backend experiments; requires SPEC-008-R1 amendment).
 
 ---
 
@@ -1489,7 +1561,8 @@ This feature is complete when:
 - `job list` (FR-9) is either implemented (if OQ-1 is resolved) or explicitly deferred with a note.
 - The generated routing problem document produced by `problem generate` passes SPEC-001 domain validation when submitted to the API.
 - The portfolio demonstration path — `daedalus problem run <config> --wait` followed by `daedalus report show <job_id>` — completes end-to-end against a running Docker Compose environment.
-- The benchmark demonstration path — `daedalus benchmark submit <manifest>`, `daedalus experiment run <manifest>`, `daedalus experiment summary <id>` — completes end-to-end against a running Docker Compose environment.
+- The benchmark demonstration path — `daedalus benchmark submit <manifest>`, `daedalus experiment run <manifest>`, `daedalus experiment summary <id>` — completes end-to-end against a running Docker Compose environment using a single-backend `solver_set` (OQ-6 does not affect single-backend experiments).
+- OQ-6 (per-backend job targeting) is either resolved via SPEC-008-R1 or explicitly accepted as a risk for multi-backend experiments, with the limitation documented.
 - Engineering review passes.
 - Architecture review passes.
 - Specification status is updated to Verified.
