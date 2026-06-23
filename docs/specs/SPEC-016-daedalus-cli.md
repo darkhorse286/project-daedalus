@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded.)
+**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated.)
 
 **Supersedes:** None
 
@@ -831,21 +831,33 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 
 **Description:** `daedalus benchmark submit <file>` submits a benchmark manifest to `POST /v1/benchmarks` (SPEC-008 FR-19), creating a named benchmark container. Benchmarks group related experiments under a stable identifier. A benchmark is created before the experiments that reference it via `benchmark_id`.
 
-**Benchmark manifest format:**
+**Benchmark manifest format (SPEC-008 FR-19 / SPEC-020 FR-2):**
 
-| Field | Required | Description |
-|---|---|---|
-| `benchmark_id` | Yes | Stable, human-readable identifier (e.g., `capacity-comparison-2026`). Must be unique across all benchmarks. |
-| `benchmark_name` | Yes | Display name for the benchmark. |
-| `description` | No | Optional free-text description. |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `benchmark_id` | string | Yes | Stable, human-readable identifier (e.g., `capacity-comparison-2026`). Must be unique across all benchmarks. Serves as the lookup key for all member experiments and the benchmark summary. |
+| `benchmark_name` | string | Yes | Human-readable display name for the benchmark. |
+| `research_question` | string | Yes | The question the benchmark attempts to answer (SPEC-020 FR-2). Example: "Does QUBO simulated annealing produce lower total route distance than nearest-neighbor on small routing problems?" |
+| `hypothesis` | string | Yes | What is expected to happen (SPEC-020 FR-2). |
+| `null_hypothesis` | string | Yes | What would be true if the proposed improvement does not exist (SPEC-020 FR-2). |
+| `controls` | array of strings | Yes | Variables held constant across experiments; minimum 1 element (SPEC-020 FR-2). Example: `["problem_size_class", "fleet_configuration"]`. |
+| `independent_variables` | array of strings | Yes | Variables that change between experiments; minimum 1 element (SPEC-020 FR-2). Example: `["backend_id"]`. |
+| `dependent_variables` | array of strings | Yes | Variables measured; minimum 1 element (SPEC-020 FR-2). Example: `["hindsight_quality", "execution_duration_ms"]`. |
+
+All string fields must be non-empty. All array fields must contain at least one element. These constraints are enforced by the API (SPEC-008 FR-19 validation).
 
 **Example:**
 
 ```json
 {
   "benchmark_id": "capacity-comparison-2026",
-  "benchmark_name": "Capacity-Only vs Time-Window Comparison",
-  "description": "Systematic comparison of solver performance on capacity-only and time-windowed VRP problems."
+  "benchmark_name": "Classical vs QUBO SA — Capacity-Only VRP",
+  "research_question": "Does QUBO simulated annealing produce lower total route distance than nearest-neighbor on small capacity-only VRP problems?",
+  "hypothesis": "QUBO SA produces lower total route distance than nearest-neighbor on problems with 15–25 stops.",
+  "null_hypothesis": "There is no statistically significant difference in total route distance between QUBO SA and nearest-neighbor on the evaluated problem distribution.",
+  "controls": ["problem_size_class", "fleet_configuration", "time_window_presence"],
+  "independent_variables": ["backend_id"],
+  "dependent_variables": ["hindsight_quality", "execution_duration_ms", "solver_outcome"]
 }
 ```
 
@@ -859,14 +871,16 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 ```
 Benchmark submitted.
   benchmark_id:   capacity-comparison-2026
-  benchmark_name: Capacity-Only vs Time-Window Comparison
+  benchmark_name: Classical vs QUBO SA — Capacity-Only VRP
   created_at:     2026-06-23T10:00:00Z
 ```
 
 **Acceptance Criteria:**
-- A valid benchmark manifest produces HTTP 201 and prints the response fields.
+- A valid benchmark manifest (all required fields present and non-empty, all arrays non-empty) produces HTTP 201 and prints the response fields.
 - A duplicate `benchmark_id` returns HTTP 409; CLI prints the conflict and exits with code 1.
-- A manifest missing `benchmark_id` or `benchmark_name` is rejected with HTTP 400; CLI prints field errors and exits with code 2.
+- A manifest missing any required field (`benchmark_id`, `benchmark_name`, `research_question`, `hypothesis`, `null_hypothesis`, `controls`, `independent_variables`, `dependent_variables`) is rejected with HTTP 400 (`error_code = BENCHMARK_CONFIG_INVALID`); CLI prints all `field_errors` and exits with code 2.
+- A manifest with an empty string value for any required string field is rejected with HTTP 400; CLI prints field errors and exits with code 2.
+- A manifest with an empty array for `controls`, `independent_variables`, or `dependent_variables` is rejected with HTTP 400; CLI prints field errors and exits with code 2.
 - `--output-format json` emits the raw SPEC-008 FR-19 response body as a JSON object to stdout.
 
 ---
@@ -885,6 +899,14 @@ For each trial in submission order:
 1. Submit a job via `POST /v1/jobs`, specifying the trial's `problem_id` (from the Fixed workload set) and the experiment's `scheduler_config_id`.
 2. Link the trial to the job by calling `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` with the returned `job_id` (SPEC-008 FR-25).
 3. Proceed to the next trial without waiting for the current job to execute.
+
+**Submission phase error handling:** Each trial submission is a two-step sequence (`POST /v1/jobs` + `POST /v1/experiments/{id}/trials/{trial_id}/submit`). Error handling during the submission phase:
+
+- **`POST /v1/jobs` HTTP 5xx:** Treat as fatal. Exit with code 1 without beginning trial-link step for the failed trial.
+- **`POST /v1/jobs` network failure (TCP/DNS):** Retry once at the next opportunity. On second consecutive network failure for the same trial, exit with code 1.
+- **`POST /v1/experiments/{id}/trials/{trial_id}/submit` HTTP 5xx (after successful job submit):** Retry up to 3 consecutive attempts. On the third consecutive 5xx, exit with code 1. The job has been created and will execute; the orphaned state is logged at `DAEDALUS_LOG=debug` for investigation.
+- **`POST /v1/experiments/{id}/trials/{trial_id}/submit` network failure (after successful job submit):** Retry once. On second consecutive failure, the CLI retries with the same `job_id`; if `TRIAL_ALREADY_SUBMITTED` is returned (first attempt succeeded), the CLI recovers per the Idempotency section. If HTTP 5xx or network failure persists, exit with code 1.
+- **`TRIAL_ALREADY_SUBMITTED` from `POST /v1/experiments/{id}/trials/{trial_id}/submit`:** Treat as success-on-retry. Call `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22), retrieve the already-linked `job_id` for that trial, and continue to the next trial. Do not exit.
 
 **Per-backend job targeting — unresolved dependency (ENG-003 / OQ-6):** The current `POST /v1/jobs` contract (SPEC-008 FR-2) accepts `problem_id` and `scheduler_config_id` but provides no `backend_id` field. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy — there is no mechanism in the current API contract to guarantee that the job submitted for a `backend-vrp-greedy-v1` trial is actually processed by that backend rather than another eligible backend. Per-backend job routing is therefore an unresolved implementation dependency. See OQ-6. Until OQ-6 is resolved, multi-backend experiments cannot guarantee correct per-backend execution.
 
@@ -905,7 +927,7 @@ After all trials are submitted, the CLI enters the polling phase:
 
 After all trials have evidence collection attempted and `experiment.status` is not yet `Failed`, the CLI polls `GET /v1/experiments/{experiment_id}` until `experiment.status` is `Completed` or `Failed`. The API auto-transitions the experiment on the API side (SPEC-008 FR-21 auto-completion); the CLI confirms the final status. `SchedulerRejected` and `HarnessError` trial statuses are set by the API during evidence collection based on collected evidence; they require no special CLI handling and are treated as terminal `trial_status` values for orchestration-loop progress purposes.
 
-**Idempotency:** Trial submission (SPEC-008 FR-25) and evidence collection (SPEC-008 FR-21) are idempotent at the API layer. The CLI relies on this to safely retry on transient errors. Full automatic CLI resumption after process interruption is deferred to post-MVP implementation planning per ADR-012.
+**Idempotency:** Evidence collection (SPEC-008 FR-21) is idempotent at the API layer: repeated calls for a trial with `evidence_status = Collected` return HTTP 200 with the existing state. Trial submission linkage (SPEC-008 FR-25) is **not idempotent**: a second call for a trial whose `job_id` is already set returns HTTP 409 `TRIAL_ALREADY_SUBMITTED`. If the CLI receives `TRIAL_ALREADY_SUBMITTED` from `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` during a retry (indicating the first call succeeded but the response was not received), the CLI calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22) to retrieve the already-linked `job_id` for that trial and proceeds without treating the 409 as fatal. Full automatic CLI resumption after process interruption is deferred to post-MVP implementation planning per ADR-012.
 
 **Acceptance Criteria:**
 - Trials are submitted in `(problem_config_index asc, repetition_index asc, solver_set_index asc)` order.
@@ -920,6 +942,10 @@ After all trials have evidence collection attempted and `experiment.status` is n
 - If `--timeout` expires during the submission phase, the CLI completes the current trial's two-step submission and exits with code 4 without beginning the next trial.
 - Experiment auto-completion status is confirmed via `GET /v1/experiments/{experiment_id}` after all trials report terminal.
 - When any trial's job reaches `status = Failed`, evidence collection is still attempted for that trial. The final exit code reflects the worst outcome (code 5 for any trial `status = Failed`; code 6 for `experiment.status = Failed`; code 6 takes precedence).
+- `POST /v1/jobs` returning HTTP 5xx during the submission phase causes immediate exit with code 1; the trial-link step is not attempted.
+- `POST /v1/jobs` network failure during the submission phase is retried once; on a second consecutive failure for the same trial, the CLI exits with code 1.
+- `POST /v1/experiments/{id}/trials/{trial_id}/submit` returning HTTP 5xx (after successful job submit) is retried up to 3 consecutive attempts; on the third consecutive 5xx, the CLI exits with code 1.
+- `TRIAL_ALREADY_SUBMITTED` (HTTP 409) from the trial-link endpoint is treated as success-on-retry: the CLI calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22) to retrieve the already-linked `job_id` and proceeds; it does not exit.
 
 ---
 
@@ -1107,8 +1133,8 @@ Benchmark summary for capacity-comparison-2026 is not yet available.
 | Generation manifest | Developer, file system | JSON per SPEC-002 FR-8 | `--manifest` flag (FR-4); `--save-generation-manifest` flag (FR-5) |
 | Report file | Developer, browser | `text/html` from API | `--output` flag or stdout |
 | Experiment result manifest | Developer, CI | JSON | `<experiment_name>.result.json` (FR-12 `--output-manifest`) |
-| Experiment summary artifact | Developer, CI | JSON per SPEC-008 FR-26 | `experiment summary --output <file>` (FR-19) |
-| Benchmark summary artifact | Developer, CI | JSON per SPEC-008 FR-27 | `benchmark summary --output <file>` (FR-20) |
+| Experiment summary artifact | Developer, CI | JSON per SPEC-008 FR-23 | `experiment summary --output <file>` (FR-19) |
+| Benchmark summary artifact | Developer, CI | JSON per SPEC-008 FR-24 | `benchmark summary --output <file>` (FR-20) |
 | Submission manifest | Developer, CI | JSON | `--save-manifest` flag |
 | Debug log events | Developer | JSON lines on stderr | When `DAEDALUS_LOG=debug` |
 
@@ -1211,7 +1237,7 @@ Benchmark summary for capacity-comparison-2026 is not yet available.
 | Component | Impact |
 |---|---|
 | Domain Layer | Indirect — CLI embeds SPEC-002 generator; generator uses SPEC-001 domain model |
-| API Layer | Indirect — CLI is a caller of the SPEC-008 API; no new API endpoints required for MVP CLI |
+| API Layer | Yes — CLI wraps SPEC-008 FR-2 (job submit), FR-8/FR-9/FR-11 (job lifecycle), FR-10 (scheduler config), FR-12/FR-13 (reports), FR-18 (experiment manifest submission), FR-19 (benchmark manifest submission), FR-20 (experiment status), FR-21 (trial evidence collection), FR-22 (trial results), FR-23 (experiment summary), FR-24 (benchmark summary), FR-25 (trial submission linkage). No API endpoints beyond SPEC-008 are required. |
 | Persistence | None — CLI does not access PostgreSQL |
 | Solver Runtime | None — CLI does not invoke solvers |
 | Simulation Framework | Yes — CLI is the primary entry point for the simulation framework (SPEC-002 generator host) |
@@ -1221,7 +1247,7 @@ Benchmark summary for capacity-comparison-2026 is not yet available.
 
 **SPEC-002 OQ-2 resolution:** SPEC-016 resolves SPEC-002's open question about generator process location. The generator is a library embedded in the CLI binary. This is the "CLI layer" option from SPEC-002 OQ-2 candidate list: "a subcommand of the Daedalus CLI — generator logic in the CLI layer; produces a JSON document without full domain type access." This does not require a revision to SPEC-002 beyond noting the resolution.
 
-**No new SPEC-008 endpoints required at MVP:** The CLI's `job list` command (FR-9) requires a `GET /v1/jobs` list endpoint. If this endpoint is not defined in SPEC-008 at implementation time, `job list` is deferred per OQ-1.
+**SPEC-008 endpoint footprint:** The amendment added the experiment and benchmark command groups (FR-12, FR-17 through FR-21), which wrap SPEC-008 FR-18 through FR-25. The Architectural Impact table above reflects the full endpoint footprint across both the original SPEC-016 commands and the ADR-012 amendment. The CLI's `job list` command (FR-9) requires a `GET /v1/jobs` list endpoint not yet defined in SPEC-008; `job list` is deferred per OQ-1.
 
 ---
 
