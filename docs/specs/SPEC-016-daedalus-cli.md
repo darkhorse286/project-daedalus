@@ -12,13 +12,13 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated. Acceptance Review (amendment) revisions applied: AC-SF-001 benchmark submit testability entries added; AC-SF-002 FR-12 result manifest AC and testability entry updated to include problem_id and evidence_status; AC-SF-003 experiment run JSON output mode testability entries added; AC-SF-004 submission phase error handling testability entries added; AC-SF-005 evidence_status = Error non-fatal testability entry added; AC-NTH-001 experiment summary ACs differentiate EXPERIMENT_NOT_FOUND from EXPERIMENT_SUMMARY_NOT_FOUND; AC-NTH-002 evidence_status added to cli.experiment.evidence_collect log event.)
+**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated. Acceptance Review (amendment) revisions applied: AC-SF-001 benchmark submit testability entries added; AC-SF-002 FR-12 result manifest AC and testability entry updated to include problem_id and evidence_status; AC-SF-003 experiment run JSON output mode testability entries added; AC-SF-004 submission phase error handling testability entries added; AC-SF-005 evidence_status = Error non-fatal testability entry added; AC-NTH-001 experiment summary ACs differentiate EXPERIMENT_NOT_FOUND from EXPERIMENT_SUMMARY_NOT_FOUND; AC-NTH-002 evidence_status added to cli.experiment.evidence_collect log event. OQ-2 resolved — CLI implementation language is C++; ADR-001 and ADR-010 added to Related ADRs.)
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-012
+**Related ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-010, ADR-012
 
 **Related Specs:** SPEC-001, SPEC-002, SPEC-003, SPEC-005, SPEC-008, SPEC-009, SPEC-012, SPEC-020
 
@@ -1468,20 +1468,13 @@ SPEC-016 also requires support for optional `?status=` and `?limit=` query param
 
 ---
 
-### OQ-2: CLI Implementation Language
+### CLI Implementation Language
 
-**Question:** What language is the Daedalus CLI implemented in?
+The Daedalus CLI is implemented in C++.
 
-**Why it matters:** The CLI embeds the SPEC-002 generator (FR-4, FR-5), which in Core is a C++ library. Three options exist:
-- (a) C++ — shares generator code directly with Core; requires a C++ CLI framework.
-- (b) C# — consistent with the API implementation language (ADR-002); requires the generator to be reimplemented or called via FFI.
-- (c) Another language (Go, Rust) — standalone; requires the generator to be independently implemented.
+The CLI shares the routing problem model, synthetic workload generator, and ADR-010 reproducibility implementation with the Core runtime.
 
-**Architectural note:** If the CLI is implemented in C++ (option a), it naturally hosts the same generator library as Core, eliminating a reimplementation risk. If implemented in another language, the generator must be independently implemented, and divergence from Core's implementation (PRNG sequence, Earth radius constant, distribution algorithms) is a risk.
-
-**Owner:** Project Owner decision. Resolution required before implementation begins.
-
-**Blocking:** Blocking for implementation. Not blocking for specification acceptance.
+This decision eliminates duplicate implementations of PCG64, approved distribution algorithms, and seed derivation behavior.
 
 ---
 
@@ -1568,7 +1561,7 @@ SPEC-008 FR-18 acknowledges this as "Backend capability-profile validation gap (
 - [x] SPEC-020 orchestration model applied: SPEC-020 manifest format, trial submission order, evidence collection trigger, instance-sharing invariant documented.
 - [x] Trace propagation posture documented (ADR-011, ADR-012): CLI does not inject trace context; API owns trace roots.
 - [ ] OQ-1 resolved — `GET /v1/jobs` list endpoint added to SPEC-008 via future revision (blocking for `job list` command only; endpoint contract owned by SPEC-008, not SPEC-016).
-- [ ] OQ-2 resolved — CLI implementation language (blocking for implementation).
+- [x] OQ-2 resolved — CLI is implemented in C++ (ADR-001, ADR-010).
 - [ ] OQ-4 resolved — `--wait` default behavior (non-blocking; current spec uses opt-in).
 - [ ] OQ-5 resolved — Generated Mode implementation (depends on SPEC-008 OQ-7; non-blocking for Fixed Mode).
 - [ ] OQ-6 resolved — per-backend job targeting mechanism (blocking for correct multi-backend experiments; requires SPEC-008-R1 amendment).
@@ -1597,7 +1590,7 @@ This feature is complete when:
 - Experiment observability events (FR-16) are emitted under `DAEDALUS_LOG=debug` for each trial submission and evidence collection.
 - All exit codes (FR-14, codes 0–6) are consistent across command paths and verified by testability behaviors.
 - All error outputs (FR-15) are structured and do not expose internal details.
-- OQ-2 (implementation language) is resolved and the implementation language is recorded.
+- The CLI is implemented in C++ (OQ-2 resolved).
 - `job list` (FR-9) is either implemented (if OQ-1 is resolved) or explicitly deferred with a note.
 - The generated routing problem document produced by `problem generate` passes SPEC-001 domain validation when submitted to the API.
 - The portfolio demonstration path — `daedalus problem run <config> --wait` followed by `daedalus report show <job_id>` — completes end-to-end against a running Docker Compose environment.

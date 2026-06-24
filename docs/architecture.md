@@ -234,7 +234,7 @@ Responsibilities:
 
 ### Daedalus CLI
 
-The developer-facing and automation-facing interface for Project DAEDALUS (SPEC-016).
+The developer-facing and automation-facing interface for Project DAEDALUS (SPEC-016). The CLI is implemented in C++ to allow direct reuse of the routing problem model, the synthetic workload generator, and the ADR-010 reproducibility implementation.
 
 Responsibilities:
 
@@ -458,8 +458,6 @@ The following questions are identified but not yet resolved. No question is reso
 These questions must be resolved before implementation of the affected component begins.
 
 **SPEC-016 OQ-6: Per-backend job targeting.** `POST /v1/jobs` accepts `problem_id` and `scheduler_config_id` but no `backend_id`. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy. There is no current mechanism to guarantee that a trial job is processed by the `backend_id` that trial requires. This blocks correct per-backend attribution in multi-backend experiments and is the most significant unresolved concern for the experiment harness. Resolution requires a SPEC-008 amendment; candidate approaches are listed in SPEC-016 OQ-6.
-
-**SPEC-016 OQ-2: CLI implementation language.** The implementation language for the Daedalus CLI is a Project Owner decision. The CLI embeds the SPEC-002 synthetic workload generator; if implemented in C++, the generator library is shared directly with Core. If implemented in another language, the generator requires independent reimplementation preserving the ADR-010 PCG64 and distribution algorithm guarantees. This must be resolved before CLI implementation begins.
 
 ### MVP-Safe Open Questions
 
