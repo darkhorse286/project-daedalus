@@ -271,7 +271,7 @@ Responsibilities:
 * Respond to `GET /health` for liveness and readiness checks
 * Manage Python environment and dependencies
 
-**Transport contract:** JSON over HTTP on port 8080 within the Docker Compose internal network. The Worker dispatches all Python-backend solver invocations as `POST http://{adapter-host}:8080/v1/solve`. HTTP 200 signals that a SolverResponse was produced; HTTP non-200 signals that no SolverResponse was produced (adapter-level failure). The Worker constructs a Timeout or Failed SolverResponse on HTTP client timeout or non-200.
+**Transport contract:** JSON over HTTP within the Docker Compose internal network (ADR-005, SPEC-017). The Worker dispatches each Python-backend invocation as an HTTP POST carrying a SolverRequest and receives a SolverResponse. HTTP non-200 signals adapter-level failure; the Worker constructs a Timeout or Failed SolverResponse on client timeout or non-200. The adapter enforces execution timeouts by self-terminating the active solver before the deadline. Wire format details are defined by SPEC-017.
 
 Non-responsibilities:
 
@@ -286,26 +286,13 @@ Python is an adapter, not the center of the runtime. Individual Python backend s
 
 Single PostgreSQL instance (ADR-004). The authoritative durable state store for all components.
 
-**Job execution tables** — written by Worker and API, governed by SPEC-006 and SPEC-012:
+Two table groups share the instance.
 
-* `routing_problems` — routing problem definitions (immutable after creation)
-* `scheduler_configurations` — objective and policy configurations
-* `jobs` — job lifecycle records (no experiment reference field — ADR-012 Decision 4)
-* `decision_records` — scheduler decisions including workload feature snapshots (JSONB) and candidate scores
-* `solver_run_records` — per-execution solver behavior and outcome
-* `quality_evaluation_records` — route quality metrics and regret analysis
-* `failure_records` — structured failure diagnostics
-* `report_metadata_records` — evidence report file path references
+**Job execution tables** are written by the Worker and API. They persist routing problem definitions, scheduler configurations, job lifecycle state, scheduler decisions (including workload feature snapshots), solver outcomes, quality evaluations, and evidence report references. Write ownership boundaries are defined by SPEC-006 and SPEC-012.
 
-**Experiment and benchmark tables** — written exclusively by the API, governed by SPEC-020 and SPEC-012:
+**Experiment and benchmark tables** are written exclusively by the API. They persist experiment manifests, benchmark manifests, per-trial records (including the job_id linkage), collected evidence per trial, and computed summary artifacts. The Worker does not access these tables (ADR-012 Decision 4). Schema is defined by SPEC-012.
 
-* `benchmark_manifests` — benchmark identifiers, research questions, hypotheses
-* `experiments` — experiment manifests and lifecycle state
-* `experiment_trials` — per-trial records linking `trial_id`, `problem_id`, `backend_id`, `job_id`, and collected evidence
-* `experiment_artifacts` — per-experiment summary artifact payloads
-* `benchmark_summaries` — cross-experiment aggregate summary artifacts
-
-Backend capability profiles are not stored in PostgreSQL (SPEC-012 FR-2). Workload feature snapshots are embedded in `decision_records` as JSONB, not stored in a separate table (SPEC-012 FR-3). The `uint64` values (`seed`, `execution_seed`, `experiment_seed`) are stored as `bigint` using two's complement encoding (SPEC-012 FR-4.3).
+Backend capability profiles are not stored in PostgreSQL. Workload feature snapshots are embedded in scheduler decision records, not in a separate table. Physical schema, column types, and write ownership rules are defined by SPEC-012.
 
 ### RabbitMQ
 
@@ -366,13 +353,13 @@ Six architectural decisions (ADR-012) govern how the experiment harness integrat
 
 **Decision 1 — CLI is the orchestration executor.** The CLI process drives the experiment trial loop: submitting trials as individual jobs, polling job status endpoints for trial completion, and triggering API-mediated evidence collection per terminal trial. No new deployment unit is introduced (Decision 6). The `daedalus experiment run` command is a scoped exception to the CLI's single-invocation posture; it is a long-running process for the duration of the experiment.
 
-**Decision 2 — API is the durable state authority.** All experiment and benchmark state — manifests, trial records, collected evidence, computed statistics, and summary artifact payloads — is persisted by the API. This supersedes the pre-SPEC-020 model (SPEC-016 OQ-3) in which only a local result file was produced. State is recoverable via API queries after any CLI exit.
+**Decision 2 — API is the durable state authority.** All experiment and benchmark state — manifests, trial records, collected evidence, computed statistics, and summary artifact payloads — is persisted by the API. State is recoverable via API queries after any CLI exit. A local result manifest is also written by the CLI, but the API is authoritative.
 
-**Decision 3 — Instance-sharing invariant.** In experiment context, the one-problem-one-job constraint (SPEC-008 FR-7, SPEC-001 Assumptions) is relaxed. For each `(problem_config_index, repetition_index)` combination, all backends in the solver set share a single `problem_id`. This applies in both Fixed Mode (pre-existing problem IDs) and Generated Mode (harness-generated problem IDs). The relaxation is experiment-context only. No schema migration is required: `jobs.problem_id` carries no UNIQUE constraint (SPEC-012 FR-6).
+**Decision 3 — Instance-sharing invariant.** In experiment context, the one-problem-one-job constraint is relaxed. For each `(problem_config_index, repetition_index)` combination, all backends in the solver set share a single `problem_id`. This is required for valid cross-solver quality comparisons. The relaxation is experiment-context only and does not require a schema migration.
 
-**Decision 4 — Worker remains experiment-unaware.** The Worker processes each job as a standard job submission. No experiment identifier appears in the `jobs` table. The experiment-to-job linkage exists exclusively in the trial record (`experiment_trials` table, API-owned), which holds the `job_id` assigned at trial submission.
+**Decision 4 — Worker remains experiment-unaware.** The Worker processes each job as a standard job submission. Job records carry no experiment reference. The experiment-to-job linkage exists exclusively in the API-owned trial record, which holds the `job_id` assigned at trial submission.
 
-**Decision 5 — API-mediated evidence collection.** When the CLI detects a terminal trial job via polling, it calls `POST /v1/experiments/{id}/trials/{trial_id}/collect-evidence`. The API reads from Evidence Log tables (unrestricted reading per SPEC-006 FR-1.3) and writes the collected evidence to the trial record. This complies with SPEC-006 FR-1.3 (Worker is the sole writer of Evidence Log artifact tables) because the API writes to experiment trial records, not to Evidence Log tables.
+**Decision 5 — API-mediated evidence collection.** When the CLI detects a terminal trial job via polling, it triggers evidence collection via the API's collect-evidence endpoint. The API reads from Evidence Log tables and writes the collected evidence to the trial record. This respects the Evidence Log write-ownership boundary: the API writes to experiment trial records, not to Evidence Log tables.
 
 **Decision 6 — No additional deployment unit for MVP.** The experiment harness runs within the existing Docker Compose topology. No dedicated experiment service, background task runner, or experiment coordinator container is introduced.
 
@@ -391,7 +378,7 @@ ADR-007 defers actual quantum hardware execution beyond the MVP.
 * QAOA hardware circuit submission (behavioral contract specified in SPEC-019, execution deferred)
 * Any cloud quantum backend integration requiring external credentials or network access
 
-The `qaoa-hardware` backend specification (SPEC-019) defines the full behavioral contract for hardware-backed QAOA: queue-phase timeout accounting, hardware job cancellation, non-reproducible shot outcomes, calibration failure modes, monetary cost reporting, and the hardware evidence fields required for meaningful scheduler rejection evidence. The Scheduler can classify and reject this backend when classical methods satisfy the configured objective, which is the project's thesis artifact. SPEC-019 inherits the QAOA algorithm and QUBO formulation from SPEC-018; the boundary between the two is the shot measurement source (local simulator vs. hardware QPU).
+SPEC-019 defines the behavioral contract for the `qaoa-hardware` backend, including timeout accounting, cancellation, non-reproducible shot outcomes, and hardware evidence fields. The Scheduler can classify and reject this backend when classical methods satisfy the configured objective — this is the project's thesis artifact. The boundary between SPEC-018 and SPEC-019 is the shot measurement source: local Aer simulator vs. hardware QPU. Behavioral details are defined by SPEC-019.
 
 ## Trace Context Propagation
 
@@ -401,9 +388,7 @@ The API and Worker communicate through RabbitMQ. The asynchronous boundary sever
 
 **Trace relationship:** `job.consume` is the root of the Worker trace hierarchy. All subsequent Worker spans (`problem.load`, `solver.execute`, `result.evaluate`, etc.) are in-process children of `job.consume`. Core-emitted spans (`features.extract`, `scheduler.score_solvers`) propagate the in-process context received from the Worker and appear as descendants of `job.consume`.
 
-**No schema changes:** The message payload schema (`job_id`, `problem_id`, `scheduler_config_id`) is unchanged. The job record schema is unchanged. AMQP `application_headers` are message metadata, outside the payload schema boundary defined by SPEC-008 FR-5 and SPEC-005 FR-3.
-
-**Re-delivery:** On message re-delivery (SPEC-005 FR-14), the original `traceparent` travels with the redelivered message. Both the original execution attempt and any re-delivered attempt are linked to the same originating `job.submit` context.
+**Re-delivery:** On message re-delivery, the original `traceparent` travels with the redelivered message. Both the original execution attempt and any re-delivered attempt are linked to the same originating `job.submit` context. The message payload and job record schemas are unchanged; W3C TraceContext travels in AMQP message metadata only.
 
 **CLI:** The CLI does not inject `traceparent` or `tracestate` headers into outgoing API requests. The API creates a new trace root per inbound request.
 
@@ -411,19 +396,16 @@ The API and Worker communicate through RabbitMQ. The asynchronous boundary sever
 
 ## Reproducibility Policy
 
-ADR-010 establishes the reproducibility policy governing all stochastic computation in Project DAEDALUS.
+Project DAEDALUS follows the reproducibility requirements established by ADR-010.
 
-**PRNG algorithm:** PCG64 (Permuted Congruential Generator). Platform-independent output sequence on conforming C++17 toolchains using only 64-bit and 128-bit integer arithmetic. Seeded with the problem seed (SPEC-001 FR-6) as the initial state; the per-component stream constant (PCG64 increment) is fixed at specification acceptance and frozen as a breaking-change boundary.
+- PCG64 governs all approved stochastic processes.
+- Worker-derived execution seeds are the authoritative entropy source.
+- Python backends consume the `execution_seed` provided by the Worker via the SolverRequest.
+- Approved distribution algorithms and seed derivation rules are governed by ADR-010.
+- Any change to the PRNG algorithm, seeding procedure, or approved distribution algorithm is a system-level breaking change requiring an ADR-010 update.
+- Quantum hardware execution is exempt from reproducibility guarantees because hardware measurement outcomes are inherently non-deterministic.
 
-**Python backends:** PCG64 is realized in Python via `numpy.random.SeedSequence(execution_seed, spawn_key=(BACKEND_SPAWN_KEY,))`. Each Python backend specification declares a unique, frozen `BACKEND_SPAWN_KEY`. The Worker-derived `execution_seed` is the exclusive entropy source; `routing_problem.seed` must not be used as PRNG entropy in Python backends (SPEC-017 FR-9).
-
-**Distribution sampling:** Box-Muller transform for normal distributions; bias-free bounded integer algorithms (not `std::uniform_int_distribution`, which is implementation-defined); portable uniform-float conversion (`u = (v >> 11) × (1.0 / (1ULL << 53))`). All approved algorithms are frozen.
-
-**Reproducibility scope:** Semantic equivalence across conforming C++17 toolchains on IEEE 754 double precision platforms. PCG64 integer sequences are bitwise identical across platforms; transcendental-derived floating-point values are semantically equivalent within IEEE 754 (not required bitwise identical).
-
-**Breaking changes:** Any change to the PRNG algorithm, seeding procedure, approved distribution algorithm, uniform-float formula, or component stream constant is a system-level breaking change requiring an ADR-010 update and version-boundary documentation in all affected specifications.
-
-**Exception:** The `qaoa-hardware` backend (SPEC-019, category `quantum_hardware`) is non-reproducible by nature. Hardware shot outcomes depend on QPU state and are not governed by the PCG64 reproducibility invariant. Classical pre-processing for this backend remains seeded and deterministic.
+Detailed reproducibility requirements, approved algorithms, semantic equivalence guarantees, and breaking-change rules are defined by ADR-010.
 
 ## MVP Container Topology
 
@@ -456,62 +438,39 @@ flowchart TB
 
 The CLI runs on the developer workstation outside the Docker Compose environment, accessing the API through the published port (`http://localhost:5000` by default). The Python Solver Adapter is a long-running container; the Worker dispatches Python-backend invocations to it via HTTP POST to port 8080 of the internal Docker network. The `python-adapter` container is not launched by the Worker; it is started by Docker Compose and runs continuously alongside the other services.
 
-## Accepted Specifications
+## Governing Specifications
 
-All twenty specifications are Accepted.
+The architecture described in this document is governed by the accepted specifications under `docs/specs/` and the accepted architectural decisions under `docs/adr/`.
 
-| Spec | Title |
-|---|---|
-| SPEC-001 | Routing Problem Model |
-| SPEC-002 | Synthetic Workload Generator |
-| SPEC-003 | Scheduler Objectives and Policy Engine |
-| SPEC-004 | Solver Contract |
-| SPEC-005 | Worker Execution Lifecycle |
-| SPEC-006 | Evidence Log |
-| SPEC-007 | Core Quality Evaluation |
-| SPEC-008 | API / Control Plane |
-| SPEC-009 | Report Generator |
-| SPEC-010 | Core Feature Extraction |
-| SPEC-011 | Backend Solver Specifications Framework |
-| SPEC-012 | Persistence Schema |
-| SPEC-013 | Nearest Neighbor Solver |
-| SPEC-014 | Greedy Insertion Solver |
-| SPEC-015 | QUBO Simulated Annealing Solver |
-| SPEC-016 | Daedalus CLI |
-| SPEC-017 | Python Solver Adapter |
-| SPEC-018 | QAOA Solver Backend (Local Simulator) |
-| SPEC-019 | Quantum Hardware Solver Backend |
-| SPEC-020 | Benchmark and Experiment Harness |
+As of 2026-06-23:
 
-## Accepted Architectural Decisions
+- 20 specifications accepted.
+- 12 architectural decisions accepted.
 
-All twelve ADRs are Accepted.
-
-| ADR | Decision | Key Outcome |
-|---|---|---|
-| ADR-001 | C++ Runtime Language | C++ for Worker and Core |
-| ADR-002 | C# ASP.NET Core Control Plane | C# for the API |
-| ADR-003 | RabbitMQ Execution Boundary | RabbitMQ as the async job queue; `routing-jobs` and dead-letter queues |
-| ADR-004 | PostgreSQL Persistence | Single PostgreSQL instance; no ORM; migration tooling deferred |
-| ADR-005 | Python Solver Adapter Role and Contract | Python confined to adapter container; JSON over HTTP transport resolved by SPEC-017 |
-| ADR-006 | Observability Stack | OpenTelemetry + Prometheus + Grafana; C++ SDK maturity noted as an accepted risk |
-| ADR-007 | Quantum Hardware Deferral | Hardware execution deferred; Qiskit Aer local simulation in MVP via SPEC-018 |
-| ADR-008 | Solver Contract and Backend Neutrality | Normalized SolverContract (SPEC-004) across all backends; no privileged solver categories |
-| ADR-009 | Domain Validation Authority | API and Core own domain validation; the CLI defers all domain validation to the API |
-| ADR-010 | Deterministic Randomness and Reproducibility | PCG64; semantic equivalence scope; Box-Muller; breaking-change governance |
-| ADR-011 | Trace Context Propagation | W3C TraceContext in AMQP `application_headers`; no payload or schema changes |
-| ADR-012 | Experiment Execution Architecture | CLI orchestrates; API persists; Worker experiment-unaware; instance-sharing invariant; API-mediated evidence collection; no new deployment unit |
+Detailed behavioral, persistence, API, and implementation requirements are defined by the individual specifications and ADRs. This document provides the architectural view of the system and the relationships between its major components.
 
 ## Open Architecture Questions
 
-The following questions are identified but not yet resolved.
+The following questions are identified but not yet resolved. No question is resolved by this document.
 
-**ADR-011 OQ-1: C++ OpenTelemetry SDK integration for AMQP metadata.** The concrete approach for extracting W3C TraceContext from AMQP `application_headers` in the C++ Worker has not been confirmed. The OpenTelemetry C++ SDK does not provide a built-in AMQP integration. The specific carrier implementation must be assessed during Worker implementation planning. If no viable approach exists, the fallback is to persist trace context in the PostgreSQL job record, requiring a SPEC-006 amendment under ODR-6.
+### Implementation Blockers
 
-**SPEC-008 OQ-7: Generated workload set routing problem creation mechanism.** The API mechanism for creating routing problems from a generated workload set descriptor (SPEC-020 Generated Mode) is not yet defined. The CLI rejects Generated Mode experiment manifests at MVP scope. SPEC-016 OQ-5 tracks this as a CLI-side dependency on the SPEC-008 resolution.
+These questions must be resolved before implementation of the affected component begins.
 
-**SPEC-016 OQ-6: Per-backend job targeting.** `POST /v1/jobs` (SPEC-008 FR-2) accepts `problem_id` and `scheduler_config_id` but no `backend_id`. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy. There is no current mechanism to guarantee that a trial job is processed by the specific `backend_id` that trial requires. This blocks correct per-backend attribution in multi-backend experiments. Resolution requires a SPEC-008 amendment (candidate resolutions are listed in SPEC-016 OQ-6).
+**SPEC-016 OQ-6: Per-backend job targeting.** `POST /v1/jobs` accepts `problem_id` and `scheduler_config_id` but no `backend_id`. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy. There is no current mechanism to guarantee that a trial job is processed by the `backend_id` that trial requires. This blocks correct per-backend attribution in multi-backend experiments and is the most significant unresolved concern for the experiment harness. Resolution requires a SPEC-008 amendment; candidate approaches are listed in SPEC-016 OQ-6.
 
-**SPEC-003 OQ-2: Backend capability profile registration mechanism.** How backend capability profiles enter the Scheduler's runtime registry at startup is not resolved. PostgreSQL is not the registration store (SPEC-012 FR-2 determination). The specific mechanism — configuration file, compiled-in registry, or another approach — is an implementation planning decision.
+**SPEC-016 OQ-2: CLI implementation language.** The implementation language for the Daedalus CLI is a Project Owner decision. The CLI embeds the SPEC-002 synthetic workload generator; if implemented in C++, the generator library is shared directly with Core. If implemented in another language, the generator requires independent reimplementation preserving the ADR-010 PCG64 and distribution algorithm guarantees. This must be resolved before CLI implementation begins.
 
-**SPEC-016 OQ-2: CLI implementation language.** The implementation language for the Daedalus CLI is a Project Owner decision. The CLI embeds the SPEC-002 synthetic workload generator; if implemented in C++, the generator library is shared directly with Core. If implemented in another language, the generator requires independent reimplementation with the same PCG64 and distribution algorithm guarantees (ADR-010). This must be resolved before CLI implementation begins.
+### MVP-Safe Open Questions
+
+These questions do not block the MVP but must be assessed during implementation planning.
+
+**ADR-011 OQ-1: C++ OpenTelemetry SDK integration for AMQP metadata.** The concrete approach for extracting W3C TraceContext from AMQP `application_headers` in the C++ Worker has not been confirmed. The OTel C++ SDK does not provide a built-in AMQP integration. If no viable carrier implementation exists, the designated fallback is to persist trace context in the PostgreSQL job record (requires a SPEC-006 revision under ODR-6). Tracing is not on the critical execution path; the fallback is viable for MVP.
+
+**SPEC-003 OQ-2: Backend capability profile registration mechanism.** How backend capability profiles enter the Scheduler's runtime registry at startup is not resolved. PostgreSQL is not the registration store. The specific mechanism — configuration file, compiled-in registry, or another approach — is an implementation planning decision and does not affect the behavioral contract.
+
+### Future Capability Dependencies
+
+These questions are out of scope for MVP and do not require resolution before MVP implementation begins.
+
+**SPEC-008 OQ-7: Generated workload set routing problem creation mechanism.** The API mechanism for creating routing problems from a Generated Mode workload set descriptor is not yet defined. The CLI rejects Generated Mode manifests at MVP scope. Resolution is required before Generated Mode experiment execution can be supported.
