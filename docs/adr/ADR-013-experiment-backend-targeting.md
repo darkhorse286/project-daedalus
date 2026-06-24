@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted
+Proposed
 
 **Date:** 2026-06-23
 
 **Related Feature(s):** Benchmark and Experiment Harness (SPEC-020), API / Control Plane (SPEC-008), Daedalus CLI (SPEC-016)
 
-**Related ADR(s):** ADR-008, ADR-009, ADR-012
+**Related ADR(s):** ADR-003, ADR-008, ADR-009, ADR-012
 
 ---
 
@@ -49,9 +49,9 @@ ADR-013 selects approach (a) and establishes the behavioral contract for backend
 
 2. The experiment harness (CLI) supplies `backend_id` on every trial job submission. `backend_id` is set to the backend identifier from the trial record (`experiment_trials.backend_id`). This makes backend targeting the harness's submission contract, not a server-enforced requirement. The API does not distinguish experiment-context submissions from standard submissions.
 
-3. When `backend_id` is present, the Scheduler validates the specified backend's eligibility for the routing problem using the same capability-checking rules applied in the standard path. Eligibility failure on a targeted backend is not recoverable by policy: the Scheduler does not fall back to another backend. The job transitions to a terminal state with a Scheduler rejection outcome.
+3. When `backend_id` is present, the Scheduler validates the specified backend's eligibility for the routing problem using the same capability-checking rules applied in the standard path. Eligibility failure on a targeted backend is not recoverable by policy: the Scheduler does not fall back to another backend. The job transitions to a terminal state with a Scheduler rejection outcome. The targeted path reuses the existing `decision_status = NoEligibleSolver` outcome code; no new `decision_status` value is introduced. The `selection_mode = explicitly_targeted` field in the decision record is the distinguishing field: queries for targeted eligibility failures filter on `decision_status = NoEligibleSolver AND selection_mode = explicitly_targeted`.
 
-4. The Scheduler persists a decision record for both paths. Decision records include a `selection_mode` field distinguishing `policy_selected` (standard path) from `explicitly_targeted` (targeted path). This field is required for evidence traceability: it allows post-hoc verification that each trial's evidence was produced by the claimed backend.
+4. The Scheduler persists a decision record for both paths. Decision records include a `selection_mode` field distinguishing `policy_selected` (standard path) from `explicitly_targeted` (targeted path). This field is required for evidence traceability: it allows post-hoc verification that each trial's evidence was produced by the claimed backend. In the targeted path, scoring is bypassed: `candidate_scores` is empty (no backends are scored) and `confidence_score` is `0.0`. The `selection_mode = explicitly_targeted` field distinguishes this `0.0` from the standard-path case where only one backend was eligible by policy.
 
 5. The Worker passes `backend_id` (when present in the job message) to the Scheduler for eligibility evaluation and backend dispatch. The Worker has no knowledge of experiments. A targeted job is a standard job that contains an additional routing field in the queue message. From the Worker's perspective, this is an additive field, not an experiment concept.
 
@@ -244,18 +244,30 @@ The following amendments are required as a consequence of this decision. Each am
 - FR-18 (Experiment Trial Orchestration Loop): Amend per-trial job submission to include the trial's `backend_id` in the `POST /v1/jobs` request body. The `backend_id` for each trial is read from the trial record retrieved via `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22). The `backend_id` is set to `experiment_trials.backend_id`, which is populated by the API at experiment creation time from the manifest's `solver_set`.
 - OQ-6: Mark as resolved. Resolution: optional `backend_id` on `POST /v1/jobs`, supplied by the CLI for every experiment trial job submission. ADR-013 is the authoritative resolution.
 
+**SPEC-005 (Required — Blocked by this ADR):**
+- FR-5 (Core Invocation): Add optional `backend_id` targeting constraint as a third parameter to the Worker-to-Core invocation call, alongside the C++ domain representation of the routing problem and the resolved scheduler configuration object. When `backend_id` is present in the job message, the Worker extracts it and passes it to Core. Core passes it to the Scheduler to apply the targeted path. When `backend_id` is absent, the Core invocation is unchanged.
+- Inputs table: Update the job message row to reflect that the queue message may contain an optional `backend_id` field when present in the original job submission.
+
 **SPEC-003 (Required — Blocked by this ADR):**
-- Add `selection_mode` to the Scheduler decision record. Valid values: `policy_selected` (standard path, Scheduler selected by objective function and eligibility), `explicitly_targeted` (targeted path, caller specified the backend). The `selection_mode` field must be persisted in the decision record and must appear in all decision record outputs consumed by the evidence report (SPEC-009) and the Evidence Log (SPEC-006).
-- Add the no-fallback rule for `explicitly_targeted` decisions: if the specified backend fails the eligibility check, the Scheduler records a decision with `selection_mode = explicitly_targeted` and a rejection outcome. No alternative backend is evaluated or selected. The job transitions to the Scheduler rejection terminal state. This rule is load-bearing for benchmark validity and must not be treated as optional.
+- FR-2 (Scheduler Inputs): Add optional `backend_id` targeting constraint as a fifth Scheduler input alongside routing problem, workload features, scheduler configuration, and backend registry. When present, the Scheduler applies the targeted path. When absent, the standard path is applied unchanged.
+- FR-7 (Candidate Scoring): Define the scoring bypass for the targeted path. When `backend_id` is present, the Scheduler performs eligibility validation on the specified backend only. No other backends are scored. `candidate_scores` contains no entries for bypassed backends. The targeted backend receives no policy score.
+- FR-8 (Candidate Selection): Define the targeted selection path. When `backend_id` is present and the backend is eligible, it is selected without scoring. No tiebreaker applies. When ineligible, `decision_status = NoEligibleSolver` is recorded with `selection_mode = explicitly_targeted` (see no-fallback rule below).
+- FR-10 (Decision Record): Add `selection_mode` field. Valid values: `policy_selected` (standard path, Scheduler selected by objective function and eligibility), `explicitly_targeted` (targeted path, caller specified the backend). The `selection_mode` field must be persisted in the decision record and must appear in all decision record outputs consumed by the evidence report (SPEC-009) and the Evidence Log (SPEC-006). Specify `candidate_scores` and `confidence_score` semantics for the targeted path: `candidate_scores` is empty (scoring bypassed); `confidence_score` is `0.0`. The `selection_mode = explicitly_targeted` field provides context distinguishing this `0.0` from the standard-path single-eligible-backend case.
+- FR-15 (Telemetry): Update `scheduler.score_solvers` span attributes to include `selection_mode`. Clarify `backend_count_eligible` semantics for the targeted path: when `backend_id` is present and the backend passes eligibility, `backend_count_eligible = 1`; when ineligible, `backend_count_eligible = 0`.
+- No-fallback rule for `explicitly_targeted` decisions: if the specified backend fails the eligibility check, the Scheduler records a decision with `decision_status = NoEligibleSolver` and `selection_mode = explicitly_targeted`. No alternative backend is evaluated or selected. The job transitions to the Scheduler rejection terminal state. This rule is load-bearing for benchmark validity and must not be treated as optional.
 
 **SPEC-012 (Required — Blocked by this ADR):**
 - Add nullable `backend_id` column to the `jobs` table. NULL represents standard-path submissions. The column is populated by the API at job creation time when `backend_id` is present in the submission request.
 - Add `selection_mode` column to the `decision_records` table. Values: `policy_selected`, `explicitly_targeted`. The column is populated by the Worker's Scheduler at decision record persistence time (SPEC-005 FR-16, SPEC-006 FR-6).
 - Update FR-15 (Read/Write Ownership Map) to reflect that `jobs.backend_id` is written by the API at job creation time (extending the existing API write ownership on `jobs`).
 
+**SPEC-009 (Required — Blocked by SPEC-003 and SPEC-012 amendments):**
+- Scheduler Decision section of the evidence report must display `selection_mode`. When `selection_mode = explicitly_targeted`, the report must surface the targeted `backend_id` alongside the selection mode to allow readers to verify that the evidence was produced by the claimed backend. The field is read from the `decision_records` table (SPEC-012) and requires no new Worker logic.
+
 **docs/architecture.md (Required):**
 - Remove "SPEC-016 OQ-6: Per-backend job targeting" from the Implementation Blockers section under Open Architecture Questions. This question is resolved by ADR-013.
 - Update the Experiment Execution Flow sequence diagram: the `POST /v1/jobs` call in the Submit phase should reflect `(problem_id, backend_id)` to show that the experiment harness supplies a backend targeting directive per trial.
+- Update the RabbitMQ section: the statement "The message payload fields (`job_id`, `problem_id`, `scheduler_config_id`) are unchanged" will become stale after SPEC-008 FR-5 is amended. Revise to reflect that the queue message payload includes an optional `backend_id` field when present in the job submission: `{job_id, problem_id, scheduler_config_id, backend_id (optional)}`.
 
 ---
 
