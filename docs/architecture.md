@@ -136,7 +136,7 @@ sequenceDiagram
     API-->>CLI: Trial set (trial_id, problem_id, backend_id per trial)
 
     loop Submit phase — (problem_config_index asc, repetition_index asc, solver_set_index asc)
-        CLI->>API: POST /v1/jobs (problem_id)
+        CLI->>API: POST /v1/jobs (problem_id, backend_id)
         API->>Queue: Publish job
         API-->>CLI: job_id
         CLI->>API: POST /v1/experiments/{id}/trials/{trial_id}/submit (job_id)
@@ -145,7 +145,7 @@ sequenceDiagram
 
     loop Poll phase — until all trials terminal
         CLI->>API: GET /v1/jobs/{job_id}
-        Note over Worker: Worker executes each job independently
+        Note over Worker: Worker executes each job independently; backend_id forwarded to Scheduler as routing constraint
         CLI->>API: POST /v1/experiments/{id}/trials/{trial_id}/collect-evidence
         API->>DB: Read Evidence Log → persist evidence in trial record
         CLI->>API: GET /v1/experiments/{id}
@@ -157,6 +157,8 @@ sequenceDiagram
 
 For all backends in a solver set targeting the same `(problem_config_index, repetition_index)`, the harness shares a single `problem_id` (ADR-012 Decision 3 instance-sharing invariant). This is required for valid cross-solver quality comparisons under SPEC-007 FR-7: `hindsight_quality` is dimensionally comparable only within the same routing problem.
 
+Each trial job submission includes the trial's `backend_id`, directing the Scheduler to the specific backend that trial targets (ADR-013). The Scheduler validates the specified backend's eligibility and routes execution to it without fallback. Scheduler decision records include `selection_mode = explicitly_targeted` for all trial job executions, enabling post-hoc verification that each trial's evidence was produced by the claimed backend.
+
 ## Major Components
 
 ### Daedalus API
@@ -165,9 +167,10 @@ The C# ASP.NET Core control plane.
 
 Responsibilities:
 
-* Validate routing job requests
-* Persist jobs and problem definitions
-* Publish job messages to RabbitMQ
+* Validate routing job requests, including format validation of the optional `backend_id` field for targeted submissions
+* Persist jobs, problem definitions, and optional `backend_id` routing directives in the job record
+* Publish job messages to RabbitMQ, including `backend_id` when present in the submission
+* Accept both standard submissions (`backend_id` absent — Scheduler selects by policy) and targeted submissions (`backend_id` present — Scheduler validates and routes to the specified backend without fallback)
 * Expose job status, lifecycle, and report access endpoints
 * Expose scheduler configuration endpoints
 * Serve report metadata and links
@@ -180,6 +183,7 @@ Non-responsibilities:
 * Solver execution
 * Heavy optimization logic
 * Scheduler scoring
+* Backend eligibility determination — the API validates only that `backend_id` is a non-empty string; the Scheduler is the authority for capability validation and backend selection (ADR-013)
 * Workload feature extraction
 * Experiment orchestration loop — the CLI is the orchestration executor (ADR-012 Decision 1)
 * Writing to Evidence Log artifact tables — the Worker is the sole writer (SPEC-006 FR-1.3)
@@ -192,6 +196,7 @@ Responsibilities:
 
 * Consume queued jobs
 * Load routing problems and scheduler configuration
+* Forward optional `backend_id` constraint to Core when present in the job message; the Worker treats `backend_id` as an opaque routing field and does not interpret it
 * Invoke Daedalus Core
 * Execute solver adapters (C++ in-process or Python adapter via HTTP)
 * Enforce execution timeouts externally (HTTP client timeout for Python backends)
@@ -202,7 +207,7 @@ Responsibilities:
 
 Non-responsibilities:
 
-* Experiment awareness — the Worker has no knowledge of experiments, trial sets, repetition counts, benchmark identifiers, or experiment lifecycle state (ADR-012 Decision 4). A job submitted by the experiment harness is indistinguishable from any other job submission.
+* Experiment awareness — the Worker has no knowledge of experiments, trial sets, repetition counts, benchmark identifiers, or experiment lifecycle state (ADR-012 Decision 4). A job submitted by the experiment harness is indistinguishable from any other job submission. A targeted job carrying `backend_id` is processed identically to a standard job at the Worker level; the Worker forwards `backend_id` to Core without branching on its value (ADR-013).
 * Writing to experiment tables — the `jobs` table carries no experiment reference field. The experiment-to-job linkage exists exclusively in the experiment-owned trial record, which holds the `job_id` assigned at trial submission (ADR-012 Decision 4).
 
 ### Daedalus Core
@@ -225,12 +230,12 @@ The policy engine responsible for backend selection.
 
 Responsibilities:
 
-* Evaluate solver eligibility
+* Evaluate solver eligibility: in the standard path, all registered backends are evaluated; in the targeted path, only the specified backend is evaluated
 * Apply hard limits
-* Score candidate solvers
-* Select a solver
-* Reject unsuitable solvers with reasons
-* Persist explainable decisions
+* Score candidate solvers (standard path only — scoring is bypassed in the targeted path)
+* Select a solver: in the standard path, the highest-scoring eligible candidate is selected; in the targeted path, the specified backend is selected if eligible, with no fallback to another backend
+* Reject unsuitable solvers with reasons; targeted backend ineligibility produces `decision_status = NoEligibleSolver` with `selection_mode = explicitly_targeted`
+* Persist explainable decisions with `selection_mode` distinguishing `policy_selected` (standard path) from `explicitly_targeted` (targeted path) (ADR-013)
 
 ### Daedalus CLI
 
@@ -303,7 +308,7 @@ Queues:
 * `routing-jobs` — job dispatch to Worker
 * `routing-jobs-dead-letter` — undeliverable job messages
 
-W3C TraceContext (`traceparent`, optionally `tracestate`) is carried in AMQP message `application_headers` from the API to the Worker (ADR-011). The message payload fields (`job_id`, `problem_id`, `scheduler_config_id`) are unchanged.
+W3C TraceContext (`traceparent`, optionally `tracestate`) is carried in AMQP message `application_headers` from the API to the Worker (ADR-011). The job message payload contains `job_id`, `problem_id`, `scheduler_config_id`, and optionally `backend_id` when the job was submitted with a targeting directive (ADR-013). The optional `backend_id` enables targeted execution without introducing experiment awareness into the Worker; the Worker forwards it to Core as an opaque routing field.
 
 ### Observability
 
@@ -319,17 +324,19 @@ The MVP includes:
 
 | Span | Owner | Notes |
 |---|---|---|
-| `job.submit` | API | Covers request receipt through HTTP 202 |
+| `job.submit` | API | Covers request receipt through HTTP 202; includes `backend_id` attribute when present in the submission (ADR-013) |
 | `job.consume` | Worker | Root of Worker trace; linked to `job.submit` via W3C TraceContext in AMQP `application_headers` (ADR-011) |
 | `problem.load` | Worker | |
 | `features.extract` | Core | In-process child of `job.consume` |
-| `scheduler.score_solvers` | Core / Scheduler | In-process child of `job.consume` |
+| `scheduler.score_solvers` | Core / Scheduler | In-process child of `job.consume`; includes `selection_mode` attribute (`policy_selected` or `explicitly_targeted`) distinguishing standard-path from targeted-path execution (ADR-013) |
 | `solver.execute` | Worker | Covers solver adapter dispatch including HTTP round-trip for Python backends |
 | `result.evaluate` | Worker | |
 | `report.generate` | Worker | |
 | `job.complete` | Worker | |
 
 **Trace context propagation:** The API injects W3C TraceContext into AMQP message `application_headers` at job publication. The Worker extracts this context at message consumption and establishes a navigable trace relationship between `job.consume` and the `job.submit` context. All subsequent Worker spans are in-process children of `job.consume` (ADR-011).
+
+**Selection mode:** Scheduler decision telemetry must distinguish between policy selection and explicit targeting. The `scheduler.score_solvers` span carries a `selection_mode` attribute set to `policy_selected` when the Scheduler evaluated all eligible backends and selected by objective function, or `explicitly_targeted` when the caller specified a backend and the Scheduler validated it directly. This attribute is required for post-hoc verification that each trial's evidence was produced by the claimed backend (ADR-013).
 
 **CLI observability:** The CLI emits structured JSON debug log events on stderr under `DAEDALUS_LOG=debug`. Experiment-scoped events include `cli.experiment.submit`, `cli.experiment.trial_submit`, `cli.experiment.trial_complete`, `cli.experiment.evidence_collect` (with `evidence_status`), and `cli.experiment.complete`. The CLI does not inject trace headers into outgoing API requests; the API creates a new trace root per request.
 
@@ -445,19 +452,13 @@ The architecture described in this document is governed by the accepted specific
 As of 2026-06-23:
 
 - 20 specifications accepted.
-- 12 architectural decisions accepted.
+- 13 architectural decisions accepted.
 
 Detailed behavioral, persistence, API, and implementation requirements are defined by the individual specifications and ADRs. This document provides the architectural view of the system and the relationships between its major components.
 
 ## Open Architecture Questions
 
-The following questions are identified but not yet resolved. No question is resolved by this document.
-
-### Implementation Blockers
-
-These questions must be resolved before implementation of the affected component begins.
-
-**SPEC-016 OQ-6: Per-backend job targeting.** `POST /v1/jobs` accepts `problem_id` and `scheduler_config_id` but no `backend_id`. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy. There is no current mechanism to guarantee that a trial job is processed by the `backend_id` that trial requires. This blocks correct per-backend attribution in multi-backend experiments and is the most significant unresolved concern for the experiment harness. Resolution requires a SPEC-008 amendment; candidate approaches are listed in SPEC-016 OQ-6.
+The following questions remain open. SPEC-016 OQ-6 (per-backend job targeting) was resolved by ADR-013 and has been removed from this section.
 
 ### MVP-Safe Open Questions
 
