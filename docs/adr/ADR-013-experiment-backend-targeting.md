@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-06-23
 
@@ -179,6 +179,8 @@ The backend targeting problem does not require a new deployment unit. An optiona
 - SPEC-016 must be amended to supply `backend_id` in experiment trial job submissions (FR-18 orchestration loop).
 - SPEC-003 must be amended to define `selection_mode` in the Scheduler decision record and to specify the no-fallback eligibility rule for `explicitly_targeted` decisions.
 - SPEC-012 must be amended to add nullable `backend_id` to the `jobs` table and `selection_mode` to the `decision_records` table.
+- SPEC-005 must be amended to add an optional `backend_id` targeting constraint to the Worker-to-Core invocation and update the queue message input contract.
+- SPEC-009 must be amended so evidence reports display `selection_mode` and correctly represent targeted execution.
 - The Scheduler's no-fallback behavior on targeted jobs diverges from standard-path behavior. This divergence must be documented clearly in SPEC-003 and SPEC-005 to prevent implementors from accidentally introducing fallback behavior in the targeted path.
 
 ## Accepted Risks
@@ -263,7 +265,7 @@ The following amendments are required as a consequence of this decision. Each am
 - Update FR-15 (Read/Write Ownership Map) to reflect that `jobs.backend_id` is written by the API at job creation time (extending the existing API write ownership on `jobs`).
 
 **SPEC-009 (Required — Blocked by SPEC-003 and SPEC-012 amendments):**
-- Scheduler Decision section of the evidence report must display `selection_mode`. When `selection_mode = explicitly_targeted`, the report must surface the targeted `backend_id` alongside the selection mode to allow readers to verify that the evidence was produced by the claimed backend. The field is read from the `decision_records` table (SPEC-012) and requires no new Worker logic.
+- Scheduler Decision section of the evidence report must display `selection_mode`. When `selection_mode = explicitly_targeted`, the report must surface the targeted `backend_id` alongside the selection mode to allow readers to verify that the evidence was produced by the claimed backend. The data source depends on the decision outcome: when `decision_status = Selected`, the targeted backend is `decision_records.selected_backend_id`; when `decision_status = NoEligibleSolver AND selection_mode = explicitly_targeted`, the targeted backend is `job_record.backend_id` — the intended target that failed eligibility. The Report Generator already receives `job_record` as a required input (SPEC-009 FR-3); no additional Worker logic is required. The evidence report must correctly identify the intended backend during targeted-path eligibility failures.
 
 **docs/architecture.md (Required):**
 - Remove "SPEC-016 OQ-6: Per-backend job targeting" from the Implementation Blockers section under Open Architecture Questions. This question is resolved by ADR-013.
@@ -298,7 +300,7 @@ Designing backend targeting for a multi-backend experiment harness requires iden
 
 **Primary Benefit:** Multi-backend experiments produce evidence with verifiable backend attribution, satisfying the POC||GTFO evidentiary standard and making cross-solver comparisons valid under SPEC-007 FR-7.
 
-**Primary Cost:** SPEC-008, SPEC-003, SPEC-012, and SPEC-016 amendments are required before the multi-backend experiment harness can be implemented. The Scheduler must implement a no-fallback eligibility path for targeted jobs.
+**Primary Cost:** SPEC-003, SPEC-005, SPEC-008, SPEC-009, SPEC-012, and SPEC-016 amendments are required before the multi-backend experiment harness can be implemented, along with documentation updates to architecture.md. The Scheduler must implement a no-fallback eligibility path for targeted jobs.
 
 **Open Questions Resolved:** architecture.md Implementation Blocker "SPEC-016 OQ-6: Per-backend job targeting"; SPEC-016 OQ-6 (Per-Backend Job Targeting Mechanism).
 
