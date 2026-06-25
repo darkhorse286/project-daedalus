@@ -427,6 +427,8 @@ The response includes both the job lifecycle state (`status`) and, for completed
 - `report_available = true` only when a report metadata record (SPEC-006 FR-9) exists for the job
 - The API does not cache job status; every polling request reads from PostgreSQL
 
+**Note — `NoEligibleSolver` path distinction:** The `failure_reason` field reflects the coarse failure classification from the failure record (`failure_class`). The status response does not distinguish a targeted-path `NoEligibleSolver` (Scheduler rejected the specified backend with `selection_mode = explicitly_targeted`) from a standard-path `NoEligibleSolver` (Scheduler found no eligible backend by policy). Both produce the same `failure_reason`. Callers requiring this distinction — e.g., the experiment harness determining whether targeted ineligibility occurred — should consult the evidence report (`GET /v1/jobs/{job_id}/report`) or, in experiment context, the trial evidence state returned by the collect-evidence endpoint (FR-21), which includes the Scheduler decision record with `selection_mode`.
+
 ---
 
 ### FR-9: Job Status Model
@@ -694,6 +696,7 @@ All API error responses use a consistent structured JSON format. This model appl
 | 409 | `JOB_NOT_TERMINAL` | Evidence collection requested for a trial whose job has not yet reached terminal state (FR-21) |
 | 409 | `TRIAL_ALREADY_SUBMITTED` | Trial submission linkage requested for a trial whose `job_id` is already set; trial has already been linked to a job (FR-25) |
 | 409 | `JOB_PROBLEM_MISMATCH` | Trial submission linkage requested with a `job_id` whose `problem_id` does not match the trial's `problem_id`; instance-sharing invariant violation (ADR-012 Decision 3) (FR-25) |
+| 409 | `JOB_BACKEND_MISMATCH` | Trial submission linkage requested with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id`; evidence integrity invariant violation (ADR-013, POD-1) (FR-25) |
 | 409 | `TRIAL_NOT_SUBMITTED` | Evidence collection requested for a trial whose `job_id` is null; trial has not been linked to a job via FR-25 (FR-21) |
 | 409 | `EXPERIMENT_NOT_ACTIVE` | Trial submission linkage requested for an experiment whose status is not `Created` or `Running`; trial submission is not permitted on terminal experiments (FR-25) |
 | 500 | `INTERNAL_ERROR` | Unexpected server error (PostgreSQL unavailable, publication failure, evidence collection infrastructure failure, etc.) |
@@ -1099,6 +1102,7 @@ After creating an experiment and receiving trial records (FR-18), the CLI submit
 | Trial not yet submitted | `experiment_trials.job_id` is not null | HTTP 409, `error_code = TRIAL_ALREADY_SUBMITTED` |
 | Job exists | `job_id` not found in `jobs` | HTTP 404, `error_code = JOB_NOT_FOUND` |
 | Problem identity | `jobs.problem_id ≠ experiment_trials.problem_id` | HTTP 409, `error_code = JOB_PROBLEM_MISMATCH` |
+| Backend identity | `jobs.backend_id` is non-null and `jobs.backend_id ≠ experiment_trials.backend_id` | HTTP 409, `error_code = JOB_BACKEND_MISMATCH` |
 
 **Behavior:**
 
@@ -1110,14 +1114,15 @@ The API performs the following sequence:
 4. Validates `experiment_trials.job_id` is null; returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED` if already set.
 5. Validates the referenced `job_id` exists in `jobs`; returns HTTP 404 with `error_code = JOB_NOT_FOUND` if not.
 6. Validates `jobs.problem_id` equals `experiment_trials.problem_id`; returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH` if not. This enforces the instance-sharing invariant (ADR-012 Decision 3): all backends for a given trial share the same routing problem.
-7. Sets `experiment_trials.job_id = job_id` and transitions `trial_status` from `Pending` to `Submitted`.
-8. If this is the first submitted trial for the experiment (experiment is in `Created` status): transitions `experiments.status` from `Created` to `Running` and sets `experiments.started_at`.
-9. Returns HTTP 200 with the updated trial state.
+7. When `jobs.backend_id` is non-null: validates `jobs.backend_id` equals `experiment_trials.backend_id`; returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH` if they differ. This enforces the evidence integrity invariant: a trial job must be directed at the same backend the trial is assigned to, ensuring evidence is produced by the claimed backend (ADR-013, POD-1). When `jobs.backend_id` is null (standard-path job), this check is skipped.
+8. Sets `experiment_trials.job_id = job_id` and transitions `trial_status` from `Pending` to `Submitted`.
+9. If this is the first submitted trial for the experiment (experiment is in `Created` status): transitions `experiments.status` from `Created` to `Running` and sets `experiments.started_at`.
+10. Returns HTTP 200 with the updated trial state.
 
 **HTTP status:**
 - `200 OK`: trial successfully linked to job
 - `404 Not Found`: experiment not found (`EXPERIMENT_NOT_FOUND`), trial not found (`TRIAL_NOT_FOUND`), or job not found (`JOB_NOT_FOUND`)
-- `409 Conflict`: experiment is not in an active state (`EXPERIMENT_NOT_ACTIVE`), trial already has a `job_id` (`TRIAL_ALREADY_SUBMITTED`), or `job.problem_id ≠ trial.problem_id` (`JOB_PROBLEM_MISMATCH`)
+- `409 Conflict`: experiment is not in an active state (`EXPERIMENT_NOT_ACTIVE`), trial already has a `job_id` (`TRIAL_ALREADY_SUBMITTED`), `job.problem_id ≠ trial.problem_id` (`JOB_PROBLEM_MISMATCH`), or `job.backend_id` (non-null) `≠ trial.backend_id` (`JOB_BACKEND_MISMATCH`)
 
 **Response body (200):**
 
@@ -1136,6 +1141,8 @@ The API performs the following sequence:
 - A call for an experiment whose `status` is not `Created` or `Running` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`
 - A call for a trial whose `job_id` is already set returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED`
 - A call with a `job_id` whose `problem_id` does not match the trial's `problem_id` returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH`
+- A call with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id` returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH`
+- A call with a `job_id` whose `backend_id` is null (standard-path job) does not trigger backend identity validation; the linkage proceeds if all other checks pass
 - The first successful trial submission for an experiment transitions `experiments.status` from `Created` to `Running` and sets `started_at`
 - The linkage and status transitions are atomic; a PostgreSQL failure leaves no partial state
 - The `experiment.trial_submit` span is emitted on every call
@@ -1648,6 +1655,8 @@ The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark 
 
 48. **Unit: backend_id absent — span attribute omitted** — A `POST /v1/jobs` submission without `backend_id` produces a `job.submit` span that does not include a `backend_id` attribute.
 
+49. **Integration: Trial submission linkage — backend_id mismatch** — `POST /v1/experiments/{id}/trials/{id}/submit` with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id` returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH`.
+
 ---
 
 # Observability Requirements
@@ -1894,6 +1903,8 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [ ] OQ-7 resolved — Generated Mode routing problem creation (Sub-problem A) and trial record registration (Sub-problem B) (blocking for Generated Mode harness)
 - [ ] OQ-8 resolved — CLI notification mechanism for SchedulerRejected and HarnessError trials (blocking for full lifecycle handling)
 - [x] ADR-013 applied — optional `backend_id` field added to FR-2, FR-3, FR-4, FR-5, FR-7; observability updated in FR-17; testability cases 44–48 added
+- [x] POD-1 applied — FR-25 backend identity validation added (step 7); `JOB_BACKEND_MISMATCH` added to FR-14 error codes; testability case 49 added; standard-path null bypass documented in FR-25 acceptance criteria
+- [x] POD-2 applied — FR-8 clarifying note added: targeted-path vs standard-path `NoEligibleSolver` distinction is not surfaced in status response; callers requiring this distinction directed to evidence report or FR-21 collect-evidence
 
 ---
 
@@ -1907,8 +1918,8 @@ This feature is complete when:
 - OQ-6 (trace context propagation) is resolved and incorporated in FR-17 — satisfied
 - OQ-7 Sub-problem A (routing problem creation without job creation) and Sub-problem B (trial record registration) are resolved before Generated Mode harness implementation begins
 - OQ-8 (SchedulerRejected/HarnessError trial notification) is resolved before full experiment lifecycle implementation begins
-- ADR-013 backend targeting contract (FR-2, FR-3, FR-4, FR-5, FR-7) is implemented: optional `backend_id` accepted at submission, stored in job record, forwarded in queue message; empty-string rejection enforced; no capability registry check performed
-- All test contracts defined in the Testability section pass (items 1 through 48)
+- ADR-013 backend targeting contract (FR-2, FR-3, FR-4, FR-5, FR-7) is implemented: optional `backend_id` accepted at submission, stored in job record, forwarded in queue message; empty-string rejection enforced; no capability registry check performed; `jobs.backend_id ≠ experiment_trials.backend_id` check enforced at FR-25 trial submission linkage; `JOB_BACKEND_MISMATCH` (HTTP 409) returned on mismatch
+- All test contracts defined in the Testability section pass (items 1 through 49)
 - The `job.submit`, `experiment.submit`, `experiment.trial_submit`, `experiment.evidence_collect`, and `experiment.summarize` spans are emitted and verifiable in the OpenTelemetry Collector
 - `job.submit` span includes `backend_id` attribute when present in the submission request
 - SPEC-001 FR-17 defines `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 references SPEC-001 FR-17
