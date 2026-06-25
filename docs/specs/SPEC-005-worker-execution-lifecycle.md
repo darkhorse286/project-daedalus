@@ -12,13 +12,13 @@
 
 **Created:** 2026-06-09
 
-**Last Updated:** 2026-06-12
+**Last Updated:** 2026-06-25 (engineering review revision)
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010, ADR-011
+**Related ADRs:** ADR-001, ADR-003, ADR-004, ADR-006, ADR-008, ADR-009, ADR-010, ADR-011, ADR-013
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-006, SPEC-007, SPEC-009
 
@@ -81,7 +81,7 @@ SPEC-005 defines the Worker's responsibilities and explicitly allocates the adja
 
 | Component | Responsibilities at This Boundary | Explicitly Not Responsible For |
 |---|---|---|
-| **Worker** (SPEC-005) | Job consumption; problem and configuration loading; Core invocation coordination; solver contract invocation; execution seed derivation; execution timeout enforcement; cancellation signal dispatch; SolverResponse post-receipt structural validation; decision record persistence; quality evaluation handoff to Core; evidence persistence handoff; report generation invocation; job lifecycle state management; all required OTel span emissions | Routing problem domain validation; workload feature computation; solver backend selection; solution quality evaluation; regret calculation; evidence persistence schema definition; report content definition |
+| **Worker** (SPEC-005) | Job consumption; problem and configuration loading; optional `backend_id` extraction from queue message when present and forwarding to Core without interpretation, validation, or routing decisions; Core invocation coordination; solver contract invocation; execution seed derivation; execution timeout enforcement; cancellation signal dispatch; SolverResponse post-receipt structural validation; decision record persistence; quality evaluation handoff to Core; evidence persistence handoff; report generation invocation; job lifecycle state management; all required OTel span emissions | Routing problem domain validation; workload feature computation; solver backend selection; `backend_id` interpretation or existence validation; solution quality evaluation; regret calculation; evidence persistence schema definition; report content definition |
 | **Core** (architecture.md) | Authoritative domain validation (ADR-009); workload feature extraction; Scheduler invocation; quality evaluation and regret calculation; computing `actual_outcome` and `hindsight_quality` values and returning them in `QualityEvaluationResult` | Solver invocation; timeout enforcement; job state management; message acknowledgment |
 | **Scheduler** (SPEC-003) | Backend eligibility filtering; candidate scoring; backend selection; decision record production | Execution; persistence; timeout enforcement |
 | **Solver Backend** (SPEC-004) | Executing the routing optimization within the SolverRequest contract; self-termination by `execution_timeout_ms`; reporting the honest outcome | Persisting results; evaluating quality; selecting the problem to solve |
@@ -153,6 +153,7 @@ The Worker is the sole consumer of the `routing-jobs` queue (ADR-003). It consum
 - `job_id` (UUID): the unique job identifier, assigned by the API at submission
 - `problem_id` (UUID): the routing problem identifier, assigned by the API at submission
 - `scheduler_config_id` (UUID): the scheduler configuration identifier, either the submitted value or the default
+- `backend_id` (optional string): a backend targeting directive, present when `backend_id` was specified in the original job submission (SPEC-008 FR-5; ADR-013). Absence means standard-path execution; presence means targeted-path execution. The Worker extracts this value and passes it to Core without interpretation.
 
 **Consume behavior:**
 1. The Worker receives a message from the `routing-jobs` queue.
@@ -173,7 +174,7 @@ At message consumption, the Worker extracts W3C TraceContext from the AMQP messa
 - The Worker does not ACK a message until the job has reached a terminal state (`Completed` or `Failed`)
 - The Worker does not process more than one job per Worker instance concurrently at MVP scope
 - A Worker crash before ACK results in message redelivery by the broker; the redelivered message is processed per FR-14 idempotency rules
-- The `job_id`, `problem_id`, and `scheduler_config_id` are extracted from the message before any database access occurs; a malformed message that cannot be parsed is rejected (NACK, dead-letter) without modifying any persistent state
+- The `job_id`, `problem_id`, and `scheduler_config_id` are extracted from the message before any database access occurs; `backend_id` is extracted when present; a malformed message that cannot be parsed is rejected (NACK, dead-letter) without modifying any persistent state
 - At message consumption, the Worker attempts to extract W3C TraceContext from the AMQP message `application_headers`; if trace context is present, the extracted context is used to establish a navigable trace relationship for `job.consume` (ADR-011); if absent, `job.consume` is created without a trace relationship
 
 ---
@@ -214,8 +215,9 @@ After loading, the Worker invokes Core with the routing problem and the resolved
 The Worker passes to Core:
 1. The C++ domain representation of the routing problem (constructed in FR-4)
 2. The resolved scheduler configuration object (loaded in FR-4)
+3. `backend_id` (optional): the backend targeting directive extracted from the job message (FR-3), when present. When absent, Core invokes the Scheduler on the standard path. When present, Core passes it to the Scheduler to apply the targeted path (SPEC-003 FR-1, FR-2; ADR-013 Decision 5).
 
-The Worker does not pass workload features; Core computes them. The Worker does not pass the backend registry; it is accessible within Core's execution context (SPEC-003 Assumption 3).
+The Worker does not pass workload features; Core computes them. The Worker does not pass the backend registry; it is accessible within Core's execution context (SPEC-003 Assumption 3). The Worker does not interpret `backend_id`; it forwards the value from the job message as received.
 
 **Possible Core responses:**
 
@@ -223,7 +225,7 @@ The Worker does not pass workload features; Core computes them. The Worker does 
 |---|---|---|
 | Decision record with `decision_status = Selected` | Scheduler selected a backend | Worker proceeds to FR-6 |
 | Core validation rejection | Routing problem failed Core authoritative validation (ADR-009); divergence from API validation | Worker marks job `Failed`; persists a structured validation failure record; dead-letters message |
-| Decision record with `decision_status = NoEligibleSolver` | All registered backends failed eligibility filtering | Worker marks job `Failed`; persists the decision record (which carries full rejection reasons per SPEC-003 FR-9); dead-letters message |
+| Decision record with `decision_status = NoEligibleSolver` | Standard path: all registered backends failed eligibility filtering. Targeted path: the specified backend is ineligible or not found in the registry (`selection_mode = explicitly_targeted` in the decision record distinguishes this case). | Worker marks job `Failed`; persists the decision record (which carries rejection reasons per SPEC-003 FR-9 and `selection_mode` per SPEC-003 FR-10); dead-letters message. No fallback to an alternative backend is attempted. |
 | Decision record with `decision_status = InvalidConfiguration` | Scheduler configuration specifies an unrecognized mode or missing required parameters | Worker marks job `Failed`; persists the decision record; dead-letters message |
 | Decision record with `decision_status = IncompleteFeaturesError` or `OutOfRangeFeaturesError` | Core contract violation in feature computation | Worker marks job `Failed`; persists the decision record; dead-letters message |
 | Infrastructure failure (Core unavailable) | Core process failure | Transient failure; Worker NACKs with requeue |
@@ -235,6 +237,7 @@ The Worker emits a `job.consume` span that is the parent of the full execution l
 - The Worker never invokes the Scheduler directly; all Scheduler invocations are initiated by Core
 - The Worker passes a resolved scheduler configuration object to Core, not a bare `scheduler_config_id`
 - The Worker does not modify the routing problem or the scheduler configuration before passing them to Core
+- When `backend_id` is present in the job message, the Worker passes it to Core as a third invocation parameter; the Worker does not inspect, validate against the backend registry, or otherwise act on `backend_id` beyond forwarding it (ADR-013 Decision 5)
 - All non-`Selected` decision outcomes from Core result in job `Failed` with a structured failure record
 - A Core infrastructure failure (as distinct from a domain failure) triggers a NACK with requeue, not an immediate permanent failure
 - The `features.extract` and `scheduler.score_solvers` spans are emitted by Core; the Worker does not emit them
@@ -476,7 +479,7 @@ The following failures are permanent: re-executing the same job with the same in
 | Corrupt routing problem record; C++ representation cannot be constructed | FR-4 | Data is irrecoverably corrupt |
 | Malformed job message (missing required fields, cannot be parsed) | FR-3 | Message is permanently invalid |
 | Core validation rejection (ADR-009) | FR-5 | Routing problem is permanently invalid per Core authoritative validation |
-| `NoEligibleSolver` from Scheduler | FR-5 | No backend can handle this problem+configuration combination |
+| `NoEligibleSolver` from Scheduler | FR-5 | Standard path: all registered backends failed eligibility filtering; re-execution with the same inputs will produce the same failure. Targeted path: the specified `backend_id` is ineligible or not found in the backend registry; no alternative backend was evaluated; `backend_id` is the source of the failure — the routing problem and scheduler configuration may be valid for other backends |
 | `InvalidConfiguration` from Scheduler | FR-5 | Scheduler configuration is permanently invalid |
 | Pre-dispatch contract version mismatch | FR-8 | Worker configuration is inconsistent with backend registration |
 | Retry limit exhausted for a transient failure | Any | Maximum NACK+requeue count reached (broker-configured) |
@@ -672,6 +675,7 @@ The Worker is responsible for emitting the required OpenTelemetry spans for the 
 | `job_id` | Job identifier |
 | `problem_id` | Routing problem identifier |
 | `scheduler_config_id` | Scheduler configuration identifier |
+| `backend_id` | Backend targeting directive from the queue message; present only when `backend_id` was supplied in the original job submission. Represents the targeting constraint forwarded to Core, not the selected backend. |
 | `terminal_state` | `Completed` or `Failed` |
 | `solver_outcome` | `SolverOutcome` value from the solver run record; absent if job reached `Failed` before solver invocation |
 
@@ -751,6 +755,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 - The Worker does not define the HTML report content or format (Report Generator component responsibility)
 - The Worker does not select which solver to invoke; it executes the Scheduler's decision exactly as given
 - The Worker does not retry a solver invocation with a different backend if the first invocation fails or times out; retry decisions are the caller's responsibility (SPEC-003 FR-9)
+- The Worker does not know whether `backend_id` originates from an experiment context or a direct targeted submission; `backend_id` is a job-level routing directive, not an experiment reference (ADR-012 Decision 4; ADR-013 Decision 5)
 - The Worker does not implement multi-concurrency at MVP scope; one job is processed at a time per Worker instance
 - The Worker does not implement load balancing across multiple Worker instances; that is an infrastructure concern
 - The Worker does not own the Python adapter transport contract (ADR-005 deferred; the Worker invokes the Python adapter over whatever transport ADR-005 defines, but the transport definition is not a Worker responsibility)
@@ -783,6 +788,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 7. The Worker must emit all required OTel spans on every job execution, including failures (ADR-006; FR-19).
 8. The Worker must be implemented in C++ (ADR-001).
 9. OTel span emission must use non-blocking export. If the OpenTelemetry Collector is unavailable or the export buffer is full, spans are dropped. Span emission failure must never cause the Worker to halt job processing or transition a job to `Failed`.
+10. When `backend_id` is present in the job message, the Worker must forward it to Core as an invocation parameter; the Worker must not validate `backend_id` against the backend registry, perform fallback, or otherwise act on its value (ADR-013 Decision 5).
 
 ---
 
@@ -790,7 +796,7 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 
 | Input | Source | Format | Notes |
 |---|---|---|---|
-| Job message | RabbitMQ `routing-jobs` queue | AMQP message with `job_id`, `problem_id`, `scheduler_config_id` fields | At-least-once delivery |
+| Job message | RabbitMQ `routing-jobs` queue | AMQP message with `job_id`, `problem_id`, `scheduler_config_id` fields; optional `backend_id` field when present in the original job submission (ADR-013; SPEC-008 FR-5) | At-least-once delivery |
 | Routing problem record | PostgreSQL (loaded by Worker) | PostgreSQL record; Worker constructs C++ domain representation (SPEC-001 FR-14) | Must exist before message is consumed |
 | Scheduler configuration | PostgreSQL (loaded by Worker) | Scheduler configuration object (SPEC-003 FR-13) | Resolved before Core invocation |
 | Scheduler decision record | Core (produced during FR-5) | SPEC-003 FR-10 decision record schema | Produced for every invocation, successful or failed |
@@ -833,9 +839,9 @@ All Worker spans are children of `job.consume`. Core-emitted spans (`features.ex
 
 ### NoEligibleSolver
 
-**Condition:** Scheduler finds no backend eligible for the problem and configuration combination.
-**Behavior:** Job transitions to `Failed`. The `NoEligibleSolver` decision record (carrying per-backend rejection reasons) is persisted. Message dead-lettered.
-**Fallback:** None. The caller must resubmit with a different scheduler configuration or routing problem.
+**Condition:** Standard path: Scheduler finds no backend eligible for the problem and configuration combination. Targeted path: the specified backend is ineligible for the problem or not found in the backend registry; `selection_mode = explicitly_targeted` in the decision record distinguishes this from a standard-path `NoEligibleSolver`.
+**Behavior:** Job transitions to `Failed`. The `NoEligibleSolver` decision record is persisted (carrying rejection reasons per SPEC-003 FR-9 and `selection_mode` per SPEC-003 FR-10). Message dead-lettered. No fallback to an alternative backend is attempted regardless of path.
+**Fallback:** None. Standard path: the caller must resubmit with a different scheduler configuration or routing problem. Targeted path: the specified backend is permanently ineligible for this routing problem and configuration; no alternative backend is substituted (ADR-013 Decision 3).
 
 ---
 
@@ -950,6 +956,10 @@ Every Worker lifecycle behavior must be proven before this feature is considered
 
 20. **Unit: ACK ordering guarantee — crash-after-Completed** — Given a simulated Worker crash immediately after writing `Completed` to PostgreSQL and before issuing the ACK, the subsequent message redelivery is identified as a terminal-state job via the idempotency check (FR-14). The Worker ACKs the redelivered message and discards it without modifying any persistent state.
 
+21. **Unit: Targeted-path `NoEligibleSolver`** — When `backend_id` is present in the job message and the Scheduler returns `decision_status = NoEligibleSolver` with `selection_mode = explicitly_targeted`, the Worker transitions the job to `Failed`, persists the decision record (carrying `selection_mode`), dead-letters the message, and does not attempt execution on any alternative backend.
+
+22. **Integration: Full execution lifecycle — targeted path, Succeeded outcome** — A valid routing problem is consumed from a queue message containing `backend_id`. The Worker extracts `backend_id` and passes it to Core as the third invocation parameter. Core returns a decision record with `decision_status = Selected` and `selection_mode = explicitly_targeted`. The Worker proceeds through the full lifecycle: the targeted backend is invoked and produces `Succeeded`, quality evaluation completes, evidence is persisted (including the decision record with `selection_mode = explicitly_targeted`, empty `candidate_scores`, and `confidence_score = 0.0` per SPEC-003 FR-7 and FR-10), a report is generated, the job reaches `Completed`, and the message is ACKed. No Worker code path branches on the value of `backend_id`.
+
 ---
 
 # Observability Requirements
@@ -984,7 +994,7 @@ The Worker emits the following structured log events at each lifecycle stage. Al
 | `worker.job.terminal.discard` | FR-14 | `job_id`, `terminal_state`, `delivery_count` | Emitted when idempotency check identifies a terminal-state job; no re-execution occurs |
 | `worker.problem.loaded` | FR-4 (success) | `job_id`, `problem_id`, `stop_count`, `vehicle_count`, `seed` | `seed` is the problem seed; must not include `execution_seed` |
 | `worker.load.failed` | FR-4 (permanent failure) | `job_id`, `problem_id`, `scheduler_config_id`, `failure_reason`, `missing_entity_type`, `missing_entity_id` | Emitted before NACK is issued |
-| `worker.decision.received` | FR-5 | `job_id`, `decision_id`, `decision_status`, `selected_backend_id` | `selected_backend_id` present only when `decision_status = Selected` |
+| `worker.decision.received` | FR-5 | `job_id`, `decision_id`, `decision_status`, `selected_backend_id`, `selection_mode`, `backend_id` | `selected_backend_id` present only when `decision_status = Selected`; `backend_id` is the targeting directive from the queue message, present only when supplied in the original job submission; `selection_mode` originates from the Scheduler decision record (`policy_selected` or `explicitly_targeted`) |
 | `worker.core.unexpected_response` | FR-5 | `job_id`, `response_type`, `delivery_count` | Emitted on catch-all CoreContractViolation path |
 | `worker.solver.invoked` | FR-9 | `job_id`, `decision_id`, `backend_id`, `contract_version`, `execution_timeout_ms` | Must not include `execution_seed` (Security Considerations) |
 | `worker.solver.response.received` | FR-11 | `job_id`, `decision_id`, `outcome`, `execution_duration_ms`, `response_source` | `response_source`: `backend` or `worker_constructed` |
