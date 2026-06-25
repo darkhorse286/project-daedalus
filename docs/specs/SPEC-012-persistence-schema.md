@@ -12,15 +12,15 @@
 
 **Created:** 2026-06-15
 
-**Last Updated:** 2026-06-16
+**Last Updated:** 2026-06-25
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-004, ADR-006, ADR-009, ADR-010, ADR-011
+**Related ADRs:** ADR-004, ADR-006, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, SPEC-007, SPEC-008, SPEC-009, SPEC-010, SPEC-011
+**Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, SPEC-007, SPEC-008, SPEC-009, SPEC-010, SPEC-011, SPEC-020
 
 ---
 
@@ -70,9 +70,11 @@ Persistence schema design for an evidence-driven optimization system requires re
 
 The Project DAEDALUS persistence layer is a single PostgreSQL instance (ADR-004) that serves as the system's durable state store. All components that require persistent state read from and write to this instance. No other durable persistence backend exists in the MVP architecture.
 
-Eight entity types are persisted: routing problems, scheduler configurations, jobs, scheduler decision records, solver run records, quality evaluation records, failure records, and report metadata records. Each entity has a designated owner specification (defining its semantics) and a designated writer component (performing the database write). SPEC-012 is the authority for the physical realization of each entity; the owner specifications remain authoritative for semantics and field definitions.
+Thirteen entity types are persisted: routing problems, scheduler configurations, jobs, scheduler decision records, solver run records, quality evaluation records, failure records, report metadata records, benchmark manifests, experiments, experiment trials, experiment artifacts, and benchmark summaries. Each entity has a designated owner specification (defining its semantics) and a designated writer component (performing the database write). SPEC-012 is the authority for the physical realization of each entity; the owner specifications remain authoritative for semantics and field definitions.
 
 The persistence model is evidence-centric. The primary concern is fidelity: every job execution must produce a complete, consistent, and retrievable evidence record set. Idempotency under at-least-once delivery (SPEC-005 FR-14) is achieved through `job_id`-keyed upsert on all Worker-written records. API writes are not idempotent by design (SPEC-008 FR-16): each submission creates a new job with new identifiers.
+
+Five additional entity types support the experiment and benchmark harness (SPEC-020, ADR-012): benchmark manifests, experiments, experiment trials, experiment artifacts, and benchmark summaries. These tables are owned and written exclusively by the API; the Worker does not access them (ADR-012 Decision 4). They are not Evidence Log tables (SPEC-006) and are not governed by SPEC-006 write authority restrictions.
 
 Two non-PostgreSQL persistence boundaries exist: the RabbitMQ queue (transient, not a persistence target) and the report volume (file storage, not a database table). The report volume's file path is referenced via the `file_path` column in `report_metadata_records` and is the only non-PostgreSQL durable artifact tracked in the schema.
 
@@ -107,6 +109,8 @@ SPEC-012 defines the boundary between evidence record semantics and physical per
 - The decision record two-phase write contract (FR-7.4)
 
 **When SPEC-006 and SPEC-012 appear to conflict:** SPEC-006 governs semantic intent; SPEC-012 governs physical realization. A field named differently in SPEC-006 and SPEC-012 is a defect requiring correction. A field typed differently (SPEC-006 says "structured type"; SPEC-012 says "JSONB") is SPEC-012's realization decision, not a conflict.
+
+**Experiment table authority boundary:** The five experiment tables defined in FR-19 through FR-23 (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`) are not Evidence Log tables. They are not governed by SPEC-006 or SPEC-006 FR-1.3's write authority restriction. The API is the sole writer of all experiment tables. SPEC-020 (Benchmark and Experiment Harness) is the authoritative owner of experiment and benchmark record semantics; SPEC-012 owns the physical realization. The SPEC-006 ODR-3 90-day retention policy does not apply to experiment tables (see FR-16.5).
 
 **Acceptance Criteria:**
 - No table definition in SPEC-012 contradicts a field semantic defined in SPEC-006
@@ -314,6 +318,7 @@ The central job lifecycle record. Created by the API at submission time. Updated
 | `job_id` | `uuid` | NOT NULL | PRIMARY KEY | SPEC-006 FR-2; SPEC-008 FR-7 |
 | `problem_id` | `uuid` | NOT NULL | FK → `routing_problems(problem_id)` | SPEC-001; SPEC-008 FR-4 |
 | `scheduler_config_id` | `uuid` | NOT NULL | FK → `scheduler_configs(scheduler_config_id)` | SPEC-008 FR-4 |
+| `backend_id` | `text` | NULL | | ADR-013; SPEC-008 FR-2 (as amended); null represents standard-path submission; see FR-6.6 |
 | `status` | `text` | NOT NULL | CHECK (see FR-6.2) | SPEC-005; SPEC-006 FR-4.2 |
 | `cancellation_requested` | `boolean` | NOT NULL | DEFAULT `false` | SPEC-005 FR-12; SPEC-008 FR-11 |
 | `created_at` | `timestamptz` | NOT NULL | | Set by API; immutable after creation (SPEC-006 FR-4.3) |
@@ -363,11 +368,28 @@ CHECK (
 - Worker reads this field at the pre-execution check (SPEC-005 FR-12)
 - Worker never writes `cancellation_requested` (SPEC-005 FR-12)
 
+**FR-6.6: `backend_id` column semantics and write ownership:**
+
+`backend_id` is an optional job-level routing directive added by ADR-013. It is written by the API at job creation time when `backend_id` is present in the `POST /v1/jobs` request body (SPEC-008 FR-4 as amended per ADR-013). The column is immutable after creation; no component modifies it after the initial row is written.
+
+| Value | Meaning |
+|---|---|
+| NULL | Standard-path submission. The Scheduler evaluates all eligible backends and selects one by policy. |
+| Non-null string | Targeted-path submission. The Scheduler validates eligibility for the specified backend only and directs execution to it without fallback. |
+
+The Worker reads `backend_id` from the queue message payload (not from the `jobs` table directly) and forwards it to the Scheduler when present (SPEC-005 FR-5 as amended per ADR-013). The Worker never writes `backend_id`.
+
+`backend_id` in `jobs` is distinct from `backend_id` in `solver_run_records` (FR-8). `jobs.backend_id` is the caller-supplied routing directive recorded at submission time; `solver_run_records.backend_id` is the backend that actually executed the job, recorded at evidence persistence time. In the targeted path, these values are identical when the targeted backend is eligible and selected. When the targeted backend is ineligible (`decision_status = NoEligibleSolver`), `solver_run_records` has no row because no execution occurred, and `jobs.backend_id` is the sole schema record of the intended target.
+
+`backend_id` carries no FK constraint. Its value is not validated against the Scheduler capability profile registry at submission time (FR-2; ADR-013 Accepted Risk 1). `backend_id` is not an experiment reference; its presence does not imply the job is part of an experiment. Experiment-to-job linkage is held exclusively in `experiment_trials.job_id` (ADR-012 Decision 4; FR-21.4).
+
 **Acceptance Criteria:**
 - `status` is constrained to the four states in FR-6.2
 - The terminal state CHECK constraint prevents contradictory `completed_at`/`failed_at` values
 - `cancellation_requested` defaults to `false` at creation and is never set to null
 - `created_at` is set once by the API and is never updated
+- `backend_id` is `text NULL`; NULL represents a standard-path submission; the column is written once by the API at job creation and is never updated
+- `backend_id` carries no FK constraint; its value is not validated against the Scheduler capability profile registry at submission time (FR-2)
 
 ---
 
@@ -388,13 +410,14 @@ Stores the Scheduler's decision for each job, including backend selection ration
 | `objective_mode` | `text` | NOT NULL | | SPEC-003 FR-10 |
 | `workload_features_snapshot` | `jsonb` | NOT NULL | | SPEC-003 FR-10; SPEC-010 FR-10; see FR-3 |
 | `decision_status` | `text` | NOT NULL | | SPEC-003 FR-10 |
+| `selection_mode` | `text` | NOT NULL | CHECK (see FR-7.5); DEFAULT `'policy_selected'` | ADR-013; written by Worker at Phase 1; see FR-7.5 |
 | `selected_backend_id` | `text` | NULL | | SPEC-003 FR-10; null when no backend selected |
 | `candidate_scores` | `jsonb` | NOT NULL | DEFAULT `'[]'::jsonb` | SPEC-003 FR-10 |
 | `rejection_reasons` | `jsonb` | NOT NULL | DEFAULT `'{}'::jsonb` | SPEC-003 FR-10 |
 | `predicted_latency` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected |
 | `predicted_cost` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected |
 | `predicted_quality` | `text` | NULL | | SPEC-003 FR-10; null when no backend selected |
-| `confidence_score` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected |
+| `confidence_score` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected; `0.0` in the targeted path when `decision_status = Selected` (scoring bypassed; see FR-7.5); NULL in the targeted path when `decision_status = NoEligibleSolver` |
 | `timestamp` | `timestamptz` | NOT NULL | | Decision creation time |
 | `actual_outcome` | `jsonb` | NULL | | SPEC-003 FR-10; SPEC-007 FR-4; written in Phase 2 |
 | `hindsight_quality` | `double precision` | NULL | | SPEC-003 FR-10; SPEC-007 FR-7; written in Phase 2 |
@@ -433,11 +456,46 @@ Phase 2 is the only authorized UPDATE to `decision_records`. All other columns a
 
 Phase 2 is idempotent: if the Worker re-executes due to message redelivery, the same values are re-computed (SPEC-007 FR-10 determinism guarantees identical output from identical inputs) and re-applied without producing divergent records.
 
+**FR-7.5: `selection_mode` CHECK constraint and targeted-path column semantics:**
+
+**CHECK constraint:**
+
+```sql
+CHECK (selection_mode IN ('policy_selected', 'explicitly_targeted'))
+```
+
+| Value | Meaning |
+|---|---|
+| `policy_selected` | Standard path. The Scheduler evaluated all eligible backends and selected one by its objective function and eligibility rules. |
+| `explicitly_targeted` | Targeted path. The caller specified `backend_id` in the job submission. The Scheduler validated only the specified backend's eligibility and directed execution to it without fallback. |
+
+**Default:** `DEFAULT 'policy_selected'`. All decision records produced before ADR-013 implementation were standard-path selections; the default ensures backward-compatible column addition without a data migration.
+
+**Phase 1 field:** `selection_mode` is a Scheduler-produced Phase 1 field. It is written in the same Phase 1 INSERT (ON CONFLICT DO UPDATE) that writes all other Scheduler-produced columns. The Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) does not modify `selection_mode`. The rule from FR-7.4 — "Phase 2 is the only authorized UPDATE to `decision_records`. All other columns are immutable after Phase 1" — applies to `selection_mode`.
+
+**Targeted-path semantics for related columns:**
+
+When `selection_mode = 'explicitly_targeted'`, the following column semantics apply:
+
+| Column | Targeted-path value | Rationale |
+|---|---|---|
+| `candidate_scores` | `'[]'` (empty array) | Scoring was bypassed; no backends were scored (SPEC-003 FR-7) |
+| `confidence_score` | `0.0` when `decision_status = Selected`; NULL when `decision_status = NoEligibleSolver` | When `Selected`: scoring was bypassed; `selection_mode = explicitly_targeted` distinguishes this `0.0` from the standard-path single-eligible-backend case (SPEC-003 FR-7). When `NoEligibleSolver`: no backend was selected; absence semantics are consistent with standard-path `NoEligibleSolver` behavior (SPEC-003 FR-10). |
+| `rejection_reasons` | Contains the targeted backend's Phase 1 or Phase 2 rejection reason code when eligibility checking was performed and failed; `'{}'` when the targeted backend was eligible or when the specified `backend_id` was not found in the registry (no eligibility checking performed) | Only the targeted backend is evaluated; non-targeted backends produce no entries (SPEC-003 FR-9, FR-10) |
+| `selected_backend_id` | Non-null when targeted backend was eligible; null when ineligible or not found in registry | Standard FK semantics; null indicates no backend was selected |
+
+**Distinguishing `confidence_score = 0.0` cases:** When `decision_status = Selected`, the standard path produces `confidence_score = 0.0` when only one backend passed all filter phases (SPEC-003 FR-7). In that case, `selection_mode = 'explicitly_targeted'` is the definitive disambiguator: it indicates that the `0.0` reflects a scoring bypass, not a policy-computed margin. When `selection_mode = 'explicitly_targeted' AND decision_status = NoEligibleSolver`, `confidence_score` is NULL — the targeted-path rejection case follows the same absence semantics as the standard-path `NoEligibleSolver` case, not a sentinel value (SPEC-003 FR-7, FR-10).
+
+**No-fallback record:** The combination `decision_status = 'NoEligibleSolver' AND selection_mode = 'explicitly_targeted'` identifies a targeted-path eligibility failure or unregistered `backend_id`. The intended target is `jobs.backend_id`; `selected_backend_id` is null because no backend was selected. No new `decision_status` value is introduced; the existing `NoEligibleSolver` value is reused (ADR-013 Decision 3).
+
 **Acceptance Criteria:**
 - `UNIQUE (job_id)` ensures exactly one decision record per job
 - `workload_features_snapshot` is `jsonb NOT NULL` and contains all six SPEC-010 features plus `feature_schema_version`
 - `actual_outcome` and `hindsight_quality` are nullable; null is the initial state after Phase 1; they are set in Phase 2
 - Phase 2 is the only authorized UPDATE; all other columns are immutable after Phase 1 write
+- `selection_mode` is `text NOT NULL` constrained to `policy_selected` and `explicitly_targeted`; `DEFAULT 'policy_selected'` applies without data migration to rows written before ADR-013 implementation
+- `selection_mode = 'explicitly_targeted'` always implies `candidate_scores = '[]'`; `confidence_score = 0.0` applies only when `selection_mode = 'explicitly_targeted' AND decision_status = Selected`; `confidence_score` is NULL when `selection_mode = 'explicitly_targeted' AND decision_status = NoEligibleSolver`; these are application-layer invariants enforced by the Scheduler (SPEC-003 FR-7, FR-10 as amended per ADR-013)
+- `selection_mode` is a Phase 1 field; it is written at Phase 1 and is never modified by the Phase 2 UPDATE
 
 ---
 
@@ -818,7 +876,7 @@ Defines the initial database schema required for MVP development environment sta
 **FR-14.1: Schema components:**
 
 The complete initial schema consists of:
-1. Eight table definitions (FR-4 through FR-11 DDL)
+1. Thirteen table definitions (FR-4 through FR-11, FR-19 through FR-23 DDL)
 2. Default scheduler configuration seed (FR-5.3)
 3. No initial data in any other table
 
@@ -828,12 +886,17 @@ Tables must be created in dependency order to satisfy FK constraints:
 
 1. `routing_problems` (no FK dependencies)
 2. `scheduler_configs` (no FK dependencies)
-3. `jobs` (FKs: `routing_problems`, `scheduler_configs`)
-4. `decision_records` (FKs: `jobs`, `routing_problems`)
-5. `solver_run_records` (FKs: `jobs`, `decision_records`, `routing_problems`)
-6. `quality_evaluation_records` (FKs: `jobs`, `decision_records`)
-7. `failure_records` (FKs: `jobs`)
-8. `report_metadata_records` (FKs: `jobs`)
+3. `benchmark_manifests` (no FK dependencies; text PK)
+4. `jobs` (FKs: `routing_problems`, `scheduler_configs`)
+5. `experiments` (FK: `scheduler_configs`; no FK to `benchmark_manifests` by design — see FR-20)
+6. `decision_records` (FKs: `jobs`, `routing_problems`)
+7. `experiment_trials` (FKs: `experiments`, `routing_problems`, `jobs`)
+8. `solver_run_records` (FKs: `jobs`, `decision_records`, `routing_problems`)
+9. `quality_evaluation_records` (FKs: `jobs`, `decision_records`)
+10. `failure_records` (FKs: `jobs`)
+11. `report_metadata_records` (FKs: `jobs`)
+12. `experiment_artifacts` (FK: `experiments`)
+13. `benchmark_summaries` (no FK dependencies; text PK)
 
 **FR-14.3: Schema version visibility:**
 
@@ -858,23 +921,48 @@ Defines which component reads and writes each table. This is the authoritative s
 
 | Table | API Writes | API Reads | Worker Writes | Worker Reads |
 |---|---|---|---|---|
-| `routing_problems` | CREATE (once at submission) | No | No | Yes (problem load at job consumption) |
+| `routing_problems` | CREATE (once at submission) | Yes (Fixed Mode workload set validation: pre-creation check that all `problem_ids` exist in `routing_problems` before trial records are created per SPEC-020 FR-4) | No | Yes (problem load at job consumption) |
 | `scheduler_configs` | CREATE + seed default | Yes (configuration retrieval endpoints) | No | Yes (configuration resolution at job consumption) |
 | `jobs` | CREATE initial row; UPDATE `cancellation_requested` | Yes (status polling; cancellation terminal-state check) | UPDATE `status`, `updated_at`, `completed_at`, `failed_at` | Yes (lifecycle state check; cancellation flag check before solver dispatch) |
-| `decision_records` | No | No | Phase 1 UPSERT; Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) | Yes (loaded after Phase 1 to pass predicted values to quality evaluation) |
-| `solver_run_records` | No | Yes (`solver_outcome` for status response; SPEC-008 FR-8) | UPSERT | No |
-| `quality_evaluation_records` | No | No | UPSERT | No |
+| `decision_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | Phase 1 UPSERT; Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) | Yes (loaded after Phase 1 to pass predicted values to quality evaluation) |
+| `solver_run_records` | No | Yes (`solver_outcome` for status response per SPEC-008 FR-8; `solver_outcome`, `execution_duration_ms`, `route_plan`, and `extension_metadata` for trial evidence collection per ADR-012 Decision 5) | UPSERT | No |
+| `quality_evaluation_records` | No | Yes (trial evidence collection per ADR-012 Decision 5; SPEC-006 FR-1.3 Worker-only write authority unchanged) | UPSERT | No |
 | `failure_records` | No | Yes (`failure_class` for status response; SPEC-008 FR-8) | INSERT (once) | No |
 | `report_metadata_records` | No | Yes (report discovery; `file_path` for report file serving) | UPSERT | No |
+| `benchmark_manifests` | CREATE (once at submission; immutable) | Yes | No | No |
+| `experiments` | CREATE + UPDATE (`status`, `effective_trial_count`, `failure_reason`, `started_at`, `completed_at`, `failed_at`) | Yes | No | No |
+| `experiment_trials` | CREATE + UPDATE (`job_id`, `trial_status`, evidence fields, `evidence_status`, `updated_at`) | Yes | No | No |
+| `experiment_artifacts` | CREATE (once per artifact; immutable) | Yes | No | No |
+| `benchmark_summaries` | UPSERT on each member experiment completion | Yes | No | No |
 
 **FR-15.2: Core does not access PostgreSQL:**
 
 Core (the C++ library) does not read from or write to PostgreSQL directly. Core receives the routing problem and scheduler configuration from the Worker as in-memory C++ structs (SPEC-005 Assumption 3). All database I/O is performed by the Worker on Core's behalf. Feature extraction, scheduling, quality evaluation, and report generation all operate on in-memory data passed by the Worker.
 
+**FR-15.3: Worker does not access experiment tables:**
+
+The Worker does not read or write any experiment table (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`). The Worker executes individual jobs without experiment context (ADR-012 Decision 4). Experiment-to-job linkage flows from `experiment_trials.job_id` → `jobs.job_id`; `jobs` carries no `experiment_id` column.
+
+**FR-15.4: CLI accesses experiment tables through the API:**
+
+The CLI (SPEC-016) does not read from or write to PostgreSQL directly. All CLI access to experiment state (experiment submission, status polling, trial results) flows through SPEC-008 API endpoints. No direct CLI-to-database connections exist.
+
+**FR-15.5: `jobs.backend_id` and `decision_records.selection_mode` write ownership (ADR-013):**
+
+`jobs.backend_id` is written by the API at job creation time as part of the same CREATE operation that writes the initial `jobs` row (FR-6.6). This is an additive extension of the API's existing write authority on `jobs`. The Worker reads `backend_id` from the queue message payload and never reads the column from the `jobs` table directly. The Worker never writes `jobs.backend_id`.
+
+`decision_records.selection_mode` is written by the Worker at Phase 1 persistence as part of the same INSERT (ON CONFLICT DO UPDATE) that writes all other Scheduler-produced columns (FR-7.4, FR-7.5). This is an additive extension of the Worker's existing Phase 1 write authority on `decision_records`. The API does not write `selection_mode`.
+
+The FR-15 ownership table does not require structural changes to represent these additions; both columns are written by the existing authorized writer for their respective tables. FR-15.5 documents the additive column-level extensions for implementor clarity.
+
 **Acceptance Criteria:**
 - No component other than the API writes to `routing_problems` or `scheduler_configs`
 - No component other than the Worker writes to `decision_records`, `solver_run_records`, `quality_evaluation_records`, `failure_records`, or `report_metadata_records`
+- No component other than the API writes to any experiment table
 - Core issues no direct database queries
+- The Worker issues no reads or writes to any experiment table
+- `jobs.backend_id` is written only by the API at job creation; the Worker never writes this column
+- `decision_records.selection_mode` is written only by the Worker at Phase 1; the API never writes this column
 
 ---
 
@@ -896,6 +984,8 @@ Rows must be deleted in reverse FK dependency order:
 
 This deletion order satisfies retention-compliant deletion for the six evidence tables described above. It terminates at `jobs`. `routing_problems` is excluded from this order (see FR-16.4).
 
+**Note:** When experiment tables (FR-19–FR-23) are present and contain rows referencing `jobs` via `experiment_trials.job_id`, those `experiment_trials` rows must be deleted before `jobs` rows. See FR-16.5.1 for the cross-domain FK ordering requirement.
+
 **FR-16.2: `scheduler_configs` retention:**
 
 `scheduler_configs` rows are not subject to evidence retention deletion. They are system configuration records, not evidence records, and should persist for the lifetime of the deployment.
@@ -914,11 +1004,28 @@ SPEC-001 Non-Requirements is the authoritative source for routing problem retent
 
 Because `routing_problems` rows are never deleted at MVP scope, `jobs.problem_id` and `decision_records.problem_id` foreign keys to `routing_problems` never face a retention-driven deletion ordering concern. If a future SPEC-001 revision introduces routing problem deletion or archiving, SPEC-012 FR-16.1 must be revised to incorporate `routing_problems` into the deletion order at that time.
 
+**FR-16.5: Experiment table retention:**
+
+The five experiment tables (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`) are not Evidence Log tables and are not subject to the SPEC-006 ODR-3 90-day retention policy. No experiment table deletion mechanism is defined at MVP scope; experiment records are retained indefinitely.
+
+When a future retention policy requires experiment record deletion, the deletion order must respect FK constraints:
+
+1. `benchmark_summaries` (no FK dependencies on other experiment tables; text PK)
+2. `experiment_artifacts` (FK → `experiments`)
+3. `experiment_trials` (FKs → `experiments`, `routing_problems`, `jobs`)
+4. `experiments` (FK → `scheduler_configs`)
+5. `benchmark_manifests` (no FK dependencies; text PK)
+
+**FR-16.5.1: Cross-domain FK ordering consequence:**
+
+`experiment_trials.job_id` → `jobs(job_id)` creates a cross-domain FK between the experiment schema and the Evidence Log schema. Deleting a `jobs` row that an `experiment_trials` row references requires deleting the `experiment_trials` row first. Since evidence retention deletion is deferred and experiment table deletion is deferred, this ordering constraint does not affect MVP operation. When retention deletion is implemented post-MVP, `experiment_trials` must appear in the deletion order before `jobs`.
+
 **Acceptance Criteria:**
 - FK constraints do not use CASCADE DELETE
 - Retention-compliant deletion is executable in the order defined in FR-16.1 without FK violations
 - `scheduler_configs` is excluded from evidence retention lifecycle
 - `routing_problems` is excluded from the FR-16.1 evidence-retention deletion order; its retention is governed exclusively by SPEC-001 (indefinite retention, no deletion mechanism at MVP scope)
+- Experiment tables are excluded from the SPEC-006 ODR-3 90-day retention policy; their retention is indefinite at MVP scope (FR-16.5)
 
 ---
 
@@ -966,6 +1073,7 @@ The schema defined in FR-4 through FR-11 must directly support the following que
 | `hindsight_quality` by backend and size class | `solver_run_records.backend_id`, `quality_evaluation_records.hindsight_quality`, `decision_records.workload_features_snapshot->>'problem_size_class'` |
 | Failure stage distribution | `failure_records.failure_stage`, COUNT |
 | Report generation success rate | `report_metadata_records.generation_status`, COUNT |
+| Distribution of `policy_selected` vs. `explicitly_targeted` decisions, and targeted-path eligibility failure rate | `decision_records.selection_mode`, `decision_records.decision_status`, COUNT |
 
 **Acceptance Criteria:**
 - Every persistence write failure produces a structured log event with required fields
@@ -1001,6 +1109,355 @@ No application component constructs `file_path` values from caller-supplied inpu
 - Application code enforces that every `Failed` job has a `failure_records` row
 - No column named `execution_seed` exists outside `solver_run_records`
 - No application code constructs `file_path` from request parameters
+
+---
+
+### FR-19: `benchmark_manifests` Table
+
+**Description:**
+Stores the benchmark manifest record for a named research initiative (SPEC-020 FR-2). The manifest records the research question, hypothesis, null hypothesis, and variable definitions for a benchmark. The manifest is immutable after creation. A `benchmark_id` with no manifest record is valid (SPEC-020 FR-2); no FK from `experiments.benchmark_id` to this table is enforced.
+
+**Table name:** `benchmark_manifests`
+
+**Columns:**
+
+| Column | Type | Nullable | Constraint | Source |
+|---|---|---|---|---|
+| `benchmark_id` | `text` | NOT NULL | PRIMARY KEY | SPEC-020 FR-2; user-supplied string grouping identifier |
+| `benchmark_name` | `text` | NOT NULL | | SPEC-020 FR-2 |
+| `research_question` | `text` | NOT NULL | | SPEC-020 FR-2 |
+| `hypothesis` | `text` | NOT NULL | | SPEC-020 FR-2 |
+| `null_hypothesis` | `text` | NOT NULL | | SPEC-020 FR-2 |
+| `controls` | `jsonb` | NOT NULL | | SPEC-020 FR-2; JSON array of strings |
+| `independent_variables` | `jsonb` | NOT NULL | | SPEC-020 FR-2; JSON array of strings |
+| `dependent_variables` | `jsonb` | NOT NULL | | SPEC-020 FR-2; JSON array of strings |
+| `created_at` | `timestamptz` | NOT NULL | | Set by API at creation |
+
+**Primary key:** `benchmark_id` (text)
+
+**Foreign keys:** None. `benchmark_manifests` is a root entity in the experiment domain.
+
+**Referencing tables:** No FK from `experiments` or `benchmark_summaries` (benchmark association is by string value match, not FK constraint).
+
+**FR-19.2: `benchmark_id` as text primary key:**
+
+`benchmark_id` is a user-supplied string identifier (SPEC-020 FR-1, FR-2), not a system-generated UUID. This distinguishes it from all other primary keys in the schema. The text PK is appropriate because:
+1. The `benchmark_id` must be researcher-controlled: researchers choose their own benchmark grouping identifier
+2. The identifier is shared across experiments, manifests, summaries, and technical writing by human-readable value
+3. A UUID would not serve the human-readable grouping function intended by SPEC-020 FR-2
+
+**Immutability:** `benchmark_manifests` rows are never updated or deleted after creation. The manifest is the immutable research context record.
+
+**Acceptance Criteria:**
+- `benchmark_id` is a text primary key; no FK from `experiments.benchmark_id` to this table, per SPEC-020 FR-2
+- `controls`, `independent_variables`, and `dependent_variables` are `jsonb NOT NULL` JSON arrays of strings
+- `benchmark_manifests` rows are never updated after creation
+
+---
+
+### FR-20: `experiments` Table
+
+**Description:**
+Stores the experiment record: the immutable manifest configuration, the mutable execution state, and the experiment lifecycle status (SPEC-020 FR-1, FR-3, FR-11). The API creates the row when the experiment is submitted and updates it as the experiment progresses through its lifecycle.
+
+**Table name:** `experiments`
+
+**Columns:**
+
+| Column | Type | Nullable | Constraint | Source |
+|---|---|---|---|---|
+| `experiment_id` | `uuid` | NOT NULL | PRIMARY KEY | SPEC-020 FR-1 |
+| `benchmark_id` | `text` | NOT NULL | | SPEC-020 FR-1; string grouping identifier; no FK to `benchmark_manifests` |
+| `experiment_name` | `text` | NOT NULL | | SPEC-020 FR-1 |
+| `experiment_seed` | `bigint` | NOT NULL | | SPEC-020 FR-3; uint64 per FR-4.3 |
+| `workload_mode` | `text` | NOT NULL | CHECK (`workload_mode` IN ('Fixed', 'Generated')) | SPEC-020 FR-4 |
+| `planned_trial_count` | `integer` | NOT NULL | CHECK (`planned_trial_count >= 1`) | SPEC-020 FR-3 |
+| `effective_trial_count` | `integer` | NULL | CHECK (`effective_trial_count >= 0`) | SPEC-020 FR-3; set when partial workload generation failure reduces actual trials below planned |
+| `scheduler_config_id` | `uuid` | NULL | FK → `scheduler_configs(scheduler_config_id)` | SPEC-020 FR-3; null = use default scheduler config |
+| `status` | `text` | NOT NULL | CHECK (see FR-20.2) | SPEC-020 FR-11 |
+| `failure_reason` | `text` | NULL | | SPEC-020 FR-11; non-null when `status = 'Failed'` |
+| `manifest_payload` | `jsonb` | NOT NULL | | SPEC-020 FR-3, FR-14 Artifact 1; full immutable manifest |
+| `submitted_at` | `timestamptz` | NOT NULL | | Set by API at creation |
+| `started_at` | `timestamptz` | NULL | | Set when first trial is submitted |
+| `completed_at` | `timestamptz` | NULL | | Set when `status` transitions to `'Completed'` |
+| `failed_at` | `timestamptz` | NULL | | Set when `status` transitions to `'Failed'` |
+
+**Primary key:** `experiment_id`
+
+**Foreign keys:**
+- `scheduler_config_id` REFERENCES `scheduler_configs(scheduler_config_id)` (nullable)
+
+**No FK from `benchmark_id` to `benchmark_manifests`:** A benchmark_id with no benchmark manifest is valid per SPEC-020 FR-2. Enforcing a FK here would prohibit experiment submission before the benchmark manifest, which contradicts the design intent.
+
+**Referencing tables:** `experiment_trials(experiment_id)`, `experiment_artifacts(experiment_id)`
+
+**FR-20.2: `status` CHECK constraint:**
+
+```sql
+CHECK (status IN ('Created', 'Running', 'Completed', 'Failed'))
+```
+
+These correspond to the `ExperimentStatus` lifecycle defined in SPEC-020 FR-11: `Created` → `Running` → `Completed | Failed`.
+
+**FR-20.3: Mutable vs immutable columns:**
+
+The following columns are immutable after creation (SPEC-020 FR-3): `experiment_id`, `benchmark_id`, `experiment_name`, `experiment_seed`, `workload_mode`, `planned_trial_count`, `scheduler_config_id`, `manifest_payload`, `submitted_at`. The following columns are mutable; the API updates them as the experiment progresses: `status`, `effective_trial_count`, `failure_reason`, `started_at`, `completed_at`, `failed_at`.
+
+**FR-20.4: `manifest_payload` content:**
+
+`manifest_payload` is `jsonb NOT NULL`. It stores the complete immutable experiment configuration per SPEC-020 FR-3, including fields not promoted to scalar columns: the `workload_set` (WorkloadSetDefinition with `generation_config` or `problem_ids`), `solver_set` (ordered list of backend_ids), `repetition_count`, `execution_timeout_ms_per_trial`, `hardware_policy`, `reproducibility_class`, and `seed_derivation_algorithm_version` (required by SPEC-020 FR-8; without this field a researcher cannot confirm which seed derivation function was used, and replay fidelity cannot be guaranteed). This column doubles as Artifact 1 (SPEC-020 FR-14): the experiment manifest is persisted and retrievable as structured data from this column.
+
+Scalar columns on `experiments` (`workload_mode`, `planned_trial_count`, `scheduler_config_id`) are promoted from the manifest for operational querying without JSONB path operators.
+
+**FR-20.5: `experiment_seed` storage:**
+
+`experiment_seed` is a `uint64` value (SPEC-020 FR-3) stored as `bigint` using the two's complement convention from FR-4.3. The same application-layer conversion obligation applies.
+
+**Acceptance Criteria:**
+- `status` is constrained to the four `ExperimentStatus` values in FR-20.2
+- `manifest_payload` is `jsonb NOT NULL` and contains the complete immutable experiment configuration per SPEC-020 FR-3
+- Immutable columns are not modified after the experiment row is created
+- `effective_trial_count` is null until a partial workload generation failure sets it; once set, it is not reset
+- No FK from `benchmark_id` to `benchmark_manifests` is enforced, per SPEC-020 FR-2
+
+---
+
+### FR-21: `experiment_trials` Table
+
+**Description:**
+Stores one trial record per planned trial execution (SPEC-020 FR-6). Created by the API when the experiment manifest is processed; all trial records are created before any trial is submitted. Updated by the API as each trial is submitted, tracked to terminal status, and evidence is collected from the Evidence Log. The Worker does not read or write this table (ADR-012 Decision 4).
+
+**Table name:** `experiment_trials`
+
+**Columns:**
+
+| Column | Type | Nullable | Constraint | Source |
+|---|---|---|---|---|
+| `trial_id` | `uuid` | NOT NULL | PRIMARY KEY | SPEC-020 FR-6 |
+| `experiment_id` | `uuid` | NOT NULL | FK → `experiments(experiment_id)` | SPEC-020 FR-6 |
+| `problem_id` | `uuid` | NOT NULL | FK → `routing_problems(problem_id)` | SPEC-020 FR-6 |
+| `backend_id` | `text` | NOT NULL | | SPEC-020 FR-6 |
+| `repetition_index` | `integer` | NOT NULL | CHECK (`repetition_index >= 0`) | SPEC-020 FR-6 |
+| `problem_config_index` | `integer` | NOT NULL | CHECK (`problem_config_index >= 0`) | SPEC-020 FR-4; position in workload set |
+| `solver_set_index` | `integer` | NOT NULL | CHECK (`solver_set_index >= 0`) | SPEC-020 FR-5; position in solver set |
+| `trial_seed` | `bigint` | NOT NULL | | SPEC-020 FR-8; uint64 per FR-4.3 |
+| `trial_type` | `text` | NOT NULL | CHECK (`trial_type` IN ('reproducible', 'non_reproducible')) | SPEC-020 FR-9 |
+| `job_id` | `uuid` | NULL | FK → `jobs(job_id)` | SPEC-020 FR-6; null until trial submitted; null for `SchedulerRejected` trials |
+| `trial_status` | `text` | NOT NULL | CHECK (see FR-21.2) | SPEC-020 FR-6 |
+| `harness_failure_reason` | `text` | NULL | | SPEC-020 FR-6; non-null when `trial_status = 'HarnessError'` |
+| `scheduler_rejection_reason` | `text` | NULL | | SPEC-020 FR-6; non-null when `trial_status = 'SchedulerRejected'` |
+| `retry_count` | `integer` | NOT NULL | DEFAULT 0, CHECK (`retry_count >= 0`) | SPEC-020 FR-10; 0 for non-hardware trials |
+| `retry_history` | `jsonb` | NULL | | SPEC-020 FR-10; array of per-attempt failure records; null for non-hardware trials |
+| `evidence_status` | `text` | NULL | CHECK (see FR-21.3) | SPEC-020 FR-12; null before evidence collection is attempted |
+| `solver_outcome` | `text` | NULL | | SPEC-020 FR-12; read from Evidence Log after trial completes |
+| `solution_present` | `boolean` | NULL | | SPEC-020 FR-12; null before evidence collected |
+| `time_window_feasible` | `boolean` | NULL | | SPEC-020 FR-12; null when simulation not performed |
+| `hindsight_quality` | `double precision` | NULL | | SPEC-020 FR-12; null when no quality data |
+| `quality_comparison_eligible` | `boolean` | NULL | | SPEC-020 FR-12; null before evidence collected |
+| `execution_duration_ms` | `bigint` | NULL | | SPEC-020 FR-12; null when not available |
+| `evidence_payload` | `jsonb` | NULL | | SPEC-020 FR-12; complete per-trial evidence not promoted to scalar columns; null before evidence is collected |
+| `evidence_collected_at` | `timestamptz` | NULL | | Set when evidence collection completes |
+| `created_at` | `timestamptz` | NOT NULL | | Set by API when trial is planned |
+| `updated_at` | `timestamptz` | NOT NULL | | Updated by API on each status transition |
+
+**Primary key:** `trial_id`
+
+**Unique constraint:** `UNIQUE(experiment_id, problem_config_index, backend_id, repetition_index)` — one trial per (experiment, workload position, backend, repetition).
+
+**Foreign keys:**
+- `experiment_id` REFERENCES `experiments(experiment_id)`
+- `problem_id` REFERENCES `routing_problems(problem_id)`
+- `job_id` REFERENCES `jobs(job_id)` (nullable)
+
+**FR-21.2: `trial_status` CHECK constraint:**
+
+```sql
+CHECK (trial_status IN ('Pending', 'Submitted', 'Executing', 'Completed', 'SchedulerRejected', 'HarnessError'))
+```
+
+`'Failed'` is not a `trial_status` value. A trial where the solver returns `solver_outcome = 'Failed'` still reaches `trial_status = 'Completed'`. `Failed` is a solver outcome classification, not a trial lifecycle status (SPEC-020 FR-6).
+
+**FR-21.3: `evidence_status` CHECK constraint:**
+
+```sql
+CHECK (evidence_status IN ('Collected', 'Missing', 'Error'))
+```
+
+Expected `evidence_status` by terminal `trial_status`:
+
+| `trial_status` | Expected `evidence_status` | Notes |
+|---|---|---|
+| `SchedulerRejected` | null | No evidence to collect; trial never submitted to the Evidence Log |
+| `HarnessError` (submission failure) | null | Trial submission failed before a job was created in the Evidence Log |
+| `HarnessError` (evidence collection failure) | `'Error'` | Job completed but evidence retrieval from the Evidence Log failed |
+| `Completed` | `'Collected'` | Evidence retrieved successfully from the Evidence Log |
+| `Completed` | `'Missing'` | Job completed but the Evidence Log record was absent at collection time |
+| `Completed` | `'Error'` | Evidence collection encountered an infrastructure error |
+
+**FR-21.4: Worker experiment-unawareness:**
+
+`experiment_trials` is not read or written by the Worker. The Worker executes jobs without knowledge of the enclosing experiment. The experiment-to-job linkage flows from `experiment_trials.job_id` → `jobs.job_id`, not from `jobs` to any experiment table. No `experiment_id` column is added to the `jobs` table (ADR-012 Decision 4 and Constraint 10).
+
+**FR-21.5: UNIQUE constraint and instance-sharing invariant:**
+
+`UNIQUE(experiment_id, problem_config_index, backend_id, repetition_index)` enforces the instance-sharing invariant from SPEC-020 FR-4.
+
+`problem_config_index` — not `problem_id` — is the key column because:
+- `problem_config_index` is the position in the workload set (0-based index into `problem_ids` in Fixed Mode, or into the generated instance list in Generated Mode). It is distinct by construction regardless of whether multiple positions reference the same `problem_id`.
+- `problem_id` is the routing problem's identity. In Fixed Mode, the `problem_ids` list may validly contain duplicate `problem_id` values at different positions (e.g., to test the same routing problem under different repetition patterns within one experiment). Using `problem_id` in the constraint would cause a spurious conflict for two trials at different workload positions that both reference the same `problem_id` with the same `backend_id` and `repetition_index`.
+- Using `problem_config_index` ensures the constraint prevents duplicate trial records for the same workload position, backend, and repetition — the semantically correct identity — without incorrectly blocking valid Fixed Mode workloads.
+
+Constraint behavior by mode:
+- In **Generated Mode**: for each `(problem_config_index, repetition_index)`, the harness generates one routing problem with one `problem_id` shared across all backends. All backends submit trials for the same workload position and repetition → distinct `backend_id` values differentiate the rows.
+- In **Fixed Mode**: all `repetition_count` repetitions for a `(problem_config_index, backend_id)` pairing are differentiated by `repetition_index`. Duplicate `problem_id` values at different `problem_config_index` positions are permitted and correctly handled.
+
+The constraint satisfies the correctness requirement from SPEC-007 FR-7: cross-solver quality comparisons must be within-problem comparisons. In Generated Mode, the shared `problem_id` per `(problem_config_index, repetition_index)` pairing — enforced at the application layer when problem instances are created — guarantees this. The UNIQUE constraint prevents accidental duplication of that invariant-respecting structure.
+
+**FR-21.6: `job_id` FK and retention ordering:**
+
+`experiment_trials.job_id` → `jobs(job_id)` creates a cross-domain FK between the experiment schema and the Evidence Log schema. Deleting a `jobs` row requires deleting any `experiment_trials` row that references it first. Since both experiment table deletion and evidence retention deletion are deferred for MVP, this ordering constraint is documented but does not block implementation. When retention deletion is implemented post-MVP, `experiment_trials` must appear before `jobs` in the deletion order (see FR-16.5.1).
+
+**FR-21.7: `trial_seed` storage:**
+
+`trial_seed` is a `uint64` value stored as `bigint` using the two's complement convention from FR-4.3.
+
+**FR-21.8: Per-trial evidence: scalar columns vs `evidence_payload`:**
+
+SPEC-020 FR-12 defines the complete per-trial evidence field set. SPEC-012 realizes this in two tiers:
+
+**Scalar columns** (promoted for direct querying and statistical aggregation):
+
+| Column | SPEC-020 FR-12 field |
+|---|---|
+| `solver_outcome` | SolverOutcome |
+| `solution_present` | solution_present |
+| `time_window_feasible` | time_window_feasible |
+| `hindsight_quality` | total_route_distance_km / hindsight_quality |
+| `quality_comparison_eligible` | quality_comparison_eligible |
+| `execution_duration_ms` | execution_duration_ms |
+
+**`evidence_payload` JSONB** (remaining SPEC-020 FR-12 fields not promoted to scalar columns):
+
+| JSON key | SPEC-020 FR-12 field | Notes |
+|---|---|---|
+| `max_route_distance_km` | QualityMetrics.max_route_distance_km | Null when simulation not performed |
+| `routes_used` | QualityMetrics.routes_used | Null when simulation not performed |
+| `time_window_violation_count` | QualityMetrics.time_window_violation_count | Null when simulation not performed |
+| `hardware_queue_wait_ms` | extension_metadata.hardware_queue_wait_ms | Null for non-quantum backends |
+| `hardware_calibration_id` | extension_metadata.hardware_calibration_id | Null for non-quantum backends |
+| `hardware_estimated_cost` | extension_metadata.hardware_estimated_cost | Null for non-quantum backends |
+| `hardware_provider_backend` | extension_metadata.hardware_provider_backend | Null for non-quantum backends |
+
+`evidence_payload` is null before evidence collection. After evidence collection, it contains the structured JSONB object with the fields above (individual fields null when their source data is unavailable). A complete SPEC-020 FR-14 Artifact 2 record for a trial is the union of the scalar evidence columns and the `evidence_payload` fields for that `trial_id`.
+
+**Acceptance Criteria:**
+- `UNIQUE(experiment_id, problem_config_index, backend_id, repetition_index)` enforces one trial per (experiment, workload position, backend, repetition); `problem_config_index` is used instead of `problem_id` to correctly handle Fixed Mode workloads with duplicate `problem_id` values at different positions (FR-21.5)
+- `trial_status` is constrained to the six values in FR-21.2; `'Failed'` is not a valid `trial_status`
+- `job_id` is nullable; null for `Pending` trials and `SchedulerRejected` trials
+- No Worker reads or writes to this table
+- `problem_id` is NOT NULL; in Generated Mode, problem instances are persisted before trial records are created
+
+---
+
+### FR-22: `experiment_artifacts` Table
+
+**Description:**
+Stores computed artifacts for an experiment: per-(problem, solver) quality and runtime statistics aggregates, and the experiment summary (SPEC-020 FR-14). Produced by the API; immutable after creation. The benchmark summary (SPEC-020 FR-14 Artifact 4) is stored in `benchmark_summaries` (FR-23), not here.
+
+**Table name:** `experiment_artifacts`
+
+**Columns:**
+
+| Column | Type | Nullable | Constraint | Source |
+|---|---|---|---|---|
+| `artifact_id` | `uuid` | NOT NULL | PRIMARY KEY | Internal PK |
+| `experiment_id` | `uuid` | NOT NULL | FK → `experiments(experiment_id)` | SPEC-020 FR-14 |
+| `artifact_type` | `text` | NOT NULL | CHECK (see FR-22.2) | SPEC-020 FR-14 |
+| `artifact_payload` | `jsonb` | NOT NULL | | SPEC-020 FR-14; structured artifact content |
+| `created_at` | `timestamptz` | NOT NULL | | Set by API at artifact creation |
+
+**Primary key:** `artifact_id`
+
+**Unique constraints:**
+- `UNIQUE (experiment_id) WHERE artifact_type = 'ExperimentSummary'` — at most one ExperimentSummary artifact per experiment (partial index; enforces the one-per-experiment invariant at the schema level)
+
+**Foreign keys:**
+- `experiment_id` REFERENCES `experiments(experiment_id)`
+
+**FR-22.2: `artifact_type` CHECK constraint:**
+
+```sql
+CHECK (artifact_type IN ('QualityStatsAggregate', 'ExperimentSummary'))
+```
+
+`QualityStatsAggregate`: per-(problem, solver) statistics aggregate per SPEC-020 FR-12, FR-13. One row per `(experiment_id, problem_id, backend_id)` pairing; produced when all repetitions for that pairing reach terminal status. The `artifact_payload` carries the `QualityStats`, `RuntimeStats`, and outcome distribution counts defined in SPEC-020 FR-12 and FR-13.
+
+`ExperimentSummary`: full experiment summary per SPEC-020 FR-14 Artifact 3. One row per experiment; produced when the experiment reaches `Completed` status. The `artifact_payload` carries the complete experiment summary: trial results collection, per-(problem, solver) aggregate evidence, per-experiment aggregate evidence, and cross-solver comparison.
+
+**Schema evolution:** The `artifact_type` CHECK constraint is an enumerated text constraint. Any artifact type introduced by a future SPEC-020 revision requires a SPEC-012 amendment to extend this constraint. New artifact types must not be written to `experiment_artifacts` without a corresponding SPEC-012 revision that defines the new type's `artifact_payload` schema and idempotency behavior.
+
+**FR-22.3: Artifact 2 (Trial Results Collection) realization decision:**
+
+SPEC-020 FR-14 Artifact 2 is "one TrialResult record per trial containing all per-trial evidence fields defined in FR-12." SPEC-012 realizes Artifact 2 as a derived query over `experiment_trials` filtered to terminal-status trials, not as separate rows in `experiment_artifacts`. A complete Artifact 2 record for a trial is the union of:
+- the scalar evidence columns on `experiment_trials` (`solver_outcome`, `solution_present`, `time_window_feasible`, `hindsight_quality`, `quality_comparison_eligible`, `execution_duration_ms`), and
+- the `evidence_payload` JSONB column, which stores the remaining SPEC-020 FR-12 fields not promoted to scalar columns (see FR-21.8).
+
+The queryability requirement ("queryable at any point during experiment execution") is satisfied by querying `experiment_trials WHERE trial_status IN ('Completed', 'SchedulerRejected', 'HarnessError')` selecting both scalar columns and `evidence_payload`. Materializing Artifact 2 as separate rows in `experiment_artifacts` would duplicate data already stored in `experiment_trials`.
+
+This is a SPEC-012 physical realization decision under the FR-1 authority boundary. SPEC-020 FR-14 remains authoritative for Artifact 2's semantic content; SPEC-012 owns the decision not to materialize it as separate rows.
+
+**FR-22.4: Idempotency constraints:**
+
+Two artifact types have distinct idempotency requirements:
+
+**ExperimentSummary** — at most one `ExperimentSummary` row may exist per experiment. This is enforced by a partial UNIQUE constraint on `(experiment_id)` filtered to `artifact_type = 'ExperimentSummary'`. A second `ExperimentSummary` INSERT for the same `experiment_id` fails at the schema level.
+
+**QualityStatsAggregate** — one row exists per `(experiment_id, problem_id, backend_id)` aggregate scope. The aggregate scope key is embedded in `artifact_payload`; no schema-level UNIQUE constraint covers this scope. The application layer must enforce idempotency by verifying no existing `QualityStatsAggregate` row exists for the `(experiment_id, problem_id, backend_id)` scope before INSERT. Retry and re-execution paths must include this check rather than blindly inserting.
+
+**Immutability:** `experiment_artifacts` rows are written once and never updated.
+
+**Acceptance Criteria:**
+- `artifact_type` is constrained to the two values in FR-22.2
+- The API produces one `ExperimentSummary` row per experiment when the experiment reaches `Completed` status; no second `ExperimentSummary` for the same `experiment_id` is produced
+- `experiment_artifacts` rows are never updated after creation
+- Artifact 2 (Trial Results Collection) is realized as a derived query over `experiment_trials`; no separate materialized rows exist for Artifact 2 in this table
+- The application layer enforces `QualityStatsAggregate` uniqueness by performing a pre-INSERT check for an existing `QualityStatsAggregate` row scoped to `(experiment_id, problem_id, backend_id)` within `artifact_payload` before creating a new row; retry and re-execution paths include this check (FR-22.4)
+
+---
+
+### FR-23: `benchmark_summaries` Table
+
+**Description:**
+Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benchmark_id`. Created when the first member experiment reaches `Completed` status; updated each time an additional member experiment completes. One row per `benchmark_id`; upserted on each update.
+
+**Table name:** `benchmark_summaries`
+
+**Columns:**
+
+| Column | Type | Nullable | Constraint | Source |
+|---|---|---|---|---|
+| `benchmark_id` | `text` | NOT NULL | PRIMARY KEY | SPEC-020 FR-2; matches `experiments.benchmark_id` by value |
+| `summary_payload` | `jsonb` | NOT NULL | | SPEC-020 FR-14 Artifact 4; full benchmark summary |
+| `updated_at` | `timestamptz` | NOT NULL | | Updated on each member experiment completion |
+
+**Primary key:** `benchmark_id` (text)
+
+**Foreign keys:** None. `benchmark_id` matches `experiments.benchmark_id` and `benchmark_manifests.benchmark_id` by string value. No FK is enforced because a benchmark_id with no manifest is valid (SPEC-020 FR-2) and a benchmark_id with no prior `benchmark_summaries` row is created by the first experiment completion.
+
+**FR-23.2: `summary_payload` content:**
+
+`summary_payload` is `jsonb NOT NULL`. It stores the complete benchmark summary per SPEC-020 FR-14 Artifact 4: benchmark definition fields (from the `benchmark_manifests` row if a manifest exists, absent otherwise), the list of all experiments under this `benchmark_id` with their status and per-solver summaries, and cross-experiment comparability notes.
+
+**FR-23.3: Upsert semantics:**
+
+`benchmark_summaries` uses INSERT ON CONFLICT (`benchmark_id`) DO UPDATE semantics: the first experiment completion under a `benchmark_id` creates the row; each subsequent completion replaces `summary_payload` and `updated_at` with the updated summary incorporating the newly completed experiment. This is the only experiment table that uses upsert rather than CREATE-once semantics.
+
+**Recompute invariant:** The `summary_payload` produced on each upsert must be computed from all experiments under the `benchmark_id` that have reached `Completed` status at the time of computation, not only from the newly completed experiment. An append-only implementation risks losing contributions from experiments that completed concurrently. The application must re-derive the full benchmark summary from all completed member experiments on each upsert.
+
+**Acceptance Criteria:**
+- One row per `benchmark_id`; upsert replaces `summary_payload` and `updated_at` on each member experiment completion
+- `benchmark_id` text PK; no FK to `benchmark_manifests` or `experiments`
+- `summary_payload` includes the benchmark manifest research context fields when a `benchmark_manifests` row exists for the `benchmark_id`; omits them when no manifest exists
 
 ---
 
@@ -1047,6 +1504,8 @@ No application component constructs `file_path` values from caller-supplied inpu
 6. `uint64` values (`seed`, `execution_seed`) are stored as `bigint` using two's complement bit-identical representation per FR-4.3. This convention must be applied consistently by every component performing the conversion (the API and the Worker), regardless of which database client library each uses. Specific driver mechanisms are an implementation planning concern (FR-4.3 Implementation Planning Note).
 7. `stops` JSONB in `routing_problems` is the only denormalized stop representation at MVP scope (FR-4.4). Individual stop normalization is deferred to post-MVP.
 8. Backend capability profiles are not persisted in PostgreSQL (FR-2). If SPEC-003 OQ-2 resolves to a database-backed registry, SPEC-012 must be revised.
+9. Experiment tables (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`) are written exclusively by the API. The Worker must not read or write any experiment table (ADR-012 Decision 4).
+10. The `jobs` table must not receive an `experiment_id` column. Experiment-to-job linkage is held in `experiment_trials.job_id` → `jobs`, not in the `jobs` record. This preserves Worker experiment-unawareness (ADR-012 Decision 4).
 
 ---
 
@@ -1126,7 +1585,7 @@ No application component constructs `file_path` values from caller-supplied inpu
 
 | Component | Impact |
 |---|---|
-| API Layer | Yes — API writes `routing_problems`, `scheduler_configs`, and `jobs` (initial row + cancellation update); reads `jobs`, `solver_run_records`, `failure_records`, `report_metadata_records`, `scheduler_configs` |
+| API Layer | Yes — API writes `routing_problems`, `scheduler_configs`, and `jobs` (initial row + cancellation update); reads `jobs`, `solver_run_records`, `failure_records`, `report_metadata_records`, `scheduler_configs`. With this amendment: API also writes all five experiment tables (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`) and reads `decision_records` and `quality_evaluation_records` for trial evidence collection (ADR-012 Decision 5) |
 | Worker | Yes — Worker writes all evidence tables; reads `routing_problems`, `scheduler_configs`, `jobs` at consumption and at pre-execution cancellation check |
 | Core | None — Core does not access PostgreSQL directly; receives data from Worker as in-memory C++ structs |
 | Scheduler | None — Scheduler operates entirely in-memory; its output (decision record) is persisted by the Worker |
@@ -1183,6 +1642,32 @@ No application component constructs `file_path` values from caller-supplied inpu
 21. **Integration: Schedule stage failure evidence** -- Execute a job that fails at the Schedule stage (NoEligibleSolver). Verify `jobs.status = Failed`, `decision_records` has one row (Scheduler ran), `failure_records` has one row with `failure_stage = Schedule`, and `solver_run_records` has no row for this `job_id`.
 
 22. **Observability query: incomplete Phase 2 writes** -- Given a test scenario where Phase 2 UPDATE did not complete, verify that the query `SELECT d.job_id FROM decision_records d JOIN solver_run_records s ON d.job_id = s.job_id WHERE d.actual_outcome IS NULL` returns the `job_id` of the affected job.
+
+23. **Schema: experiment_trials FK enforcement** -- Attempt to INSERT an `experiment_trials` row with an `experiment_id` that does not exist in `experiments`. Verify PostgreSQL rejects the insert with a FK violation error.
+
+24. **Schema: experiment_trials UNIQUE constraint** -- Given an `experiment_trials` row for `(experiment_id = E, problem_config_index = 0, backend_id = 'classical-vrp', repetition_index = 0)`, attempt to INSERT a second row with the same `(experiment_id, problem_config_index, backend_id, repetition_index)` values. Verify PostgreSQL rejects the insert with a unique constraint violation. Verify that a row with `problem_config_index = 1` and all other values identical is accepted (different workload position).
+
+25. **Schema: trial_status CHECK rejects Failed** -- Attempt to INSERT an `experiment_trials` row with `trial_status = 'Failed'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation.
+
+26. **Schema: experiments workload_mode CHECK** -- Attempt to INSERT an `experiments` row with `workload_mode = 'Random'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation.
+
+27. **Upsert idempotency: benchmark_summaries** -- INSERT a `benchmark_summaries` row for `benchmark_id = 'bench-alpha'` with an initial `summary_payload`. Perform a second upsert for the same `benchmark_id` with an updated `summary_payload`. Verify exactly one row exists for `benchmark_id = 'bench-alpha'` with the updated `summary_payload` and that `updated_at` was updated.
+
+28. **Application behavior: benchmark_manifests immutability** -- INSERT a `benchmark_manifests` row for `benchmark_id = 'bench-alpha'`. Verify that application code enforces no UPDATE is issued against this row after creation. Immutability is an application-layer obligation; no PostgreSQL trigger enforces it at MVP scope (FR-19).
+
+29. **Schema: experiments status CHECK** -- Attempt to INSERT an `experiments` row with `status = 'Pending'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation. Verify that an `experiments` row with `status = 'Created'` is accepted.
+
+30. **Schema: ExperimentSummary partial UNIQUE constraint** -- Given an `experiment_artifacts` row for `experiment_id = E` with `artifact_type = 'ExperimentSummary'`, attempt to INSERT a second row with the same `experiment_id` and `artifact_type = 'ExperimentSummary'`. Verify PostgreSQL rejects the insert with a unique constraint violation. Verify that an `experiment_artifacts` row with `artifact_type = 'QualityStatsAggregate'` and the same `experiment_id` is accepted (partial index does not restrict non-ExperimentSummary rows).
+
+31. **Schema: `selection_mode` CHECK constraint** -- Insert a `decision_records` row with `selection_mode = 'policy_selected'`. Verify the insert is accepted. Insert a `decision_records` row with `selection_mode = 'explicitly_targeted'`. Verify the insert is accepted. Insert a `decision_records` row with `selection_mode = 'forced'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation.
+
+32. **Schema: `jobs.backend_id` nullable** -- Insert a `jobs` row with `backend_id = NULL`. Verify the insert is accepted (standard-path submission). Insert a separate `jobs` row with `backend_id = 'qubo-simulated-annealing'`. Verify the insert is accepted (targeted-path submission). Verify the two rows are independent and that the first row retains `backend_id = NULL`.
+
+33. **Integration: targeted-path successful execution evidence** -- Execute a complete job via the targeted path (non-null `backend_id` in submission; targeted backend is eligible and selected). Query `jobs` for this `job_id` and verify `backend_id` is non-null and matches the submitted value. Query `decision_records` and verify `selection_mode = 'explicitly_targeted'`, `candidate_scores = '[]'`, `confidence_score = 0.0`, and `selected_backend_id` is non-null and matches `jobs.backend_id`. Verify `decision_status = 'Selected'`.
+
+34. **Integration: targeted-path eligibility failure evidence (ineligible backend)** -- Execute a targeted-path job where the specified `backend_id` is present in the Scheduler's capability profile registry but is ineligible for the submitted routing problem (fails Phase 1 or Phase 2 eligibility checking). Query `decision_records` and verify `decision_status = 'NoEligibleSolver'`, `selection_mode = 'explicitly_targeted'`, `rejection_reasons` is non-empty, `selected_backend_id` is null, and `confidence_score` is NULL (targeted-path `NoEligibleSolver` follows standard-path absence semantics for `confidence_score`; SPEC-003 FR-10). Query `jobs` and verify `backend_id` is non-null and matches the intended target. Verify no `solver_run_records` row exists for this `job_id` (no execution occurred).
+
+35. **Integration: targeted-path failure evidence (unregistered backend)** -- Execute a targeted-path job where the specified `backend_id` is not present in the Scheduler's capability profile registry (no eligibility checking is performed; SPEC-003 FR-9). Query `decision_records` and verify `decision_status = 'NoEligibleSolver'`, `selection_mode = 'explicitly_targeted'`, `rejection_reasons = '{}'` (empty; no eligibility checking was performed), `selected_backend_id` is null, and `confidence_score` is NULL. Query `jobs` and verify `backend_id` is non-null and matches the submitted value (`jobs.backend_id` is the sole schema record of the intended target). Verify no `solver_run_records` row exists for this `job_id` (no execution occurred).
 
 ---
 
@@ -1276,6 +1761,14 @@ No specific latency targets are defined for persistence operations at this stage
 
 - **docs/architecture.md:** The runtime flow description and required OTel spans list are consistent with the read/write ownership model defined in FR-15. No changes to architecture.md are required.
 
+- **SPEC-020 OQ-1 (Blocking — Resolved by this amendment):** SPEC-020 OQ-1 asked "What is the persistence schema for experiment manifests, trial records, and experiment artifacts?" The answer is defined in FR-19 through FR-23 of this document. SPEC-020 OQ-1 is resolved. A separate SPEC-020 amendment should update OQ-1 status from Blocking to Resolved and reference FR-19 through FR-23 as the resolution.
+
+- **ADR-012 SPEC-012-R1 directions (applied):** All SPEC-012-R1 directions specified in ADR-012 Documentation Updates have been applied by this amendment: experiment and benchmark persistence tables defined (FR-19 through FR-23); FR-15 updated to add API read access for `decision_records` and `quality_evaluation_records` (Worker-only write authority on both tables, per SPEC-006 FR-1.3, is unchanged); the prohibition against adding `experiment_id` to `jobs` is documented in FR-21.4 and Constraint 10.
+
+- **ADR-013 SPEC-012 directions (applied):** All SPEC-012-directed changes from ADR-013 Documentation Updates Required have been applied by this amendment: nullable `backend_id` column added to `jobs` (FR-6, FR-6.6); `selection_mode` column added to `decision_records` with CHECK constraint and `DEFAULT 'policy_selected'` (FR-7, FR-7.5); targeted-path persistence semantics for `candidate_scores`, `confidence_score`, and `rejection_reasons` defined in FR-7.5; FR-15.5 added to document `jobs.backend_id` API write ownership and `decision_records.selection_mode` Worker Phase 1 write ownership. No other SPEC-012 tables, columns, or constraints are affected by ADR-013.
+
+- **SPEC-001 (Routing Problem Model):** SPEC-020 Documentation Updates Required identifies an optional experiment provenance field to be added to routing problem submissions so that harness-generated problems (Generated Mode) are distinguishable from regular job submissions. This is a SPEC-001 amendment; SPEC-012 does not add the field preemptively. When SPEC-001 is amended to introduce this field, SPEC-012 must be revised to add the corresponding column to `routing_problems`.
+
 ---
 
 # Open Questions
@@ -1365,10 +1858,27 @@ No specific latency targets are defined for persistence operations at this stage
 - [x] Security considerations address `execution_seed`, `violated_stop_ids`, raw problem data, `file_path`, and `extension_metadata`
 - [x] Performance considerations are documented
 - [x] Documentation updates are identified
-- [ ] OQ-1 (default config UUID stability) classified as Implementation Planning Decision, blocking for implementation
-- [ ] OQ-2 (schema migration tooling) classified as ADR Candidate, not blocking for Draft
-- [ ] OQ-3 (Phase 2 incomplete write detection) classified as Implementation Planning Decision, not blocking
-- [ ] OQ-4 (capability profile schema contingency) classified as contingent on SPEC-003 OQ-2, not blocking
+- [x] OQ-1 (default config UUID stability) classified as Implementation Planning Decision, blocking for implementation
+- [x] OQ-2 (schema migration tooling) classified as ADR Candidate, not blocking for Draft
+- [x] OQ-3 (Phase 2 incomplete write detection) classified as Implementation Planning Decision, not blocking
+- [x] OQ-4 (capability profile schema contingency) classified as contingent on SPEC-003 OQ-2, not blocking
+- [x] `benchmark_manifests` table is fully defined including text PK rationale and no-FK-to-experiments design (FR-19)
+- [x] `experiments` table is fully defined including `manifest_payload`, ExperimentStatus lifecycle, and mutable/immutable column boundary (FR-20)
+- [x] `experiment_trials` table is fully defined including instance-sharing UNIQUE constraint, Worker experiment-unawareness, and cross-domain FK ordering note (FR-21)
+- [x] `experiment_artifacts` table is fully defined including Artifact 2 realization decision (FR-22)
+- [x] `benchmark_summaries` table is fully defined including upsert semantics and no-FK design (FR-23)
+- [x] FR-15 updated: API Reads = Yes for `decision_records` and `quality_evaluation_records`; all five experiment tables included in ownership map with correct write/read ownership
+- [x] FR-15.3 documents Worker experiment-table exclusion
+- [x] FR-16.5 defines experiment table retention (indefinite at MVP; no deletion mechanism) and deletion order for future use
+- [x] FR-16.5.1 documents cross-domain FK ordering consequence for future evidence retention implementation
+- [x] FR-14.2 creation order updated to include all thirteen tables
+- [x] Constraints 9 and 10 document experiment table write authority and jobs table no-experiment-id rule
+- [x] SPEC-020 OQ-1 resolution documented in Documentation Updates Required
+- [x] `jobs.backend_id` column defined as `text NULL`, written by the API at creation time, immutable after creation, carrying no FK constraint (FR-6, FR-6.6)
+- [x] `decision_records.selection_mode` column defined as `text NOT NULL DEFAULT 'policy_selected'` with CHECK constraint limiting values to `policy_selected` and `explicitly_targeted` (FR-7, FR-7.5)
+- [x] Targeted-path column semantics for `candidate_scores`, `confidence_score`, and `rejection_reasons` defined in FR-7.5; `confidence_score = 0.0` only when `selection_mode = 'explicitly_targeted' AND decision_status = Selected`; `confidence_score` is NULL when `selection_mode = 'explicitly_targeted' AND decision_status = NoEligibleSolver`
+- [x] FR-15.5 documents `jobs.backend_id` API write ownership and `decision_records.selection_mode` Worker Phase 1 write ownership
+- [x] ADR-013 SPEC-012 amendment directions fully applied
 
 ---
 
@@ -1376,8 +1886,8 @@ No specific latency targets are defined for persistence operations at this stage
 
 This feature is complete when:
 
-- All functional requirements (FR-1 through FR-18) are implemented and acceptance criteria pass
-- The eight-table schema is initialized in the development PostgreSQL instance from a validated DDL script applied in the dependency order defined in FR-14.2
+- All functional requirements (FR-1 through FR-23) are implemented and acceptance criteria pass
+- The thirteen-table schema is initialized in the development PostgreSQL instance from a validated DDL script applied in the dependency order defined in FR-14.2
 - The default scheduler configuration is seeded and retrievable via `GET /v1/scheduler-configs` (SPEC-008 FR-10)
 - OQ-1 (default config UUID stability) is resolved and the initialization script implements the chosen mechanism
 - OQ-2 (schema migration tooling) is resolved via ADR, and all schema changes after initial creation are applied using the selected tooling
@@ -1385,6 +1895,9 @@ This feature is complete when:
 - `execution_seed` does not appear in any log event, API response, span attribute, or report output, verified by integration test
 - The `worker.evidence.persist` span carries `artifacts_written` and `persistence_outcome` on every Worker execution
 - A complete job execution (API submission through Worker completion with Succeeded outcome) produces retrievable rows in `routing_problems`, `scheduler_configs`, `jobs`, `decision_records`, `solver_run_records`, `quality_evaluation_records`, and `report_metadata_records` with no FK violations
+- A targeted-path job execution (submitted with non-null `backend_id`, eligible backend) produces a `jobs` row with non-null `backend_id` and a `decision_records` row with `selection_mode = 'explicitly_targeted'`, `candidate_scores = '[]'`, and `confidence_score = 0.0`, verified by integration test (Testability item 33)
+- A targeted-path eligibility failure where the specified `backend_id` is ineligible (present in the registry but fails eligibility checking) produces a `decision_records` row with `decision_status = 'NoEligibleSolver'`, `selection_mode = 'explicitly_targeted'`, `confidence_score = NULL`, and non-empty `rejection_reasons`, verified by integration test (Testability item 34)
+- A targeted-path failure where the specified `backend_id` is unregistered (not found in the registry) produces a `decision_records` row with `decision_status = 'NoEligibleSolver'`, `selection_mode = 'explicitly_targeted'`, `confidence_score = NULL`, and `rejection_reasons = '{}'`, with `jobs.backend_id` as the sole schema record of the intended target, verified by integration test (Testability item 35)
 - Engineering review passes
 - Specification status is updated to Accepted
 

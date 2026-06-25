@@ -12,15 +12,15 @@
 
 **Created:** 2026-06-12
 
-**Last Updated:** 2026-06-19
+**Last Updated:** 2026-06-25
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-011
+**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-011, ADR-012, ADR-013
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006, SPEC-009
+**Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006, SPEC-009, SPEC-012, SPEC-016, SPEC-020
 
 ---
 
@@ -81,7 +81,7 @@ SPEC-008 defines the API's responsibilities and explicitly allocates the adjacen
 
 | Component | Responsibilities at This Boundary | Explicitly Not Responsible For |
 |---|---|---|
-| **API** (SPEC-008) | Request receipt; structural and fast domain validation; routing problem persistence; job creation; queue publication; job status visibility; scheduler configuration creation and retrieval; cancellation request intake; report metadata and file serving; `job.submit` span emission; error response production | Solver execution; backend selection; workload feature extraction; quality evaluation; report generation; evidence record persistence; Worker execution behavior |
+| **API** (SPEC-008) | Request receipt; structural and fast domain validation; routing problem persistence; job creation; queue publication; job status visibility; scheduler configuration creation and retrieval; cancellation request intake; report metadata and file serving; `job.submit` span emission; error response production; experiment manifest validation and persistence; benchmark manifest validation and persistence; experiment lifecycle state management; trial evidence collection (reads Evidence Log tables, writes to experiment trial records per ADR-012 Decision 5); experiment artifact computation (QualityStatsAggregates, ExperimentSummary); benchmark summary artifact computation | Solver execution; backend selection; workload feature extraction; quality evaluation; report generation; writing to Evidence Log artifact tables (SPEC-006 FR-1.3 write authority is Worker-only); routing problem generation (SPEC-002); Worker execution behavior in experiment context |
 | **Worker** (SPEC-005) | Job consumption; solver execution; evidence persistence; report generation invocation; job lifecycle state updates | Job submission handling; external API contract; queue publication |
 | **Core** (architecture.md) | Authoritative domain validation (ADR-009); workload feature extraction; quality evaluation and regret calculation | External API; persistence; queue interaction |
 | **PostgreSQL** (ADR-004) | Durable persistence for all jobs, problems, configurations, and evidence records | Computation; execution; API contract |
@@ -106,8 +106,22 @@ A job submission request is an HTTP POST to the job submission endpoint. The req
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `routing_problem` | object | Yes | A routing problem per SPEC-001 FR-11 JSON serialization contract |
+| `routing_problem` | object | Conditional | A routing problem per SPEC-001 FR-11 JSON serialization contract. Required when `problem_id` is absent. Mutually exclusive with `problem_id`. |
+| `problem_id` | UUID string | Conditional | References an existing routing problem record. When provided, `routing_problem` must be absent. Used in experiment context to submit multiple jobs against the same routing problem (ADR-012 Decision 3, SPEC-020 FR-4 instance-sharing invariant). |
 | `scheduler_config_id` | UUID string | No | References an existing scheduler configuration (SPEC-003 FR-13). When absent, the default configuration is used (SPEC-003 FR-14). |
+| `backend_id` | string | No | Backend targeting directive (ADR-013). When absent, the Scheduler selects by policy (standard path — behavior unchanged). When present, the Scheduler validates eligibility for the specified backend and directs execution to it without policy-based fallback (targeted path). The experiment harness always provides `backend_id` for trial job submissions (ADR-013 Decision 2); standard callers may omit it. The API validates `backend_id` as a non-empty string; no existence check against the Scheduler capability profile registry is performed (registry not persisted in PostgreSQL per SPEC-012 FR-2 scope). |
+
+**Submission mode:**
+Exactly one of `routing_problem` or `problem_id` must be present. When neither or both are provided, the request is rejected with HTTP 400. When `problem_id` is provided, the job references an existing routing problem record without creating a new one, enabling the instance-sharing invariant required by experiment cross-solver comparisons (ADR-012 Decision 3, SPEC-012 FR-6). The one-problem-one-job constraint of FR-7 applies only to standard (non-experiment) submissions; in experiment context, multiple jobs may reference the same `problem_id` per ADR-012 Decision 3.
+
+**Backend targeting paths (ADR-013):**
+
+| Path | Condition | Scheduler behavior |
+|---|---|---|
+| Standard path | `backend_id` absent | Scheduler evaluates all eligible backends, scores candidates, and selects by policy |
+| Targeted path | `backend_id` present | Scheduler validates eligibility for the specified backend only; selects it if eligible; records `selection_mode = explicitly_targeted`; no fallback if ineligible |
+
+The targeted path is transparent to the API: the API forwards `backend_id` in the job record and queue message without performing eligibility evaluation or backend selection. The API does not distinguish experiment-context submissions from standard submissions; it does not inspect why a `backend_id` was provided.
 
 **Routing problem fields** (per SPEC-001):
 
@@ -135,10 +149,16 @@ A job submission request is an HTTP POST to the job submission endpoint. The req
 **Content-Type:** `application/json`
 
 **Acceptance Criteria:**
-- A request without `routing_problem` is rejected with HTTP 400 before any persistence occurs
+- A request with neither `routing_problem` nor `problem_id` is rejected with HTTP 400 before any persistence occurs
+- A request with both `routing_problem` and `problem_id` is rejected with HTTP 400
+- A `problem_id` that is not a valid UUID format is rejected with HTTP 400
+- A `problem_id` that does not reference an existing record in `routing_problems` is rejected with HTTP 400 with `error_code = PROBLEM_NOT_FOUND`
 - A request with an unrecognized top-level field is accepted; the field is ignored (permissive structural parsing)
 - A `scheduler_config_id` that is not a valid UUID format is rejected with HTTP 400
-- The `routing_problem` object must satisfy the schema above; any missing required field or type violation is rejected with HTTP 400 identifying the offending field(s)
+- When `routing_problem` is provided, the object must satisfy the schema above; any missing required field or type violation is rejected with HTTP 400 identifying the offending field(s)
+- When `problem_id` is provided, no routing problem field validation is performed
+- A `backend_id` that is an empty string is rejected with HTTP 400; absence of `backend_id` is not a validation failure on any submission path
+- A valid `backend_id` (non-empty string) is accepted without any existence check against the Scheduler capability profile registry
 
 ---
 
@@ -157,6 +177,8 @@ Structural validation failures are immediately rejected with HTTP 400 and a stru
 
 Domain validation rules derived from SPEC-001, applied for fast caller feedback (ADR-009). The API implements these rules independently in C#; Core re-validates in C++ as the authoritative validator (ADR-009).
 
+When `problem_id` is provided instead of `routing_problem` (experiment context), fast domain validation is skipped entirely. The routing problem was already validated at its original submission time. Proceed directly to the `problem_id` existence check and scheduler configuration validation.
+
 | Rule | SPEC-001 Reference | Rejection message |
 |---|---|---|
 | `vehicle_count` ≥ 1 | FR-2 | `vehicle_count must be a positive integer` |
@@ -174,6 +196,20 @@ Domain validation rules derived from SPEC-001, applied for fast caller feedback 
 | `time_window_open` < `time_window_close` (when both present) | FR-9 | `stops[{id}].time_window_open must be less than time_window_close` |
 | Total stop demand ≤ total fleet capacity (`vehicle_count × capacity_per_vehicle`) | FR-8 | `total stop demand ({N}) exceeds total fleet capacity ({M})` |
 
+**`problem_id` existence validation (experiment context):**
+
+| Rule | Description |
+|---|---|
+| `problem_id` exists in PostgreSQL | A provided `problem_id` that references no record in `routing_problems` is rejected: HTTP 400, `error_code = PROBLEM_NOT_FOUND` |
+
+**`backend_id` validation (when present):**
+
+| Rule | Description |
+|---|---|
+| `backend_id` non-empty string | A provided `backend_id` that is an empty string is rejected: HTTP 400, `backend_id must be a non-empty string` |
+| No existence check | `backend_id` is not validated against the Scheduler capability profile registry; capability profiles are not persisted in PostgreSQL (SPEC-012 FR-2 scope). An unregistered `backend_id` is detected at Scheduler execution time, not at submission time (ADR-013 Accepted Risks). |
+| Absence not a failure | Absent `backend_id` means standard-path execution; no validation failure is produced |
+
 **Scheduler configuration validation:**
 
 | Rule | Description |
@@ -181,11 +217,17 @@ Domain validation rules derived from SPEC-001, applied for fast caller feedback 
 | `scheduler_config_id` exists in PostgreSQL | A provided `scheduler_config_id` that references no stored configuration is rejected: HTTP 400, `scheduler_config_id not found` |
 | No validation when absent | Absent `scheduler_config_id` uses the default configuration (SPEC-003 FR-14); no existence check is required |
 
-**Validation ordering:**
+**Validation ordering (routing_problem path — standard submission):**
 
 1. Structural validation — all failures collected and returned together.
-2. Fast domain validation — applied only when structural validation passes. All domain failures collected and returned together in a single response.
+2. Fast domain validation — applied only when structural validation passes. All domain failures collected and returned together in a single response. `backend_id` non-empty check applied here when `backend_id` is present.
 3. Scheduler configuration existence check — applied only when domain validation passes.
+
+**Validation ordering (problem_id path — experiment context):**
+
+1. Structural validation — validate `problem_id` is a valid UUID format; validate `routing_problem` is absent. `backend_id` non-empty check applied here when `backend_id` is present.
+2. `problem_id` existence check — validate the referenced routing problem exists in PostgreSQL.
+3. Scheduler configuration existence check — applied only when step 2 passes.
 
 **Divergence from Core:**
 
@@ -193,10 +235,14 @@ If the API accepts a routing problem that Core subsequently rejects (ADR-009 div
 
 **Acceptance Criteria:**
 - Structural validation failures are returned as HTTP 400 before any database access
-- Fast domain validation failures are returned as HTTP 400 before any database access
+- Fast domain validation failures are returned as HTTP 400 before any database access (routing_problem path only)
 - All validation failures in a layer are collected and returned in a single response — callers receive all errors, not just the first
 - A `scheduler_config_id` that references no stored configuration is rejected with HTTP 400 — the system does not silently substitute the default (SPEC-001 FR-13)
-- A submission that passes all three validation stages proceeds to FR-4 persistence
+- A submission that passes all validation stages proceeds to FR-4 persistence
+- When `problem_id` is provided, fast domain validation is skipped entirely; only `problem_id` existence, `backend_id` non-empty check (when present), and scheduler config validation apply
+- A `problem_id` that references no record in `routing_problems` is rejected with HTTP 400 with `error_code = PROBLEM_NOT_FOUND` before any persistence
+- A `backend_id` present but empty string is rejected with HTTP 400; `backend_id` absent is not a validation failure
+- The API does not validate `backend_id` against the Scheduler capability profile registry
 - The API does not re-run Core's authoritative validation in C#; it implements the fast-feedback approximation defined in ADR-009
 
 ---
@@ -206,21 +252,33 @@ If the API accepts a routing problem that Core subsequently rejects (ADR-009 div
 **Description:**
 After all validation passes, the API creates the job and persists the routing problem to PostgreSQL before publishing to the queue.
 
-**Creation sequence:**
+**Creation sequence — routing_problem path (standard submission):**
 
 1. Generate `problem_id`: UUID, system-generated (SPEC-001 FR-1).
 2. Generate `job_id`: UUID, system-generated. The `job_id` is the caller's correlation handle and the Evidence Log root key (SPEC-006 FR-2).
 3. Resolve `scheduler_config_id`: use the provided value, or the default configuration's ID (SPEC-003 FR-14).
 4. Persist the routing problem record to PostgreSQL with `problem_id`. All SPEC-001 fields are persisted. Persistence completes before queue publication (SPEC-001 FR-12).
-5. Create the job record in PostgreSQL with `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp (SPEC-006 FR-4.2).
+5. Create the job record in PostgreSQL with `job_id`, `problem_id`, `scheduler_config_id`, `backend_id` (nullable — stored when present in the request, NULL when absent), `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp (SPEC-006 FR-4.2).
 6. Steps 4 and 5 execute atomically: either both succeed or neither is committed. If persistence fails, no job message is published and HTTP 500 is returned to the caller.
 
+**Creation sequence — problem_id path (experiment context):**
+
+1. Use the caller-provided `problem_id`. No routing problem record is created.
+2. Generate `job_id`: UUID, system-generated.
+3. Resolve `scheduler_config_id`: use the provided value, or the default configuration's ID (SPEC-003 FR-14).
+4. Create the job record in PostgreSQL with `job_id`, the provided `problem_id`, `scheduler_config_id`, `backend_id` (nullable — stored when present in the request, NULL when absent), `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp.
+5. Step 4 executes atomically. If persistence fails, no job message is published and HTTP 500 is returned.
+
+Note: In the problem_id path, the `problem_id` returned in the response and in the queue message is the caller-supplied value, not a system-generated one. The `problem_id` in the response is unchanged from the input. Multiple jobs may reference the same `problem_id` via this path without violating referential integrity (SPEC-012 FR-6: no UNIQUE constraint on `jobs.problem_id`).
+
 **Acceptance Criteria:**
-- `problem_id` is a UUID generated by the API and returned in the response
+- In the routing_problem path: `problem_id` is a UUID generated by the API and returned in the response
+- In the problem_id path: `problem_id` in the response equals the caller-provided value; no routing problem record is created
 - `job_id` is a UUID generated by the API and returned in the response
-- The routing problem record is persisted to PostgreSQL before the job message is published to RabbitMQ
+- In the routing_problem path: the routing problem record is persisted to PostgreSQL before the job message is published to RabbitMQ
 - The job record initial status is `Pending`
 - The job record initializes `cancellation_requested = false`; the field must exist in the record at creation so that FR-11 can write `true` to it when a cancellation request is accepted
+- When `backend_id` is present in the request, the job record stores the value in the nullable `backend_id` column; when absent, the column is NULL
 - A PostgreSQL failure during persistence causes HTTP 500; no queue message is published
 - The `problem_id` appears on all subsequent log events, spans, and evidence records for the job
 
@@ -233,14 +291,17 @@ After successful persistence, the API publishes a job message to the RabbitMQ ro
 
 **Message content:**
 
-| Field | Value |
-|---|---|
-| `job_id` | The UUID generated in FR-4 |
-| `problem_id` | The UUID generated in FR-4 |
-| `scheduler_config_id` | The resolved configuration identifier |
+| Field | Value | Present |
+|---|---|---|
+| `job_id` | The UUID generated in FR-4 | Always |
+| `problem_id` | The UUID generated in FR-4 | Always |
+| `scheduler_config_id` | The resolved configuration identifier | Always |
+| `backend_id` | The backend targeting directive from the request | When `backend_id` was present in the submission request; absent from the message when the request did not include `backend_id` |
+
+Absence of `backend_id` in the queue message signals standard-path execution to the Worker; presence signals targeted-path execution. The Worker forwards `backend_id` to the Scheduler when present (SPEC-005 FR-5).
 
 **AMQP message metadata:**
-At publication time, the API injects W3C TraceContext (`traceparent`, optionally `tracestate`) from the active `job.submit` span context into the AMQP message `application_headers`. This is message-level metadata, distinct from the message payload body. The payload fields (`job_id`, `problem_id`, `scheduler_config_id`) are unchanged. The trace context schema carried in `application_headers` is owned by ADR-011.
+At publication time, the API injects W3C TraceContext (`traceparent`, optionally `tracestate`) from the active `job.submit` span context into the AMQP message `application_headers`. This is message-level metadata, distinct from the message payload body. The trace context schema carried in `application_headers` is owned by ADR-011.
 
 **Publication semantics:**
 
@@ -251,7 +312,8 @@ At publication time, the API injects W3C TraceContext (`traceparent`, optionally
 
 **Acceptance Criteria:**
 - No job message is published unless routing problem and job records are committed to PostgreSQL
-- The published message payload body contains exactly `job_id`, `problem_id`, and `scheduler_config_id`
+- The published message payload body contains `job_id`, `problem_id`, and `scheduler_config_id` on every submission
+- When `backend_id` is present in the submission request, the published message payload includes `backend_id`; when absent from the request, `backend_id` is not included in the message
 - The published AMQP message includes W3C TraceContext (`traceparent`, optionally `tracestate`) injected from the active `job.submit` span context into the AMQP message `application_headers` (ADR-011)
 - A RabbitMQ publication failure after successful PostgreSQL persistence causes HTTP 500; the persisted job record remains with `status = Pending`
 - The API publishes to the `routing-jobs` queue as defined by ADR-003; no other queue is used for job dispatch
@@ -295,11 +357,17 @@ FR-7 defines the primary job-lifecycle public identifiers: `job_id` and `problem
 - Stable for the lifetime of the job
 
 **`problem_id`** — the routing problem identifier:
-- UUID, generated by the API at submission time (FR-4)
+- UUID, generated by the API at submission time in the routing_problem path (FR-4), or supplied by the caller in the problem_id path (FR-2)
 - Identifies the routing problem record in PostgreSQL
 - Appears on all log events, spans, and evidence records (SPEC-001 FR-1)
 - Stable for the lifetime of the problem record
-- At MVP scope, each problem is associated with exactly one job (SPEC-001)
+- **Cardinality constraint (scoped):** In standard job submissions (routing_problem path), each routing problem is associated with exactly one job. In experiment context (problem_id path, ADR-012 Decision 3), a routing problem may be referenced by multiple jobs. This relaxation applies only when the `problem_id` path in FR-2 is used. The SPEC-012 FR-6 schema already supports multiple jobs referencing the same `problem_id`; no UNIQUE constraint exists on `jobs.problem_id`. The instance-sharing invariant is a correctness requirement for cross-solver quality comparisons under SPEC-007 FR-7 (SPEC-020 FR-4, ADR-012 Decision 3).
+
+**`backend_id` — the backend targeting directive (ADR-013):**
+- An optional string field supplied by the caller on `POST /v1/jobs`
+- When present, stored in the job record (nullable `backend_id` column per SPEC-012) and included in the queue message payload
+- A routing directive for the Scheduler: it indicates which backend to target; it is not an experiment reference and does not link the job to any experiment or trial (ADR-013 Decision 7)
+- `backend_id` is not a public lifecycle identifier in the same sense as `job_id` or `problem_id`; it is not returned in submission responses or status responses
 
 **Internal identifiers not exposed in API responses:**
 - `decision_id` — Scheduler decision record key (SPEC-003 internal)
@@ -309,9 +377,12 @@ FR-7 defines the primary job-lifecycle public identifiers: `job_id` and `problem
 
 **Acceptance Criteria:**
 - Every job submission response includes both `job_id` and `problem_id`
-- `job_id` and `problem_id` are distinct UUIDs for every submission
+- In the routing_problem path: `job_id` and `problem_id` are distinct UUIDs generated by the API
+- In the problem_id path: `job_id` is a new UUID; `problem_id` equals the caller-supplied value
 - No API response includes `decision_id`, `execution_seed`, or internal solver execution identifiers
 - A caller who polls `GET /v1/jobs/{job_id}` receives the same `problem_id` that was returned at submission
+- The `jobs` table does not contain an `experiment_id` column; experiment-to-job linkage is held in `experiment_trials.job_id` (SPEC-012 FR-21.4, ADR-012 Decision 4)
+- `backend_id` is a job record field and queue message field, not a submission response field; it is stored at job creation but is not part of the caller-facing identifier contract
 
 ---
 
@@ -355,6 +426,14 @@ The response includes both the job lifecycle state (`status`) and, for completed
 - A `Failed` job always includes `failure_reason` derived from the failure record (SPEC-006 FR-8)
 - `report_available = true` only when a report metadata record (SPEC-006 FR-9) exists for the job
 - The API does not cache job status; every polling request reads from PostgreSQL
+
+**Note — `NoEligibleSolver` path distinction:** The `failure_reason` field reflects the coarse failure classification from the failure record (`failure_class`). The status response does not distinguish a targeted-path `NoEligibleSolver` (Scheduler rejected the specified backend with `selection_mode = explicitly_targeted`) from a standard-path `NoEligibleSolver` (Scheduler found no eligible backend by policy). Both produce the same `failure_reason`. This is intentional: `GET /v1/jobs/{job_id}` is a lifecycle-state endpoint; it does not surface Scheduler decision detail.
+
+Callers requiring this distinction should use the path appropriate to their context:
+
+- **Experiment context (FR-21):** Call `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`. The trial evidence state returned by FR-21 includes Scheduler decision record fields, including `selection_mode`. This is the correct path for the experiment harness determining whether targeted ineligibility occurred.
+- **Evidence report:** The evidence report (`GET /v1/jobs/{job_id}/report`) includes Scheduler decision information for `Completed` jobs only. `NoEligibleSolver` produces a `Failed` job; `Failed` jobs do not produce evidence reports (`report_available = false`). The evidence report path is not applicable for `NoEligibleSolver` failures.
+- **Direct API callers (non-experiment):** No API endpoint currently surfaces `selection_mode` for `Failed` jobs outside experiment context.
 
 ---
 
@@ -607,12 +686,26 @@ All API error responses use a consistent structured JSON format. This model appl
 |---|---|---|
 | 400 | `VALIDATION_ERROR` | One or more structural or domain validation failures (FR-3) |
 | 400 | `INVALID_SCHEDULER_CONFIG` | Scheduler configuration body is structurally invalid or has missing required parameters (FR-10) |
-| 400 | `SCHEDULER_CONFIG_NOT_FOUND` | `scheduler_config_id` in job submission references no stored configuration |
+| 400 | `SCHEDULER_CONFIG_NOT_FOUND` | `scheduler_config_id` in job submission or experiment manifest references no stored configuration |
+| 400 | `PROBLEM_NOT_FOUND` | `problem_id` in job submission (problem_id path, FR-2) references no record in `routing_problems` |
+| 400 | `EXPERIMENT_CONFIG_INVALID` | Experiment manifest is structurally invalid, references unresolvable resources (Fixed Mode problem_ids), or fails domain validation (FR-18) |
+| 400 | `BENCHMARK_CONFIG_INVALID` | Benchmark manifest is structurally invalid or missing required fields (FR-19) |
 | 404 | `JOB_NOT_FOUND` | No job with the given `job_id` |
 | 404 | `REPORT_NOT_FOUND` | No report for the given job or report_id |
 | 404 | `SCHEDULER_CONFIG_NOT_FOUND` | No configuration with the given `scheduler_config_id` (GET endpoint) |
+| 404 | `EXPERIMENT_NOT_FOUND` | No experiment with the given `experiment_id` |
+| 404 | `TRIAL_NOT_FOUND` | No trial with the given `trial_id` in the specified experiment |
+| 404 | `BENCHMARK_NOT_FOUND` | No benchmark summary exists for the given `benchmark_id` (no member experiment has yet completed) |
+| 404 | `EXPERIMENT_SUMMARY_NOT_FOUND` | Experiment exists but has not yet reached `Completed` status; summary not yet produced |
 | 409 | `JOB_ALREADY_TERMINAL` | Cancellation requested for a terminal job |
-| 500 | `INTERNAL_ERROR` | Unexpected server error (PostgreSQL unavailable, publication failure, etc.) |
+| 409 | `BENCHMARK_ALREADY_EXISTS` | Benchmark manifest submission uses a `benchmark_id` already in use (FR-19) |
+| 409 | `JOB_NOT_TERMINAL` | Evidence collection requested for a trial whose job has not yet reached terminal state (FR-21) |
+| 409 | `TRIAL_ALREADY_SUBMITTED` | Trial submission linkage requested for a trial whose `job_id` is already set; trial has already been linked to a job (FR-25) |
+| 409 | `JOB_PROBLEM_MISMATCH` | Trial submission linkage requested with a `job_id` whose `problem_id` does not match the trial's `problem_id`; instance-sharing invariant violation (ADR-012 Decision 3) (FR-25) |
+| 409 | `JOB_BACKEND_MISMATCH` | Trial submission linkage requested with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id`; evidence integrity invariant violation (ADR-013, POD-1) (FR-25) |
+| 409 | `TRIAL_NOT_SUBMITTED` | Evidence collection requested for a trial whose `job_id` is null; trial has not been linked to a job via FR-25 (FR-21) |
+| 409 | `EXPERIMENT_NOT_ACTIVE` | Trial submission linkage requested for an experiment whose status is not `Created` or `Running`; trial submission is not permitted on terminal experiments (FR-25) |
+| 500 | `INTERNAL_ERROR` | Unexpected server error (PostgreSQL unavailable, publication failure, evidence collection infrastructure failure, etc.) |
 
 **Acceptance Criteria:**
 - Every non-2xx response body conforms to this schema
@@ -639,6 +732,14 @@ The API uses URL path versioning. All endpoints defined in this specification ar
 - `POST /v1/scheduler-configs`
 - `GET /v1/scheduler-configs`
 - `GET /v1/scheduler-configs/{scheduler_config_id}`
+- `POST /v1/experiments`
+- `GET /v1/experiments/{experiment_id}`
+- `GET /v1/experiments/{experiment_id}/trials`
+- `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit`
+- `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`
+- `GET /v1/experiments/{experiment_id}/summary`
+- `POST /v1/benchmarks`
+- `GET /v1/benchmarks/{benchmark_id}/summary`
 
 **Version evolution:** A breaking change to any request or response contract requires a version increment (e.g., `/v2/`). A breaking change is defined as: removing a required field, changing a field's type, removing an endpoint, or changing the semantics of an existing field in a non-backward-compatible way. Adding optional response fields is not a breaking change.
 
@@ -668,10 +769,30 @@ The API's idempotency behavior varies by endpoint class.
 
 **Report retrieval (`GET /v1/jobs/{job_id}/report`, `GET /v1/reports/{report_id}`):** Idempotent.
 
+**Experiment manifest submission (`POST /v1/experiments`):** Not idempotent. Each call creates a new experiment with a new `experiment_id`.
+
+**Benchmark manifest submission (`POST /v1/benchmarks`):** Idempotent on `benchmark_id`. A second submission of the same `benchmark_id` returns `409 Conflict`; the manifest is not updated.
+
+**Experiment status retrieval (`GET /v1/experiments/{experiment_id}`):** Idempotent.
+
+**Trial results retrieval (`GET /v1/experiments/{experiment_id}/trials`):** Idempotent.
+
+**Trial submission linkage (`POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit`):** Not idempotent. A trial may be linked to exactly one `job_id`. A call for a trial with an existing `job_id` returns `409 Conflict` with `error_code = TRIAL_ALREADY_SUBMITTED`; a call for an experiment whose status is not in `{Created, Running}` returns `409 Conflict` with `error_code = EXPERIMENT_NOT_ACTIVE`.
+
+**Trial evidence collection trigger (`POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`):** Idempotent. Repeated calls for the same `trial_id` when evidence has already been collected return `200 OK` with the existing evidence state without re-reading or re-writing. This supports CLI retry on network failure and CLI restart during experiment recovery (ADR-012 SPEC-008-R1 idempotency requirement). The upsert approach aligns with SPEC-012 FR-12's idempotency pattern.
+
+**Experiment summary retrieval (`GET /v1/experiments/{experiment_id}/summary`):** Idempotent.
+
+**Benchmark summary retrieval (`GET /v1/benchmarks/{benchmark_id}/summary`):** Idempotent.
+
 **Acceptance Criteria:**
-- Two identical `POST /v1/jobs` requests produce two distinct `job_id` values and two distinct `problem_id` values
+- Two identical `POST /v1/jobs` requests produce two distinct `job_id` values; in the routing_problem path, they also produce two distinct `problem_id` values; in the problem_id path, both reference the same `problem_id`
 - `GET` requests produce no side effects on any persistent state
 - A `POST /v1/jobs/{job_id}/cancel` on an already-terminal job returns `409 Conflict`, not `202 Accepted`
+- A second `POST /v1/benchmarks` with the same `benchmark_id` returns `409 Conflict`
+- Repeated `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence` calls return `200 OK` and do not duplicate evidence records
+- A call to `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` for a trial whose `job_id` is already set returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED`
+- A call to `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` for an experiment whose `status` is not in `{Created, Running}` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`
 
 ---
 
@@ -689,6 +810,10 @@ The API is responsible for emitting the required OpenTelemetry spans for the sta
 | `api.cancel_request` | API | Covers each `POST /v1/jobs/{job_id}/cancel` request |
 | `api.config_create` | API | Covers each `POST /v1/scheduler-configs` request |
 | `api.report_serve` | API | Covers each `GET /v1/reports/{report_id}` request |
+| `experiment.submit` | API | Covers experiment manifest validation and persistence (FR-18) |
+| `experiment.trial_submit` | API | Covers trial job linkage: validates job/trial integrity and sets `experiment_trials.job_id` (FR-25) |
+| `experiment.evidence_collect` | API | Covers Evidence Log read and experiment trial record write for one trial (FR-21) |
+| `experiment.summarize` | API | Covers experiment summary artifact generation when experiment reaches `Completed` (FR-21 auto-completion path) |
 
 **`job.submit` span attributes (required):**
 
@@ -697,6 +822,7 @@ The API is responsible for emitting the required OpenTelemetry spans for the sta
 | `job_id` | The generated job identifier |
 | `problem_id` | The generated problem identifier |
 | `scheduler_config_id` | The resolved scheduler configuration identifier |
+| `backend_id` | The backend targeting directive when present in the request; omitted from the span when absent (ADR-013) |
 | `stop_count` | Number of stops in the submitted routing problem |
 | `vehicle_count` | Vehicle count |
 | `validation_passed` | Boolean: whether validation succeeded |
@@ -718,7 +844,7 @@ The API is responsible for emitting the required OpenTelemetry spans for the sta
 
 | Event name | Endpoint | Required fields |
 |---|---|---|
-| `api.job.submitted` | POST /v1/jobs | `job_id`, `problem_id`, `scheduler_config_id`, `stop_count`, `vehicle_count` |
+| `api.job.submitted` | POST /v1/jobs | `job_id`, `problem_id`, `scheduler_config_id`, `stop_count`, `vehicle_count`, `backend_id` (when present) |
 | `api.job.validation_failed` | POST /v1/jobs | `problem_id` (not yet assigned), `failure_count`, `failure_codes` |
 | `api.job.publish_failed` | POST /v1/jobs | `job_id`, `problem_id`, `error_type` |
 | `api.job.cancel_requested` | POST /v1/jobs/{id}/cancel | `job_id`, `current_status` |
@@ -734,17 +860,475 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 | Metric name | Type | Labels | Description |
 |---|---|---|---|
 | `daedalus_api_jobs_submitted_total` | Counter | — | Total job submissions receiving 202 Accepted |
-| `daedalus_api_submissions_rejected_total` | Counter | `rejection_reason` (`validation_error`, `config_not_found`) | Total submissions rejected at validation |
+| `daedalus_api_submissions_rejected_total` | Counter | `rejection_reason` (`validation_error`, `config_not_found`, `problem_not_found`) | Total submissions rejected at validation |
 | `daedalus_api_job_submission_duration_seconds` | Histogram | `outcome` (`success`, `validation_failure`, `server_error`) | End-to-end submission request duration |
 | `daedalus_api_status_poll_total` | Counter | `job_status` (`Pending`, `Processing`, `Completed`, `Failed`, `not_found`) | Status poll outcomes |
 | `daedalus_api_cancellations_total` | Counter | `outcome` (`accepted`, `already_terminal`, `not_found`) | Cancellation request outcomes |
+| `daedalus_api_experiments_submitted_total` | Counter | — | Total experiment manifest submissions receiving 201 Created |
+| `daedalus_api_experiments_completed_total` | Counter | `reproducibility_class` | Total experiments that reached `Completed` status |
+| `daedalus_api_trials_evidence_collected_total` | Counter | `evidence_status` (`Collected`, `Missing`, `Error`) | Trial evidence collection outcomes |
 
 **Acceptance Criteria:**
 - `job.submit` is emitted on every job submission attempt, successful or not
-- All required `job.submit` attributes are present on every emission
+- All required `job.submit` attributes are present on every emission; `backend_id` is included in the span when present in the submission request and omitted when absent
 - `job.submit` span status is `Error` on any 4xx or 5xx response
 - The `job.submit` span context is injected as W3C TraceContext in AMQP message `application_headers` on every successful publication (FR-5)
+- `experiment.submit` is emitted on every experiment manifest submission attempt
+- `experiment.trial_submit` is emitted on every trial submission linkage call
+- `experiment.evidence_collect` is emitted on every trial evidence collection call
+- `experiment.summarize` is emitted when an experiment auto-transitions to `Completed`
 - Structured log events do not include routing problem coordinate data
+
+---
+
+### FR-18: Experiment Manifest Submission
+
+**Description:**
+The API accepts experiment manifest submissions from the CLI orchestrator (SPEC-016). The experiment manifest is the complete, immutable configuration for one experiment (SPEC-020 FR-3). On submission, the API validates the manifest, persists the experiment record and trial records (Fixed Mode), and returns the experiment identifier. All durable experiment state is API-backed; the CLI is the orchestration executor but not the state authority (ADR-012 Decisions 1 and 2).
+
+**Endpoint:** `POST /v1/experiments`
+
+**Request body fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `experiment_name` | string | Yes | Human-readable experiment name (SPEC-020 FR-1) |
+| `benchmark_id` | string | Yes | Grouping identifier associating this experiment with a benchmark (SPEC-020 FR-1) |
+| `experiment_seed` | uint64 | Yes | Top-level entropy source for trial seed derivation (SPEC-020 FR-8) |
+| `workload_set` | object | Yes | WorkloadSetDefinition; see below (SPEC-020 FR-4) |
+| `solver_set` | array of strings | Yes | Ordered list of `backend_id` values; minimum 1 element (SPEC-020 FR-5) |
+| `repetition_count` | positive integer | Yes | Number of executions per (problem_config, solver) pairing; minimum 1 (SPEC-020 FR-7) |
+| `execution_timeout_ms_per_trial` | positive integer | Yes | Per-trial execution timeout in milliseconds; must be positive (SPEC-020 FR-3) |
+| `seed_derivation_algorithm_version` | string | Yes | Version identifier for the seed derivation algorithm used by the CLI to compute per-trial seeds from `experiment_seed` (SPEC-012 FR-20.4). Allows reproducibility verification across CLI versions. |
+| `reproducibility_class` | string | Yes | Reproducibility classification for this experiment; derived by the CLI from the union of `determinism_class` values across `solver_set` backends (SPEC-020 FR-9). One of `"fully_reproducible"`, `"partially_reproducible"`, or `"non_reproducible"`. |
+| `scheduler_config_id` | UUID string | No | Scheduler configuration applied to every trial; defaults to default configuration when absent (SPEC-003 FR-14) |
+| `hardware_policy` | object | No | Retry and failure handling for `quantum_hardware` backend trials (SPEC-020 FR-10); defaults apply when absent |
+
+**WorkloadSetDefinition — Fixed Mode:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `mode` | string | Yes | Must be `"fixed"` |
+| `problem_ids` | array of UUID strings | Yes | One or more existing routing problem identifiers (SPEC-020 FR-4 Mode A). Minimum 1 element. Each must reference a record in `routing_problems`. |
+
+**WorkloadSetDefinition — Generated Mode:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `mode` | string | Yes | Must be `"generated"` |
+| `generation_config` | object | Yes | SPEC-002 generation configuration: scenario type, stop count range, fleet parameters, time window parameters |
+| `instance_count` | positive integer | Yes | Number of distinct routing problem instances per repetition; minimum 1 (SPEC-020 FR-4 Mode B) |
+
+**Validation:**
+
+| Rule | Condition | Rejection |
+|---|---|---|
+| `experiment_name` non-empty | | `experiment_name must be a non-empty string` |
+| `benchmark_id` non-empty | | `benchmark_id must be a non-empty string` |
+| `experiment_seed` ≥ 0 | uint64 range | `experiment_seed must be a non-negative 64-bit integer` |
+| `solver_set` non-empty | | `solver_set must contain at least one backend_id` |
+| `repetition_count` ≥ 1 | | `repetition_count must be a positive integer` |
+| `execution_timeout_ms_per_trial` > 0 | | `execution_timeout_ms_per_trial must be a positive integer` |
+| `workload_set.mode` recognized | Must be `"fixed"` or `"generated"` | `workload_set.mode must be fixed or generated` |
+| `scheduler_config_id` valid UUID format (if provided) | | `scheduler_config_id is not a valid UUID` |
+| `scheduler_config_id` exists in PostgreSQL (if provided) | | `scheduler_config_id not found` |
+| Fixed Mode: `problem_ids` non-empty | | `problem_ids must contain at least one element` |
+| Fixed Mode: all `problem_ids` resolvable in PostgreSQL | Any `problem_id` absent from `routing_problems` | `problem_ids contains unresolvable identifiers: [{id}, ...]`; error_code = `EXPERIMENT_CONFIG_INVALID` |
+| Generated Mode: `instance_count` ≥ 1 | | `instance_count must be a positive integer` |
+| Generated Mode: `generation_config` structurally valid per SPEC-002 | Missing or invalid fields | `generation_config: {field}` |
+| `seed_derivation_algorithm_version` non-empty | | `seed_derivation_algorithm_version must be a non-empty string` |
+| `reproducibility_class` recognized value | Must be one of `"fully_reproducible"`, `"partially_reproducible"`, `"non_reproducible"` | `reproducibility_class must be one of: fully_reproducible, partially_reproducible, non_reproducible` |
+
+**Fixed Mode problem_id validation:** The API validates every `problem_id` in the Fixed Mode `problem_ids` list against `routing_problems` before any persistence occurs. A single unresolvable `problem_id` causes the entire submission to be rejected. No partial experiment is created. All unresolvable identifiers are collected and returned together in the response.
+
+**Backend capability-profile validation gap (F-13):** The `solver_set` backend identifiers are not validated against Scheduler capability profiles at experiment submission time. Scheduler capability profiles are not persisted in PostgreSQL (SPEC-012 FR-2 scope); the API has no query path to verify that a `backend_id` is registered and eligible. SPEC-020 FR-5 places pre-submission eligibility verification on the CLI (SPEC-016). A trial job submitted for an unregistered or ineligible `backend_id` will fail at the Scheduler stage, not at the experiment submission stage. This is an accepted MVP constraint.
+
+**Computed manifest fields:**
+
+| Field | Computation |
+|---|---|
+| `experiment_id` | UUID, system-generated |
+| `planned_trial_count` | `problem_count × |solver_set| × repetition_count`, where `problem_count = |problem_ids|` (Fixed) or `instance_count` (Generated) |
+| `workload_mode` | Derived from `workload_set.mode` |
+| `reproducibility_class` | Supplied by CLI in the request body. The CLI derives this from the union of backend `determinism_class` values in `solver_set` per SPEC-020 FR-9. The API validates the supplied value against recognized classes and persists it; no independent derivation occurs at the API layer. |
+
+**Persistence behavior:**
+
+*Fixed Mode:* The API validates all `problem_ids`, creates the experiment record (SPEC-012 FR-20), and creates all trial records (SPEC-012 FR-21) in `Pending` trial_status atomically. The experiment is created in `Created` status. `planned_trial_count` equals `|problem_ids| × |solver_set| × repetition_count`.
+
+*Generated Mode:* The API creates the experiment record (SPEC-012 FR-20) in `Created` status. Trial records are deferred until the CLI provides the generated routing problem identifiers (see OQ-7). The experiment cannot transition to `Running` until trial records are registered.
+
+**Worker experiment-unawareness:** The `jobs` table does not receive an `experiment_id` column. The Worker has no visibility into the experiment. Experiment-to-job linkage is held exclusively in `experiment_trials.job_id` (SPEC-012 FR-21.4, ADR-012 Decision 4).
+
+**HTTP status:** `201 Created`
+
+**Response body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `experiment_id` | UUID string | System-generated experiment identifier |
+| `benchmark_id` | string | The benchmark grouping identifier |
+| `status` | string | Initial status: `"Created"` |
+| `planned_trial_count` | integer | Computed trial count |
+| `workload_mode` | string | `"Fixed"` or `"Generated"` |
+| `reproducibility_class` | string | `"fully_reproducible"`, `"partially_reproducible"`, or `"non_reproducible"` |
+| `experiment_url` | string | Absolute URL: `GET /v1/experiments/{experiment_id}` |
+
+**Acceptance Criteria:**
+- A request with missing required fields is rejected with HTTP 400 before any persistence
+- A request with an unrecognized `reproducibility_class` value is rejected with HTTP 400
+- Fixed Mode: any `problem_id` not found in `routing_problems` causes HTTP 400 with `error_code = EXPERIMENT_CONFIG_INVALID` and a list of all unresolvable identifiers; no experiment record is created
+- Fixed Mode: the experiment record and all trial records are created atomically; a PostgreSQL failure causes HTTP 500 and no partial state is committed
+- Generated Mode: only the experiment record is created at submission time; trial records are deferred (OQ-7)
+- `planned_trial_count` is computed correctly per the formula above
+- No trial is submitted by the API at experiment submission time
+- The `jobs` table receives no `experiment_id` column
+
+---
+
+### FR-19: Benchmark Manifest Submission
+
+**Description:**
+The API accepts benchmark manifest submissions. A benchmark manifest records the research question, hypothesis, and variable definitions for a named research initiative (SPEC-020 FR-2). The manifest is immutable after submission. Submitting a benchmark manifest before experiments are submitted is optional; experiments may reference a `benchmark_id` without a prior benchmark manifest (SPEC-020 FR-2).
+
+**Endpoint:** `POST /v1/benchmarks`
+
+**Request body fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `benchmark_id` | string | Yes | User-supplied identifier; serves as the lookup key. Must be unique across all submitted benchmark manifests. |
+| `benchmark_name` | string | Yes | Human-readable benchmark name |
+| `research_question` | string | Yes | The question the benchmark attempts to answer |
+| `hypothesis` | string | Yes | Expected outcome |
+| `null_hypothesis` | string | Yes | The condition that holds if the proposed improvement does not exist |
+| `controls` | array of strings | Yes | Variables held constant across experiments; minimum 1 element |
+| `independent_variables` | array of strings | Yes | Variables that change between experiments; minimum 1 element |
+| `dependent_variables` | array of strings | Yes | Variables measured; minimum 1 element |
+
+**Validation:**
+
+| Rule | Rejection |
+|---|---|
+| All string fields non-empty | `{field} must be a non-empty string` |
+| `controls`, `independent_variables`, `dependent_variables` non-empty arrays | `{field} must contain at least one element` |
+| `benchmark_id` not already in `benchmark_manifests` | HTTP 409, `error_code = BENCHMARK_ALREADY_EXISTS` |
+
+**HTTP status:**
+- `201 Created` on success
+- `400 Bad Request` for structural or field validation failures
+- `409 Conflict` when `benchmark_id` already exists in `benchmark_manifests`
+
+**Response body (201):**
+
+| Field | Type | Description |
+|---|---|---|
+| `benchmark_id` | string | The submitted identifier |
+| `benchmark_name` | string | |
+| `created_at` | ISO 8601 UTC | Timestamp of creation |
+
+**Acceptance Criteria:**
+- A benchmark manifest with an existing `benchmark_id` is rejected with HTTP 409; the existing manifest is not modified
+- The manifest is persisted to `benchmark_manifests` (SPEC-012 FR-19) before the response is returned
+- All required fields must be non-empty; any missing or empty field is rejected with HTTP 400
+- Submitting a benchmark manifest after experiments have already referenced the `benchmark_id` is valid; the manifest provides research context retroactively
+
+---
+
+### FR-20: Experiment Status Retrieval
+
+**Description:**
+The API exposes an endpoint for retrieving the current status and trial progress of an experiment.
+
+**Endpoint:** `GET /v1/experiments/{experiment_id}`
+
+**Response body:**
+
+| Field | Type | Present | Description |
+|---|---|---|---|
+| `experiment_id` | UUID string | Always | |
+| `benchmark_id` | string | Always | |
+| `experiment_name` | string | Always | |
+| `status` | string | Always | Current `ExperimentStatus` (SPEC-020 FR-11): `"Created"`, `"Running"`, `"Completed"`, or `"Failed"` |
+| `planned_trial_count` | integer | Always | From manifest |
+| `effective_trial_count` | integer | When set | Set when partial workload generation failure reduces actual trial count below `planned_trial_count` |
+| `workload_mode` | string | Always | `"Fixed"` or `"Generated"` |
+| `reproducibility_class` | string | Always | |
+| `submitted_at` | ISO 8601 UTC | Always | Experiment record creation timestamp |
+| `started_at` | ISO 8601 UTC | When Running or later | Set when first trial is submitted |
+| `completed_at` | ISO 8601 UTC | When `status = Completed` | Set when experiment transitions to `Completed` |
+| `failed_at` | ISO 8601 UTC | When `status = Failed` | Set when experiment transitions to `Failed` |
+| `failure_reason` | string | When `status = Failed` | |
+| `trial_counts` | object | Always | Trial count breakdown; see below |
+
+**`trial_counts` object:**
+
+| Field | Type | Description |
+|---|---|---|
+| `pending` | integer | Trials in `Pending` trial_status |
+| `submitted` | integer | Trials in `Submitted` trial_status |
+| `executing` | integer | Trials in `Executing` trial_status. Reserved for future progress reporting; always `0` at MVP scope because no SPEC-008 endpoint transitions `trial_status` to `Executing` |
+| `completed` | integer | Trials in `Completed` trial_status |
+| `scheduler_rejected` | integer | Trials in `SchedulerRejected` trial_status |
+| `harness_error` | integer | Trials in `HarnessError` trial_status |
+| `evidence_collected` | integer | Trials with `evidence_status = Collected` |
+
+**HTTP status codes:**
+- `200 OK`: experiment found
+- `404 Not Found`: no experiment with the given `experiment_id`; `error_code = EXPERIMENT_NOT_FOUND`
+
+**Acceptance Criteria:**
+- Status reflects the current PostgreSQL `experiments` record state at the time of the request
+- `trial_counts` is derived from `experiment_trials` records for this experiment
+- The API does not cache experiment status; every request reads from PostgreSQL
+- `completed_at` and `failed_at` are mutually exclusive
+
+---
+
+### FR-25: Trial Submission Linkage
+
+**Description:**
+After creating an experiment and receiving trial records (FR-18), the CLI submits one job per backend per trial via `POST /v1/jobs` and receives a `job_id` for each. The CLI then calls this endpoint to link each trial record to its corresponding job. This link is required before evidence collection (FR-21 step 2). This endpoint is the mechanism by which `experiment_trials.job_id` is set and by which the experiment transitions from `Created` to `Running` (ADR-012 Decision 1).
+
+**Endpoint:** `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit`
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `job_id` | UUID string | Yes | The `job_id` returned by `POST /v1/jobs` for this trial's backend |
+
+**Validation:**
+
+| Rule | Condition | Rejection |
+|---|---|---|
+| Experiment exists | `experiment_id` not found in `experiments` | HTTP 404, `error_code = EXPERIMENT_NOT_FOUND` |
+| Experiment is active | `experiments.status` not in `{Created, Running}` | HTTP 409, `error_code = EXPERIMENT_NOT_ACTIVE` |
+| Trial belongs to experiment | `trial_id` not found in `experiment_trials` for this experiment | HTTP 404, `error_code = TRIAL_NOT_FOUND` |
+| Trial not yet submitted | `experiment_trials.job_id` is not null | HTTP 409, `error_code = TRIAL_ALREADY_SUBMITTED` |
+| Job exists | `job_id` not found in `jobs` | HTTP 404, `error_code = JOB_NOT_FOUND` |
+| Problem identity | `jobs.problem_id ≠ experiment_trials.problem_id` | HTTP 409, `error_code = JOB_PROBLEM_MISMATCH` |
+| Backend identity | `jobs.backend_id` is non-null and `jobs.backend_id ≠ experiment_trials.backend_id` | HTTP 409, `error_code = JOB_BACKEND_MISMATCH` |
+
+**Behavior:**
+
+The API performs the following sequence:
+
+1. Validates experiment exists; returns HTTP 404 with `error_code = EXPERIMENT_NOT_FOUND` if not.
+2. Validates `experiments.status ∈ {Created, Running}`; returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE` if not. This prevents trial submission linkage on experiments that have already reached a terminal status (`Completed`, `Failed`).
+3. Validates trial belongs to experiment; returns HTTP 404 with `error_code = TRIAL_NOT_FOUND` if not.
+4. Validates `experiment_trials.job_id` is null; returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED` if already set.
+5. Validates the referenced `job_id` exists in `jobs`; returns HTTP 404 with `error_code = JOB_NOT_FOUND` if not.
+6. Validates `jobs.problem_id` equals `experiment_trials.problem_id`; returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH` if not. This enforces the instance-sharing invariant (ADR-012 Decision 3): all backends for a given trial share the same routing problem.
+7. When `jobs.backend_id` is non-null: validates `jobs.backend_id` equals `experiment_trials.backend_id`; returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH` if they differ. This enforces the evidence integrity invariant: a trial job must be directed at the same backend the trial is assigned to, ensuring evidence is produced by the claimed backend (ADR-013, POD-1). When `jobs.backend_id` is null (standard-path job), this check is skipped.
+8. Sets `experiment_trials.job_id = job_id` and transitions `trial_status` from `Pending` to `Submitted`.
+9. If this is the first submitted trial for the experiment (experiment is in `Created` status): transitions `experiments.status` from `Created` to `Running` and sets `experiments.started_at`.
+10. Returns HTTP 200 with the updated trial state.
+
+**HTTP status:**
+- `200 OK`: trial successfully linked to job
+- `404 Not Found`: experiment not found (`EXPERIMENT_NOT_FOUND`), trial not found (`TRIAL_NOT_FOUND`), or job not found (`JOB_NOT_FOUND`)
+- `409 Conflict`: experiment is not in an active state (`EXPERIMENT_NOT_ACTIVE`), trial already has a `job_id` (`TRIAL_ALREADY_SUBMITTED`), `job.problem_id ≠ trial.problem_id` (`JOB_PROBLEM_MISMATCH`), or `job.backend_id` (non-null) `≠ trial.backend_id` (`JOB_BACKEND_MISMATCH`)
+
+**Response body (200):**
+
+| Field | Type | Description |
+|---|---|---|
+| `trial_id` | UUID string | |
+| `experiment_id` | UUID string | |
+| `job_id` | UUID string | The linked `job_id` |
+| `trial_status` | string | `"Submitted"` after successful linkage |
+| `experiment_status` | string | Current experiment status; `"Running"` if this was the first submitted trial |
+
+**Observability:** The `experiment.trial_submit` span is emitted for each call (FR-17).
+
+**Acceptance Criteria:**
+- A call that successfully links a trial to a job returns HTTP 200 with `trial_status = "Submitted"`
+- A call for an experiment whose `status` is not `Created` or `Running` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`
+- A call for a trial whose `job_id` is already set returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED`
+- A call with a `job_id` whose `problem_id` does not match the trial's `problem_id` returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH`
+- A call with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id` returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH`
+- A call with a `job_id` whose `backend_id` is null (standard-path job) does not trigger backend identity validation; the linkage proceeds if all other checks pass
+- The first successful trial submission for an experiment transitions `experiments.status` from `Created` to `Running` and sets `started_at`
+- The linkage and status transitions are atomic; a PostgreSQL failure leaves no partial state
+- The `experiment.trial_submit` span is emitted on every call
+
+---
+
+### FR-21: Trial Evidence Collection Trigger
+
+**Description:**
+When the CLI determines (via job status polling) that a trial's associated job has reached a terminal state, the CLI calls this endpoint to trigger API-mediated evidence collection. The API reads the relevant Evidence Log records for the trial's `job_id` and writes the collected evidence to the experiment trial record (SPEC-012 FR-21). This implements ADR-012 Decision 5.
+
+**Endpoint:** `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`
+
+**Request body:** Empty or absent.
+
+**Evidence collection behavior:**
+
+The API performs the following sequence:
+
+1. Validates that the experiment exists and the trial belongs to it.
+2. Checks `experiment_trials.evidence_status`. If `Collected` or `Missing`, returns HTTP 200 with the existing evidence state without proceeding further (idempotency short-circuit; precedes all Evidence Log reads).
+3. Validates that the trial's `job_id` is non-null. If null, the trial has not been linked to a job via FR-25 and evidence collection cannot proceed; returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`.
+4. Validates that the trial's associated job has reached a terminal state (`jobs.status = Completed` or `jobs.status = Failed`). If the job is not yet terminal, returns HTTP 409 with `error_code = JOB_NOT_TERMINAL`.
+5. Reads `solver_run_records` for the `job_id`: `solver_outcome`, `execution_duration_ms`, `route_plan`, `extension_metadata`. Absent when `jobs.status = Failed` at an early failure stage. `solution_present` is derived as `route_plan IS NOT NULL`; no additional table read is performed.
+6. Reads `quality_evaluation_records` for the `job_id`: `hindsight_quality`, `quality_metrics` (for `quality_comparison_eligible`, `time_window_feasible`). Absent when no quality evaluation was performed.
+7. Writes collected evidence to the `experiment_trials` row: updates `trial_status` to `Completed`, sets evidence scalar columns and `evidence_payload`, sets `evidence_status`, sets `evidence_collected_at`. If no `solver_run_records` exist for the `job_id` and the job's status is `Completed` (job completed but Worker wrote no Evidence Log records — abnormal but possible), `evidence_status` is set to `Missing`.
+8. Checks whether all trials for the experiment are in a terminal `trial_status` (`Completed`, `SchedulerRejected`, or `HarnessError`). If yes, and only if `experiments.status = 'Running'`, triggers the experiment completion sequence (see below). If `experiments.status` is already `Completed`, step 8 is a no-op; the experiment completion sequence is not triggered. This guard prevents a duplicate ExperimentSummary INSERT (SPEC-012 FR-22 UNIQUE constraint) when an `Error`-status trial is retried after the experiment has already transitioned to `Completed`.
+
+**Experiment auto-completion:**
+When step 7 determines all trials are terminal, the API automatically:
+- Computes QualityStatsAggregate artifacts for all (problem, solver) pairings with sufficient evidence (SPEC-020 FR-12, FR-13); verifies no existing `experiment_artifacts` row for `(experiment_id, problem_id, backend_id)` before INSERT per SPEC-012 FR-22.4 (application-layer idempotency guard)
+- Computes the ExperimentSummary artifact (SPEC-020 FR-14 Artifact 3)
+- Persists both to `experiment_artifacts` (SPEC-012 FR-22)
+- Transitions the experiment to `Completed` and sets `completed_at`
+- Triggers benchmark summary update: recomputes the `benchmark_summaries` record for the experiment's `benchmark_id` (SPEC-012 FR-23)
+
+The experiment status in the response reflects the post-collection state. The auto-completion is triggered within the collect-evidence endpoint, making the Running → Completed transition robust to the specific CLI interruption sub-case where all trials complete but the CLI exits before initiating a separate completion trigger (ADR-012 Accepted Risks).
+
+**Idempotency:**
+This endpoint's idempotency behavior varies by `evidence_status`:
+
+1. **`Collected`:** Idempotent. Repeated calls return HTTP 200 with the existing evidence state without re-reading Evidence Log tables or re-writing trial evidence. This supports CLI retry on network failure and CLI restart during experiment recovery (ADR-012 SPEC-008-R1 idempotency requirement). The idempotency check precedes all Evidence Log reads.
+2. **`Error`:** Retryable. A prior call that resulted in `evidence_status = Error` indicates a transient failure during Evidence Log reads. Repeated calls re-attempt Evidence Log reads and may produce a different `evidence_status` on success. The CLI may retry evidence collection for `Error` trials.
+3. **`Missing`:** Terminal. A prior call that resulted in `evidence_status = Missing` indicates Evidence Log records are absent for a completed job. Repeated calls return HTTP 200 with the existing `Missing` state without re-reading Evidence Log tables. `Missing` evidence is not retryable.
+
+**SPEC-006 FR-1.3 compliance:** The API reads from Evidence Log tables (`solver_run_records`, `quality_evaluation_records`) and writes to `experiment_trials` (an experiment persistence table per SPEC-012 FR-21, not an Evidence Log table). No write to any Evidence Log table occurs. Worker-only write authority on Evidence Log tables is preserved (SPEC-006 FR-1.3).
+
+**ADR-011 trace propagation:** The `experiment.evidence_collect` span is emitted for each call. W3C TraceContext is propagated within the span scope per ADR-011 requirements for all new CLI→API experiment endpoint interactions.
+
+**HTTP status:**
+- `200 OK`: evidence collected (or already collected — idempotent)
+- `404 Not Found`: experiment not found (`EXPERIMENT_NOT_FOUND`) or trial not found (`TRIAL_NOT_FOUND`)
+- `409 Conflict`: trial has no linked job (`TRIAL_NOT_SUBMITTED`) or trial's job is not yet in terminal state (`JOB_NOT_TERMINAL`)
+
+**Response body (200):**
+
+| Field | Type | Description |
+|---|---|---|
+| `trial_id` | UUID string | |
+| `experiment_id` | UUID string | |
+| `trial_status` | string | `"Completed"` after evidence collection |
+| `evidence_status` | string | `"Collected"`, `"Missing"`, or `"Error"` |
+| `solver_outcome` | string | From Evidence Log; null if no solver run record |
+| `hindsight_quality` | float | From Evidence Log; null when not available |
+| `quality_comparison_eligible` | boolean | From Evidence Log; null when not available |
+| `execution_duration_ms` | integer | From Evidence Log; null when not available |
+| `solution_present` | boolean | `true` if a valid route plan was produced; `false` if the solver returned no valid solution; null if no solver run record exists |
+| `evidence_collected_at` | ISO 8601 UTC | Timestamp of evidence collection |
+| `experiment_status` | string | Current experiment status after this collection; may be `"Completed"` if this was the last terminal trial |
+
+**Acceptance Criteria:**
+- Repeated calls for a trial with `evidence_status = Collected` return HTTP 200 with the existing evidence state without modification
+- A call when the trial's job is not yet in terminal state returns HTTP 409 with `error_code = JOB_NOT_TERMINAL`
+- A collect-evidence request for a trial whose `job_id` is null returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`
+- Evidence is read from `solver_run_records` and `quality_evaluation_records`; no Evidence Log table is written
+- When this call causes the last trial to reach terminal trial_status, the experiment auto-transitions to `Completed` and `experiment_status = "Completed"` in the response
+- Auto-completion produces one QualityStatsAggregate artifact for each eligible (problem, solver) scope and does not produce duplicate artifacts for an existing scope (SPEC-012 FR-22.4)
+- The ExperimentSummary artifact and benchmark summary update are computed atomically with the experiment status transition
+- `experiment_status` in the response reflects the post-collection state of the experiment
+
+---
+
+### FR-22: Trial Results Retrieval
+
+**Description:**
+The API exposes an endpoint for retrieving the trial results collection for an experiment. This is the API realization of SPEC-020 FR-14 Artifact 2 (Trial Results Collection), implemented as a query over `experiment_trials` rather than a separate materialized artifact (SPEC-012 FR-22.3).
+
+**Endpoint:** `GET /v1/experiments/{experiment_id}/trials`
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `status` | string | No | Filter by `trial_status`; accepts comma-separated values (e.g., `Completed,HarnessError`) |
+| `backend_id` | string | No | Filter by `backend_id` |
+
+**Response body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `experiment_id` | UUID string | |
+| `trials` | array | Array of trial record objects (see below) |
+| `total_count` | integer | Total trial count for the experiment, unfiltered |
+
+**Trial record fields:**
+
+| Field | Type | Present | Description |
+|---|---|---|---|
+| `trial_id` | UUID string | Always | |
+| `problem_id` | UUID string | Always | |
+| `backend_id` | string | Always | |
+| `repetition_index` | integer | Always | |
+| `problem_config_index` | integer | Always | |
+| `solver_set_index` | integer | Always | |
+| `trial_seed` | uint64 | Always | |
+| `trial_type` | string | Always | `"reproducible"` or `"non_reproducible"` |
+| `trial_status` | string | Always | Current `TrialStatus` |
+| `job_id` | UUID string | When submitted | Null before submission and for `SchedulerRejected` trials |
+| `evidence_status` | string | When terminal | `"Collected"`, `"Missing"`, `"Error"`, or null before evidence collection |
+| `solver_outcome` | string | When evidence collected | Null before collection or when not available |
+| `hindsight_quality` | float | When evidence collected | Null when not available |
+| `quality_comparison_eligible` | boolean | When evidence collected | Null before collection |
+| `execution_duration_ms` | integer | When evidence collected | Null when not available |
+| `retry_count` | integer | Always | 0 for non-hardware trials |
+| `harness_failure_reason` | string | When `HarnessError` | |
+| `scheduler_rejection_reason` | string | When `SchedulerRejected` | |
+
+**HTTP status codes:**
+- `200 OK`
+- `404 Not Found`: no experiment with the given `experiment_id`; `error_code = EXPERIMENT_NOT_FOUND`
+
+**Acceptance Criteria:**
+- The response contains all trials for the experiment across all statuses when no filter is applied
+- `total_count` reflects the total trial count regardless of applied filters
+- The API does not cache trial results; every request reads from PostgreSQL
+- Filtering by `status` or `backend_id` is applied server-side
+
+---
+
+### FR-23: Experiment Summary Retrieval
+
+**Description:**
+The API exposes an endpoint for retrieving the experiment summary artifact (SPEC-020 FR-14 Artifact 3). The summary is computed and persisted when the experiment reaches `Completed` status via the FR-21 auto-completion path.
+
+**Endpoint:** `GET /v1/experiments/{experiment_id}/summary`
+
+**Response body:**
+The complete experiment summary payload per SPEC-020 FR-14 Artifact 3: experiment identity fields, trial results collection, per-(problem, solver) aggregate evidence, per-experiment aggregate evidence, cross-solver comparison, QualityStats and RuntimeStats, outcome distribution, and reproducibility annotation. The payload is the `artifact_payload` of the `ExperimentSummary` record in `experiment_artifacts` (SPEC-012 FR-22).
+
+**HTTP status codes:**
+- `200 OK`: experiment is `Completed` and summary is available
+- `404 Not Found` with `error_code = EXPERIMENT_NOT_FOUND`: no experiment with the given `experiment_id`
+- `404 Not Found` with `error_code = EXPERIMENT_SUMMARY_NOT_FOUND`: experiment exists but has not yet reached `Completed` status
+
+**Acceptance Criteria:**
+- The summary is available only after the experiment reaches `Completed` status
+- Before `Completed`, the endpoint returns 404 with `error_code = EXPERIMENT_SUMMARY_NOT_FOUND`
+- The summary payload contains all fields defined in SPEC-020 FR-14 Artifact 3
+
+---
+
+### FR-24: Benchmark Summary Retrieval
+
+**Description:**
+The API exposes an endpoint for retrieving the benchmark summary artifact (SPEC-020 FR-14 Artifact 4). The summary is produced when the first member experiment under the `benchmark_id` reaches `Completed` status and updated with each subsequent completion.
+
+**Endpoint:** `GET /v1/benchmarks/{benchmark_id}/summary`
+
+**Response body:**
+The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark definition fields (from `benchmark_manifests` if a manifest was submitted; omitted otherwise), the list of all experiments under the `benchmark_id` with their status and per-solver summaries, and cross-experiment comparability notes. The payload is the `summary_payload` from the `benchmark_summaries` record (SPEC-012 FR-23).
+
+**HTTP status codes:**
+- `200 OK`: a benchmark summary exists for this `benchmark_id`
+- `404 Not Found` with `error_code = BENCHMARK_NOT_FOUND`: no `benchmark_summaries` record exists for this `benchmark_id` (no member experiment has yet reached `Completed` status)
+
+**Acceptance Criteria:**
+- The summary reflects all experiments under the `benchmark_id` that have reached `Completed` status at the time of the request
+- The summary is updated each time a new member experiment completes (via FR-21 auto-completion path)
+- Returns 404 before any member experiment reaches `Completed` status
+- When a `benchmark_manifests` record exists for the `benchmark_id`, the research context fields are included in the response; when absent, the response contains only experiment-level evidence
 
 ---
 
@@ -767,6 +1351,12 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 - The API does not expose solver backend registration or capability profile management
 - The API does not support bulk job submission
 - The API does not support webhook or push-based job completion notifications; callers poll for status
+- The API does not submit trial jobs on behalf of the CLI — job submission is performed by the CLI via the existing `POST /v1/jobs` endpoint (ADR-012 Decision 1)
+- The API does not poll job status to determine trial completion — job status polling is performed by the CLI; the CLI calls `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence` when a job is terminal (ADR-012 Decision 5)
+- The API does not write to Evidence Log tables (`solver_run_records`, `quality_evaluation_records`, `solver_failure_records`, `report_metadata_records`) — Worker-only write authority is preserved (SPEC-006 FR-1.3)
+- The API does not define experiment cancellation at MVP scope
+- The API does not paginate trial listing endpoints at MVP scope
+- The API does not generate routing problems in Generated Mode experiments — routing problem creation in Generated Mode is a CLI responsibility; the mechanism is deferred (OQ-7)
 
 ---
 
@@ -779,7 +1369,9 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 5. The routing problem records, job records, and report metadata records written to PostgreSQL by the Worker are readable by the API. Both the API and Worker connect to the same PostgreSQL instance.
 6. The `average_vehicle_speed_kmh` field belongs to the routing problem domain, formally defined in SPEC-001 FR-17 per Project Owner Decision ODR-1. The field is required for all routing problem submissions.
 7. Routing problems in the MVP are primarily synthetic (SPEC-002). Real-world coordinate submissions are architecturally supported but are not explicitly tested.
-8. No authentication or authorization is required at MVP scope. No authentication layer exists at MVP scope — not within the API, and not as an external proxy or gateway sitting in front of it. All API endpoints are accessible without credentials. Multi-tenant security is deferred to post-MVP implementation (README). The MVP is assumed to run in a trusted local development environment.
+8. All `experiment_trials` records for a given experiment are accessible through a single PostgreSQL query using the `experiment_id` foreign key. The trial count for any experiment is small enough that full in-memory evaluation of terminal status (step 7 of FR-21) is safe at MVP scope.
+9. A benchmark summary (`benchmark_summaries`) record is always initialized or updated when a member experiment reaches `Completed` status. The API does not need to handle a race condition where two experiments under the same `benchmark_id` complete simultaneously at MVP scope. Concurrent experiment completions under the same `benchmark_id` are not an expected CLI usage pattern at MVP scope; a single CLI session drives one experiment at a time. This is an accepted MVP risk.
+10. No authentication or authorization is required at MVP scope. No authentication layer exists at MVP scope — not within the API, and not as an external proxy or gateway sitting in front of it. All API endpoints are accessible without credentials. Multi-tenant security is deferred to post-MVP implementation (README). The MVP is assumed to run in a trusted local development environment.
 
 ---
 
@@ -815,7 +1407,7 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 
 | Input | Source | Authoritative Owner | Format | Used By | Notes |
 |---|---|---|---|---|---|
-| Job record | PostgreSQL | SPEC-006 FR-4.2 (schema); ODR-6 | `job_id`, `problem_id`, `scheduler_config_id`, `status`, `cancellation_requested`, `created_at`, `updated_at`, `completed_at`, `failed_at` | FR-3 (config validation), FR-8 (status response), FR-11 (terminal state check) | Created by API; `status`, `updated_at`, `completed_at`, `failed_at` updated by Worker (SPEC-005) |
+| Job record | PostgreSQL | SPEC-006 FR-4.2 (schema); ODR-6 | `job_id`, `problem_id`, `scheduler_config_id`, `backend_id` (nullable), `status`, `cancellation_requested`, `created_at`, `updated_at`, `completed_at`, `failed_at` | FR-3 (config validation), FR-8 (status response), FR-11 (terminal state check) | Created by API; `status`, `updated_at`, `completed_at`, `failed_at` updated by Worker (SPEC-005); `backend_id` written at job creation, NULL when not supplied (ADR-013, SPEC-012) |
 | Solver run record | PostgreSQL | SPEC-006 FR-6.2 | `solver_outcome` and associated fields | FR-8 (status response — `solver_outcome` field for `Completed` jobs) | Written by Worker (SPEC-005); absent for `Failed` and non-terminal jobs |
 | Failure record | PostgreSQL | SPEC-006 FR-8 | Failure classification fields including `failure_reason` | FR-8 (status response — `failure_reason` field for `Failed` jobs) | Written by Worker (SPEC-005); absent for `Completed` and non-terminal jobs |
 | Report metadata record | PostgreSQL | SPEC-006 FR-9.2 | `report_id`, `job_id`, `report_format`, `generated_at`, `generation_status` | FR-8 (existence check for `report_available`), FR-12 (report discovery response), FR-13 (file path lookup for report serving) | Written by Worker (SPEC-005 FR-17); may be absent if report generation failed or job is not yet terminal |
@@ -837,7 +1429,7 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 | Cancellation acknowledgement | HTTP caller | JSON per FR-14 error or 202 body | |
 | Routing problem record | PostgreSQL | Per SPEC-001 | Persisted before queue publication |
 | Job record | PostgreSQL | `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, `created_at` (SPEC-006 FR-4.2) | Initial creation; Worker updates status |
-| Job message | RabbitMQ `routing-jobs` | `{job_id, problem_id, scheduler_config_id}` | Consumed by Worker (SPEC-005) |
+| Job message | RabbitMQ `routing-jobs` | `{job_id, problem_id, scheduler_config_id, backend_id (optional)}` | Consumed by Worker (SPEC-005); `backend_id` included when present in the submission request (ADR-013) |
 | OTel spans | OpenTelemetry Collector | Traces per FR-17 | `job.submit` and secondary spans |
 | Structured log events | Stdout (JSON) | Per ADR-006 | At each lifecycle stage |
 
@@ -909,17 +1501,58 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 
 ---
 
+### Experiment Manifest Validation Failure
+
+**Condition:** Experiment manifest submission fails structural or domain validation (missing required fields, unrecognized `workload_set.mode`, invalid `scheduler_config_id`).
+**Behavior:** HTTP 400. No experiment record is created. All validation errors are collected and returned in `field_errors`.
+**Fallback:** Caller must correct the manifest and resubmit.
+
+---
+
+### Fixed Mode Problem Not Found
+
+**Condition:** One or more `problem_ids` in the experiment manifest's Fixed Mode `workload_set` do not reference existing records in `routing_problems`.
+**Behavior:** HTTP 400 with `error_code = EXPERIMENT_CONFIG_INVALID`. All unresolvable identifiers are listed. No experiment record is created.
+**Fallback:** Caller must verify the `problem_ids` are correct and that the routing problem records were successfully persisted before experiment submission.
+
+---
+
+### Evidence Collection on Non-Terminal Job
+
+**Condition:** `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence` is called for a trial whose associated job has not yet reached a terminal state (`Completed` or `Failed`).
+**Behavior:** HTTP 409 with `error_code = JOB_NOT_TERMINAL`. No evidence is read or written.
+**Fallback:** Caller (CLI) must verify job status before triggering evidence collection.
+
+---
+
+### Experiment Persistence Failure
+
+**Condition:** PostgreSQL write fails during experiment manifest submission (experiment record or trial record creation).
+**Behavior:** HTTP 500. The transaction is rolled back atomically. No partial experiment or trial records are committed.
+**Fallback:** Caller should retry the submission. A retry after a clean rollback is safe.
+
+---
+
+### Experiment Auto-Completion Failure
+
+**Condition:** The experiment auto-completion sequence (ExperimentSummary artifact computation or benchmark summary update) fails after the last trial reaches terminal status.
+**Behavior:** HTTP 500 is returned from the collect-evidence call. The trial's evidence may have been written before the failure; the idempotency mechanism in FR-21 (already-`Collected` check) ensures a retry does not re-read Evidence Log tables. The experiment may remain in `Running` status if the transition write failed. Operator inspection of PostgreSQL state is required.
+**Fallback:** Retry the collect-evidence call. If the trial is already `Collected`, the idempotent path re-runs the all-terminal check and re-attempts the completion sequence.
+
+---
+
 # Architectural Impact
 
 | Component | Impact |
 |---|---|
 | Domain Layer | Indirect — API implements fast domain validation rules derived from SPEC-001; these rules must be kept consistent with Core's authoritative C++ validation (ADR-009) |
 | API Layer | Yes — SPEC-008 is the primary definition of the API layer behavior |
-| Persistence | Yes — API writes routing problem records and job records to PostgreSQL; reads job status and report metadata from PostgreSQL |
+| Persistence | Yes — API writes routing problem records and job records to PostgreSQL; reads job status and report metadata from PostgreSQL; writes and reads experiment state tables (experiments, experiment_trials, experiment_artifacts, benchmark_manifests, benchmark_summaries) per SPEC-012 FR-19 through FR-23 |
 | Solver Runtime | None — API has no direct interaction with solver backends |
-| Observability | Yes — API owns `job.submit` span and additional request spans; introduces API-layer Prometheus metrics |
+| Observability | Yes — API owns `job.submit`, `experiment.submit`, `experiment.evidence_collect`, and `experiment.summarize` spans; introduces API-layer Prometheus metrics |
 | Security | Yes — API is the external trust boundary; all caller input is untrusted; authentication/authorization deferred |
 | Configuration | Yes — API creates and retrieves scheduler configuration records; seeds default configuration at startup |
+| Experiment State | Yes — API is the durable state authority for all experiment lifecycle state (ADR-012 Decision 2); CLI is the orchestration executor but holds no durable state |
 | Deployment | Yes — API container requires PostgreSQL access, RabbitMQ access, and report volume mount (read-only) |
 
 **SPEC-001 FR-12:** "Persistence and job creation are atomic. If persistence fails, the job is not published." Satisfied by FR-4 atomicity requirement.
@@ -974,6 +1607,64 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 
 21. **Unit: PostgreSQL persistence before publication** — Given a test harness that accepts a PostgreSQL write and then fails RabbitMQ publication, the routing problem and job records exist in PostgreSQL with no queue message published, and the API returns HTTP 500.
 
+22. **Unit: Experiment manifest — missing required field** — A `POST /v1/experiments` body with `solver_set` absent returns HTTP 400 with a `field_errors` entry identifying `solver_set`.
+
+23. **Unit: Experiment manifest — Fixed Mode unknown problem_id** — A `POST /v1/experiments` with Fixed Mode `workload_set` containing one valid and one non-existent `problem_id` returns HTTP 400 with `error_code = EXPERIMENT_CONFIG_INVALID` listing the unresolvable identifier; no experiment record is created.
+
+24. **Unit: Experiment manifest — Fixed Mode all problem_ids unresolvable** — A `POST /v1/experiments` with Fixed Mode `workload_set` where all `problem_ids` are absent from `routing_problems` returns HTTP 400 listing all unresolvable identifiers.
+
+25. **Integration: Experiment submission — Fixed Mode happy path** — A valid `POST /v1/experiments` with Fixed Mode returns HTTP 201 with `experiment_id`, `status = "Created"`, `planned_trial_count` matching `|problem_ids| × |solver_set| × repetition_count`, and all trial records in `Pending` trial_status in PostgreSQL.
+
+26. **Unit: Benchmark submission — duplicate benchmark_id** — A second `POST /v1/benchmarks` with the same `benchmark_id` returns HTTP 409 with `error_code = BENCHMARK_ALREADY_EXISTS`; the original manifest is unchanged.
+
+27. **Integration: Experiment status retrieval** — `GET /v1/experiments/{experiment_id}` returns HTTP 200 with `trial_counts` reflecting the current trial_status distribution.
+
+28. **Integration: Experiment status — not found** — `GET /v1/experiments/{unknown_id}` returns HTTP 404 with `error_code = EXPERIMENT_NOT_FOUND`.
+
+29. **Integration: Trial evidence collection — non-terminal job** — `POST /v1/experiments/{id}/trials/{id}/collect-evidence` when the trial's job has `status = Processing` returns HTTP 409 with `error_code = JOB_NOT_TERMINAL`.
+
+30. **Integration: Trial evidence collection — idempotent** — Calling `POST /v1/experiments/{id}/trials/{id}/collect-evidence` twice for a trial with `evidence_status = Collected` returns HTTP 200 on both calls with identical values for all evidence fields in the response body.
+
+31. **Integration: Trial evidence collection — auto-completion** — When the collect-evidence call causes the last pending trial to become terminal, the response body contains `experiment_status = "Completed"` and `GET /v1/experiments/{experiment_id}` reflects `status = "Completed"`.
+
+32. **Unit: Trial evidence collection — no experiment_id on jobs table** — After a trial job is submitted, the `jobs` table record for that `job_id` has no `experiment_id` column. The experiment-to-job linkage exists only in `experiment_trials.job_id`.
+
+33. **Integration: Trial results retrieval** — `GET /v1/experiments/{experiment_id}/trials` returns HTTP 200 with a `trials` array containing one entry per trial, and `total_count` matching `planned_trial_count`.
+
+34. **Integration: Experiment summary — before completion** — `GET /v1/experiments/{experiment_id}/summary` when the experiment is in `Running` status returns HTTP 404 with `error_code = EXPERIMENT_SUMMARY_NOT_FOUND`.
+
+35. **Integration: Experiment summary — after completion** — `GET /v1/experiments/{experiment_id}/summary` after auto-completion returns HTTP 200 with a summary payload containing all fields from SPEC-020 FR-14 Artifact 3.
+
+36. **Integration: Benchmark summary — before any experiment completes** — `GET /v1/benchmarks/{benchmark_id}/summary` before any member experiment reaches `Completed` returns HTTP 404 with `error_code = BENCHMARK_NOT_FOUND`.
+
+37. **Integration: Benchmark summary — after first experiment completes** — `GET /v1/benchmarks/{benchmark_id}/summary` after the first member experiment completes returns HTTP 200.
+
+38. **Integration: Trial submission linkage — success** — `POST /v1/experiments/{id}/trials/{id}/submit` with a valid `job_id` whose `problem_id` matches the trial's `problem_id` returns HTTP 200 with `trial_status = "Submitted"`.
+
+39. **Integration: Trial submission linkage — already submitted** — `POST /v1/experiments/{id}/trials/{id}/submit` for a trial whose `job_id` is already set returns HTTP 409 with `error_code = TRIAL_ALREADY_SUBMITTED`.
+
+40. **Integration: Trial submission linkage — problem mismatch** — `POST /v1/experiments/{id}/trials/{id}/submit` with a `job_id` whose `problem_id` does not match the trial's `problem_id` returns HTTP 409 with `error_code = JOB_PROBLEM_MISMATCH`.
+
+41. **Integration: Trial submission linkage — first trial transitions experiment to Running** — `POST /v1/experiments/{id}/trials/{id}/submit` for the first trial in a `Created` experiment returns `experiment_status = "Running"` in the response body, and `GET /v1/experiments/{id}` reflects `status = "Running"`.
+
+42. **Unit: Trial evidence collection — null job_id** — `POST /v1/experiments/{id}/trials/{id}/collect-evidence` for a trial whose `job_id` is null (trial not yet linked via FR-25) returns HTTP 409 with `error_code = TRIAL_NOT_SUBMITTED`.
+
+43. **Integration: Trial submission linkage — experiment completed** — `POST /v1/experiments/{id}/trials/{id}/submit` for an experiment whose `status = Completed` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`.
+
+44. **Unit: backend_id absent — standard path** — A valid `POST /v1/jobs` submission without `backend_id` returns HTTP 202; the published queue message does not contain a `backend_id` field; the job record has `backend_id = NULL` in PostgreSQL.
+
+45. **Unit: backend_id present — targeted path** — A valid `POST /v1/jobs` submission with `backend_id = "qubo-simulated-annealing"` returns HTTP 202; the published queue message contains `backend_id = "qubo-simulated-annealing"`; the job record stores `backend_id = "qubo-simulated-annealing"` in PostgreSQL.
+
+46. **Unit: backend_id empty string — rejected** — A `POST /v1/jobs` submission with `backend_id = ""` returns HTTP 400 with `error_code = VALIDATION_ERROR` and a `field_errors` entry identifying `backend_id` before any persistence occurs.
+
+47. **Unit: backend_id in job.submit span** — A `POST /v1/jobs` submission with `backend_id` present produces a `job.submit` span that includes the `backend_id` attribute matching the submitted value.
+
+48. **Unit: backend_id absent — span attribute omitted** — A `POST /v1/jobs` submission without `backend_id` produces a `job.submit` span that does not include a `backend_id` attribute.
+
+49. **Integration: Trial submission linkage — backend_id mismatch** — `POST /v1/experiments/{id}/trials/{id}/submit` with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id` returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH`.
+
+50. **Integration: Trial submission linkage — null backend_id bypasses identity check** — `POST /v1/experiments/{id}/trials/{id}/submit` with a `job_id` whose `backend_id` is null (standard-path job submission) returns HTTP 200 regardless of the trial's `backend_id` value, provided all other validation passes. Backend identity validation is intentionally bypassed when `jobs.backend_id` is null (POD-1 null-bypass rule).
+
 ---
 
 # Observability Requirements
@@ -988,12 +1679,20 @@ Operational questions the API spans, logs, and metrics must answer:
 6. How often are cancellation requests submitted for jobs that are already terminal?
 7. What is the distribution of solver outcomes across Completed jobs visible to the API?
 8. Are report files being served successfully?
+9. How many experiment manifests are submitted, and what fraction fail Fixed Mode validation?
+10. How long does the experiment auto-completion sequence (ExperimentSummary computation, benchmark summary update) take?
+11. For a given `experiment_id`, how many trials are in each status at a given moment?
+12. How often is `POST /v1/experiments/{id}/trials/{id}/collect-evidence` called for non-terminal jobs (JOB_NOT_TERMINAL rejections)?
+13. For a given `job_id`, was the job submitted with a `backend_id` (targeted path) or without (standard path)? Answered by the `backend_id` attribute on the `job.submit` span and the `backend_id` field in the `api.job.submitted` log event.
 
 These are answered by:
 - The `job.submit` span (submission latency, validation outcome, scheduler config)
 - The `api.status_poll` span (polling frequency, status distribution)
+- The `experiment.submit` span (experiment manifest submission latency, Fixed Mode validation outcome, planned_trial_count)
+- The `experiment.evidence_collect` span (evidence collection latency, idempotent vs. new collection, auto-completion trigger)
+- The `experiment.summarize` span (summary computation latency, benchmark summary update outcome)
 - Structured log events at each API stage
-- Prometheus metrics: submission totals, rejection totals, poll outcomes, submission duration histogram
+- Prometheus metrics: submission totals, rejection totals, poll outcomes, submission duration histogram, experiment submission totals, evidence collection totals, JOB_NOT_TERMINAL rejection totals
 
 ---
 
@@ -1012,7 +1711,7 @@ No authentication layer exists at MVP scope — not within the API, and not as a
 `execution_seed` must not appear in API responses, logs, or traces (SPEC-005 Security Considerations). `decision_id` and solver run identifiers are internal and must not be included in API responses (FR-7).
 
 **Log safety:**
-Structured log events must not include routing problem raw data (geographic coordinate arrays, full stop lists). Job identifiers, stop counts, and outcome codes are safe to log. Consistent with SPEC-001 Security Considerations.
+Structured log events must not include routing problem raw data (geographic coordinate arrays, full stop lists). Job identifiers, stop counts, and outcome codes are safe to log. Consistent with SPEC-001 Security Considerations. For experiment-related log events, `experiment_id` is safe to log, but raw problem data (route coordinates, stop lists) from collected evidence payloads must not appear in log events.
 
 **Database credentials:**
 PostgreSQL and RabbitMQ credentials must be injected via environment variables. Credentials must not be committed to source control or logged. Connection strings must not appear in error responses.
@@ -1033,6 +1732,9 @@ The `job.submit` span covers request receipt through HTTP 202. This duration inc
 **Report serving:**
 HTML report files are served from the report volume. File size is bounded by the report content. The API does not buffer or transform the file. Latency is bounded by disk read performance and HTTP transfer time.
 
+**Experiment auto-completion transaction scope:**
+When the last trial reaches a terminal state, the collect-evidence endpoint executes an experiment auto-completion sequence that includes: Evidence Log reads (outside the commit transaction), then atomic write of QualityStatsAggregate artifacts, ExperimentSummary artifact, experiment status transition to `Completed`, and benchmark summary upsert. The transaction write scope grows with the number of (problem, solver) pairings in the experiment. At MVP trial counts this is not expected to cause performance issues, but the commit latency for large experiments will be higher than for single-trial evidence collection calls. This must be measured during implementation.
+
 **Connection pooling:**
 PostgreSQL and RabbitMQ connection pool sizes are implementation planning concerns. Defaults are assumed sufficient for the MVP single-instance workload.
 
@@ -1040,13 +1742,19 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 
 # Documentation Updates Required
 
-- **docs/architecture.md**: The API Responsibilities section accurately describes the API's role at a high level. SPEC-008 is the authoritative binding contract. No architecture.md changes are required.
+- **docs/architecture.md**: The API Responsibilities section accurately describes the API's role at a high level. SPEC-008 is the authoritative binding contract. ADR-013 requires architecture.md updates (Experiment Execution Flow sequence diagram, RabbitMQ section payload description, removal of SPEC-016 OQ-6 from Implementation Blockers); those are architecture.md's governance scope and are not owned by this specification.
 - **SPEC-001 (revision complete)**: `average_vehicle_speed_kmh` is formally defined in SPEC-001 FR-17 as a required routing problem field per ODR-1. SPEC-008 FR-2 and FR-3 now reference SPEC-001 FR-17 as the authoritative definition.
 - **SPEC-003**: The scheduler configuration endpoint contract defined in SPEC-008 FR-10 is the API's implementation of the configuration persistence model implied by SPEC-003 FR-13. No SPEC-003 changes are required.
 - **SPEC-005 FR-12**: The cancellation delivery mechanism is resolved (ODR-5). SPEC-008 FR-11 (API writes `cancellation_requested`) and SPEC-005 FR-12 (Worker reads flag at pre-execution check) are consistent. No further cross-spec updates required for cancellation.
 - **SPEC-006 FR-4 (Job Record Persistence Schema)**: Resolved by ODR-6. SPEC-006 FR-4.2 has been updated to add `scheduler_config_id` and `cancellation_requested`, and SPEC-008 FR-4 and FR-8 have been aligned to SPEC-006's authoritative field names (`created_at`, `updated_at`, `completed_at`, `failed_at`). Engineering Review findings B-2 and B-3 are resolved. SPEC-006 is the authoritative schema owner per ODR-6; future job record field additions require a SPEC-006 revision.
 - **CLI Specification (pending)**: The Daedalus CLI (README.md) submits jobs through the API. The CLI specification must reference SPEC-008 for the HTTP contract it wraps.
 - **SPEC-009 (Report Generator, Accepted)**: SPEC-008 FR-13 serves files written by the Report Generator to the shared report volume. The API is a consumer of the report storage contract; SPEC-009 is the owner. SPEC-009 FR-6 defines the file naming convention (`{report_id}.html`); SPEC-009 FR-7 defines the flat directory storage structure on the report volume; SPEC-009 FR-10 establishes that the report metadata record (SPEC-006 FR-9) stores an explicit `file_path` field from which the API locates the physical file. SPEC-008 FR-13 implementation dependency on the Report Generator Specification is satisfied.
+- **ADR-012 (Experiment Execution Architecture, Accepted)**: ADR-012 Decision 2 named "SPEC-008-R1" as the mechanism for experiment API contract definition. SPEC-008 has been amended in place as the revision vehicle for those requirements (FR-18 through FR-24). ADR-012 reference to "SPEC-008-R1" should be understood as this amendment to SPEC-008. No separate SPEC-008-R1 document exists or is required.
+- **SPEC-020 (Benchmark and Experiment Harness, Accepted)**: OQ-1 (persistence schema for experiment tables) is resolved by SPEC-012 FR-19 through FR-23. SPEC-020 should be updated to mark OQ-1 as resolved and reference SPEC-012 FR-19 through FR-23.
+- **SPEC-020 FR-3 (Experiment Manifest Fields)**: The `seed_derivation_algorithm_version` field (SPEC-012 FR-20.4: `manifest_payload` column) is absent from the SPEC-020 FR-3 manifest field table. SPEC-020 FR-3 should be updated to include `seed_derivation_algorithm_version` as a manifest field.
+- **SPEC-016 (CLI Specification, pending)**: The CLI specification must reference SPEC-008 FR-18 through FR-25 for the experiment and benchmark HTTP contracts it wraps. The CLI is the orchestration executor (ADR-012 Decision 1); the CLI specification must document the collect-evidence call pattern, the experiment submission flow, the trial submission linkage call (FR-25), and the polling loop that drives evidence collection.
+- **SPEC-020 FR-4 (inconsistency — pre-creation rejection vs. transition-to-Failed):** SPEC-020 FR-4 states that an unresolvable `problem_id` is an experiment configuration error that transitions the experiment to `Failed`. FR-18 specifies pre-creation rejection: submission is rejected before any experiment record is created, so no `Failed` transition occurs. Pre-creation rejection is the preferred behavior (no partial state). SPEC-020 FR-4 should be updated to clarify that unresolvable `problem_ids` cause HTTP 400 rejection before experiment record creation, not a post-creation `Failed` transition.
+- **SPEC-020 FR-2 (inconsistency — manifest-must-precede vs. retroactive-is-valid):** SPEC-020 FR-2 first acceptance criterion states that the benchmark manifest must precede any experiment submission under that `benchmark_id`. A later acceptance criterion and FR-19 behavior allow retroactive manifest submission. This is an internal SPEC-020 inconsistency. SPEC-020 FR-2 should be revised to consistently define whether retroactive benchmark manifest submission is supported and under what conditions.
 
 ---
 
@@ -1110,6 +1818,55 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 
 ---
 
+### OQ-7: Generated Mode Routing Problem Creation and Trial Record Registration
+
+**This question covers two distinct sub-problems that must both be resolved before Generated Mode harness implementation can proceed.**
+
+**Sub-problem A: Routing problem creation without job creation**
+
+**Question:** In Generated Mode experiments, the CLI must create routing problems before submitting trial jobs. The existing `POST /v1/jobs` endpoint always creates a routing problem and a job atomically. There is no endpoint that creates a routing problem without also creating a job. How does the CLI create routing problems for Generated Mode experiments so that the resulting `problem_ids` can be used in trial job submissions (via the `problem_id` path in FR-2)?
+
+**Why it matters:** The instance-sharing invariant (ADR-012 Decision 3, SPEC-020 FR-4) requires that for each `(problem_config_index, repetition_index)` pair, all backends share one `problem_id`. To implement this, the CLI must first create the routing problem, then submit one job per backend referencing that `problem_id` using the FR-2 `problem_id` path. Currently, `POST /v1/jobs` is the only way to create a routing problem record, and it always creates a job simultaneously.
+
+**Options under consideration:**
+1. Add a `POST /v1/routing-problems` endpoint that creates a routing problem without creating a job. The CLI uses this for Generated Mode problem creation; `POST /v1/jobs` continues to serve the single-job (non-experiment) path.
+2. Extend `POST /v1/jobs` with an `experiment_trial_context` field that signals the API to create the problem without immediately submitting a job. The first backend submission creates the problem; subsequent backend submissions in the same (problem_config_index, repetition_index) reuse it via the `problem_id` path.
+3. Require that Generated Mode experiments use pre-created problem_ids (effectively treating them as Fixed Mode from the API's perspective). The CLI generates the routing problems before experiment submission and submits them as Fixed Mode. This is architecturally equivalent to Fixed Mode with CLI-generated inputs.
+
+**Sub-problem B: Trial record registration after generated problems exist**
+
+**Question:** FR-18 specifies that in Generated Mode, trial records are deferred until the CLI provides generated routing problem identifiers. Once the CLI has created routing problems (Sub-problem A), how does the CLI register the trial records in `experiment_trials`? No endpoint currently exists to create trial records for an existing experiment. Without trial records, the experiment cannot transition to `Running`, the FR-25 trial submission linkage endpoint has no trial records to link, and FR-21 evidence collection has no trial records to write.
+
+**Why it matters:** SPEC-012 FR-21 defines `experiment_trials` with `problem_id NOT NULL`. Trial records must be registered with their `problem_id` before any job can be linked via FR-25. An endpoint or mechanism is required that creates the corresponding `experiment_trials` rows for a Generated Mode experiment after routing problems are known.
+
+**Options under consideration:**
+1. Add a `POST /v1/experiments/{experiment_id}/trials` endpoint that accepts a batch of trial registration tuples `(problem_config_index, repetition_index, backend_id, problem_id)`. The CLI calls this after creating routing problems for each `(problem_config_index, repetition_index)` group.
+2. Define trial registration as part of the routing problem creation response: the problem creation endpoint (Sub-problem A Option 1) automatically creates trial records in the experiment context when an `experiment_id` is provided.
+3. Treat Generated Mode trial record registration as an atomic extension of Sub-problem A Option 2: a single request creates the routing problem and registers trial records for all backends in one operation.
+
+**Owner:** Both sub-problems are blocking for Generated Mode experiment harness implementation. A decision on Sub-problem A constrains the viable options for Sub-problem B. A decision is required before the CLI specification (SPEC-016) can define the Generated Mode execution flow. An ADR-012 review trigger (per ADR-012 Decision 1 note on non-CLI submission) may be required depending on the chosen options.
+
+**Blocking:** Not blocking for Fixed Mode experiments or for MVP harness scope if Generated Mode is deferred. Both sub-problems must be resolved before Generated Mode experiment harness implementation (SPEC-020 FR-4 Mode B) can proceed.
+
+---
+
+### OQ-8: CLI Notification Mechanism for SchedulerRejected and HarnessError Trials
+
+**Question:** For trials where the CLI fails to submit a job (Scheduler rejects before job creation, or harness-level error prevents job_id acquisition), there is no `job_id` on the trial record. The collect-evidence endpoint (`POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`) requires a non-null `job_id` to read Evidence Log records. How does the CLI update the trial record to `SchedulerRejected` or `HarnessError` trial_status so that the all-trials-terminal check in FR-21 step 7 can evaluate correctly?
+
+**Why it matters:** The experiment auto-completion logic in FR-21 step 7 checks whether all trials are in a terminal trial_status (`Completed`, `SchedulerRejected`, or `HarnessError`). If some trials are permanently stuck in `Pending` or `Submitted` because the CLI had no mechanism to report a submission-time failure, the experiment will never auto-complete.
+
+**Options under consideration:**
+1. Add a `PATCH /v1/experiments/{experiment_id}/trials/{trial_id}` endpoint that allows the CLI to set `trial_status = SchedulerRejected` or `HarnessError` with a `failure_reason` field. The CLI calls this before abandoning the trial.
+2. Extend the collect-evidence endpoint body to accept an optional `failure_report` object. If present and `job_id` is null, the endpoint marks the trial as `HarnessError` or `SchedulerRejected` instead of reading Evidence Log records.
+3. Have the CLI call the collect-evidence endpoint with a synthetic (pre-agreed) signal in the request body to communicate submission-time failure to the API.
+
+**Owner:** This question is blocking for full experiment harness implementation if any trial can fail before job submission. In the happy path (all jobs submitted successfully), this question does not block MVP harness operation.
+
+**Blocking:** Not blocking for MVP scope if `SchedulerRejected` and `HarnessError` terminal states are treated as out-of-scope for the initial harness implementation. Blocking for complete experiment lifecycle handling.
+
+---
+
 # Acceptance Checklist
 
 - [x] Problem is clearly defined
@@ -1131,6 +1888,14 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [x] Versioning expectations are defined (FR-15)
 - [x] Idempotency expectations are defined (FR-16)
 - [x] Observability requirements are defined (FR-17)
+- [x] Experiment manifest submission is defined (FR-18)
+- [x] Benchmark manifest submission is defined (FR-19)
+- [x] Experiment status retrieval is defined (FR-20)
+- [x] Trial submission linkage is defined (FR-25)
+- [x] Trial evidence collection trigger is defined (FR-21)
+- [x] Trial results retrieval is defined (FR-22)
+- [x] Experiment summary retrieval is defined (FR-23)
+- [x] Benchmark summary retrieval is defined (FR-24)
 - [x] Non-requirements are documented
 - [x] Assumptions are explicit
 - [x] Failure modes are defined
@@ -1143,6 +1908,13 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [ ] OQ-4 resolved — scheduler configuration mutability (non-blocking; read-only assumed)
 - [x] OQ-5 resolved — configuration list pagination: no pagination at MVP scope (Non-Requirements)
 - [x] OQ-6 resolved — trace context propagation mechanism: W3C TraceContext in AMQP message `application_headers`; Worker establishes navigable trace relationship (ADR-011)
+- [ ] OQ-7 resolved — Generated Mode routing problem creation (Sub-problem A) and trial record registration (Sub-problem B) (blocking for Generated Mode harness)
+- [ ] OQ-8 resolved — CLI notification mechanism for SchedulerRejected and HarnessError trials (blocking for full lifecycle handling)
+- [x] ADR-013 applied — optional `backend_id` field added to FR-2, FR-3, FR-4, FR-5, FR-7; observability updated in FR-17; testability cases 44–48 added
+- [x] POD-1 applied — FR-25 backend identity validation added (step 7); `JOB_BACKEND_MISMATCH` added to FR-14 error codes; testability case 49 added; standard-path null bypass documented in FR-25 acceptance criteria
+- [x] POD-2 applied — FR-8 clarifying note added: targeted-path vs standard-path `NoEligibleSolver` distinction is not surfaced in status response; callers requiring this distinction directed to evidence report or FR-21 collect-evidence
+- [x] ARCH-002 applied — FR-8 note revised: evidence report path corrected to note it applies to Completed jobs only; Failed jobs (NoEligibleSolver) do not produce evidence reports; experiment context path (FR-21) and direct-caller gap documented
+- [x] ARCH-003 applied — testability case 50 added: null-bypass integration test verifying standard-path jobs (backend_id = NULL) bypass FR-25 backend identity validation
 
 ---
 
@@ -1150,13 +1922,22 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 
 This feature is complete when:
 
-- All functional requirements (FR-1 through FR-17) are implemented and acceptance criteria pass
+- All functional requirements (FR-1 through FR-25) are implemented and acceptance criteria pass
 - OQ-1 (cancellation delivery mechanism) is resolved: PostgreSQL `cancellation_requested` flag; API writes, Worker reads at pre-execution check (ODR-5) — satisfied
 - OQ-2 (Pending-state cancellation) is resolved: soft-cancel model; Pending jobs remain in queue; Worker cancels at pre-execution check (ODR-5) — satisfied
-- OQ-6 (trace context propagation) is resolved and incorporated in FR-17
-- All test contracts defined in the Testability section pass
-- The `job.submit` span is emitted and verifiable in the OpenTelemetry Collector on every submission attempt
+- OQ-6 (trace context propagation) is resolved and incorporated in FR-17 — satisfied
+- OQ-7 Sub-problem A (routing problem creation without job creation) and Sub-problem B (trial record registration) are resolved before Generated Mode harness implementation begins
+- OQ-8 (SchedulerRejected/HarnessError trial notification) is resolved before full experiment lifecycle implementation begins
+- ADR-013 backend targeting contract (FR-2, FR-3, FR-4, FR-5, FR-7) is implemented: optional `backend_id` accepted at submission, stored in job record, forwarded in queue message; empty-string rejection enforced; no capability registry check performed; `jobs.backend_id ≠ experiment_trials.backend_id` check enforced at FR-25 trial submission linkage; `JOB_BACKEND_MISMATCH` (HTTP 409) returned on mismatch
+- All test contracts defined in the Testability section pass (items 1 through 50)
+- The `job.submit`, `experiment.submit`, `experiment.trial_submit`, `experiment.evidence_collect`, and `experiment.summarize` spans are emitted and verifiable in the OpenTelemetry Collector
+- `job.submit` span includes `backend_id` attribute when present in the submission request
 - SPEC-001 FR-17 defines `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 references SPEC-001 FR-17
+- The `jobs` table has no `experiment_id` column; Worker experiment-unawareness is verified by schema inspection
+- The `jobs` table has a nullable `backend_id` column (SPEC-012); existing rows have NULL (standard-path backward compatibility)
+- Fixed Mode experiment submission rejects unresolvable `problem_ids` atomically (no partial experiment state)
+- Evidence collection is idempotent: repeated calls for a `Collected` trial return HTTP 200 without re-reading Evidence Log tables
+- Experiment auto-completes to `Completed` when the last trial reaches terminal trial_status
 - Engineering review passes
 - Architecture review passes
 - Specification status is updated to Verified
