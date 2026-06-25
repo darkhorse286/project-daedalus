@@ -59,7 +59,7 @@ Without a defined selection policy, backend selection is arbitrary, unjustified,
 **Description:**
 The Scheduler is responsible for:
 1. Receiving a validated routing problem and its derived workload features from Core
-2. Evaluating all registered solver backends for eligibility
+2. Evaluating all registered solver backends for eligibility (standard path)
 3. Applying hard eligibility filters to eliminate candidates that cannot handle the problem
 4. Scoring all remaining eligible candidates under the active optimization objective
 5. Selecting the highest-scoring eligible candidate
@@ -279,7 +279,7 @@ Scoring constraints:
 
 **Confidence score:** The scoring step must retain the top two scores among eligible candidates in order to compute `confidence_score`. The `confidence_score` for a given invocation equals (score of the selected backend) − (score of the next-best eligible backend). When only one backend passes all filter phases, `confidence_score` is 0.0.
 
-**Targeted path scoring bypass:** When `backend_id` is present (FR-2 input 5), scoring is bypassed entirely. The Scheduler applies Phase 1 and Phase 2 eligibility validation to the specified backend only. No backend receives a numeric score. `candidate_scores` is empty. `confidence_score` is `0.0`. The `selection_mode = explicitly_targeted` field in the decision record (FR-10) distinguishes this `0.0` from the standard-path case where only one backend passed all filter phases.
+**Targeted path scoring bypass:** When `backend_id` is present (FR-2 input 5), scoring is bypassed entirely. The Scheduler applies Phase 1 and Phase 2 eligibility validation to the specified backend only. No backend receives a numeric score. `candidate_scores` is empty. When the targeted backend is eligible (`decision_status = Selected`), `confidence_score` is `0.0`; `selection_mode = explicitly_targeted` distinguishes this from the standard-path case where only one backend passed all filter phases. When the targeted backend is ineligible or not found in the registry, `confidence_score` is absent.
 
 **Acceptance Criteria:**
 - Given identical inputs, scoring produces identical results on every invocation
@@ -287,7 +287,7 @@ Scoring constraints:
 - Higher score = more preferred candidate
 - The top two scores are retained to enable `confidence_score` computation
 - The scoring formula used, including the active objective mode, is captured in the decision record
-- In the targeted path, `candidate_scores` is empty and `confidence_score` is `0.0`; no backend receives a numeric score
+- In the targeted path, `candidate_scores` is always empty and no backend receives a numeric score; when `decision_status = Selected`, `confidence_score` is `0.0`
 
 ---
 
@@ -302,6 +302,7 @@ The Scheduler does not execute the selected solver. The decision record identifi
 
 - If the specified backend passes Phase 1 and Phase 2 eligibility validation (FR-5), it is selected. No scoring occurs and no tiebreaker is applied. `decision_status = Selected` and `selection_mode = explicitly_targeted` are recorded in the decision record.
 - If the specified backend fails Phase 1 or Phase 2 eligibility validation, the Scheduler records `decision_status = NoEligibleSolver` with `selection_mode = explicitly_targeted`. No alternative backend is evaluated or selected. This no-fallback rule is load-bearing for benchmark validity: the trial's evidence must be produced by the specified backend or not at all.
+- If the specified `backend_id` is not present in the backend registry, the Scheduler records `decision_status = NoEligibleSolver` with `selection_mode = explicitly_targeted`. No Phase 1 or Phase 2 evaluation is performed. No alternative backend is evaluated or selected.
 
 **Acceptance Criteria:**
 - Exactly one `backend_id` is recorded in the decision record as `Selected`
@@ -311,6 +312,7 @@ The Scheduler does not execute the selected solver. The decision record identifi
 - When two or more backends share the top score, the one with the lexicographically smallest `backend_id` is selected
 - In the targeted path, the specified backend is selected without scoring if it passes eligibility; no tiebreaker applies
 - In the targeted path, if the specified backend is ineligible, `decision_status = NoEligibleSolver` and `selection_mode = explicitly_targeted` are recorded; no other backend is evaluated
+- In the targeted path, if the specified `backend_id` is not found in the backend registry, `decision_status = NoEligibleSolver` and `selection_mode = explicitly_targeted` are recorded without performing Phase 1 or Phase 2 evaluation
 
 ---
 
@@ -320,17 +322,17 @@ The Scheduler does not execute the selected solver. The decision record identifi
 The Scheduler does not apply silent fallbacks. If no backend is eligible after Phase 1 and Phase 2 filtering, the Scheduler produces a `NoEligibleSolver` decision record and returns a structured failure. The failure record includes:
 - `problem_id`
 - `problem_size_class`
-- Rejection reasons for every registered backend, covering both Phase 1 structural rejections and Phase 2 objective-mode hard limit rejections
+- Rejection reasons for every registered backend, covering both Phase 1 structural rejections and Phase 2 objective-mode hard limit rejections (standard path)
 - Active objective mode
 - Timestamp
 
 The Scheduler does not retry with a relaxed configuration, override constraint requirements, or silently substitute a different backend. Fallback strategy — such as resubmitting with a different objective mode — is the caller's responsibility.
 
-In the targeted path, when `backend_id` is present and the specified backend is ineligible, the failure record includes the rejection reason for the specified backend only. Non-targeted backends are not evaluated and produce no rejection reason entries. A targeted-path `NoEligibleSolver` is distinguishable from a standard-path `NoEligibleSolver` by `selection_mode = explicitly_targeted` in the decision record.
+In the targeted path: when the specified backend is ineligible, the failure record includes the Phase 1 or Phase 2 rejection reason for the specified backend only; when the specified `backend_id` is not found in the registry, the failure record contains no rejection reason (no eligibility checking was performed). In both targeted-path cases, non-targeted backends are not evaluated and produce no rejection reason entries. A targeted-path `NoEligibleSolver` is distinguishable from a standard-path `NoEligibleSolver` by `selection_mode = explicitly_targeted` in the decision record.
 
 **Acceptance Criteria:**
 - `NoEligibleSolver` failure is a structured response, not a panic or unhandled exception
-- The failure record identifies every registered backend and its rejection reason, from Phase 1 or Phase 2 (standard path), or the specified backend's rejection reason only (targeted path)
+- The failure record identifies every registered backend and its rejection reason from Phase 1 or Phase 2 (standard path); in the targeted path, the failure record contains the specified backend's Phase 1 or Phase 2 rejection reason if eligibility checking was performed, or no rejection reason if the specified `backend_id` was not found in the registry
 - No implicit fallback or silent override occurs at any point in the invocation
 
 ---
@@ -349,7 +351,7 @@ Every Scheduler invocation — successful or failed — produces a decision reco
 | `workload_features_snapshot` | Always | Snapshot of all four workload features at invocation time |
 | `selected_backend_id` | `decision_status = Selected` | `backend_id` of the chosen solver |
 | `candidate_scores` | Always | Numeric score for every backend that passed Phase 1 and Phase 2 filtering. Empty in the targeted path (scoring bypassed). |
-| `rejection_reasons` | Always | Per-backend reason codes for every backend that failed Phase 1 or Phase 2 filtering. In the targeted path: the specified backend's rejection reason code if it failed eligibility; empty if the specified backend was eligible. Non-targeted backends produce no entries. |
+| `rejection_reasons` | Always | Per-backend reason codes for every backend that failed Phase 1 or Phase 2 filtering. In the targeted path: the specified backend's Phase 1 or Phase 2 rejection reason code if eligibility checking was performed and failed; empty if the backend was eligible, or if the specified `backend_id` was not found in the registry (no eligibility checking performed). Non-targeted backends produce no entries. |
 | `predicted_latency` | `decision_status = Selected` | `latency_profile[problem_size_class]` for the selected backend |
 | `predicted_cost` | `decision_status = Selected` | `cost_profile` value for the selected backend |
 | `predicted_quality` | `decision_status = Selected` | `quality_profile` value for the selected backend |
@@ -364,10 +366,10 @@ Every Scheduler invocation — successful or failed — produces a decision reco
 - The `workload_features_snapshot` in the record matches the features used for scoring
 - `actual_outcome` and `hindsight_quality` are absent (null/unset) when the Scheduler produces the record
 - The decision record is serializable without information loss
-- `rejection_reasons` covers every backend that failed Phase 1 or Phase 2 filtering (standard path), or the specified backend's rejection reason only (targeted path)
+- `rejection_reasons` covers every backend that failed Phase 1 or Phase 2 filtering (standard path); in the targeted path, contains the specified backend's Phase 1 or Phase 2 rejection reason if eligibility checking was performed and failed, or is empty if the backend was eligible or not found in the registry
 - `confidence_score` equals the score margin between the selected and next-best eligible backend; 0.0 when only one eligible backend passed all filter phases
 - `selection_mode` is present on every decision record: `policy_selected` for standard-path invocations; `explicitly_targeted` for targeted-path invocations
-- In the targeted path, `candidate_scores` is empty; `confidence_score` is `0.0`; `rejection_reasons` contains the specified backend's reason code if ineligible, or is empty if eligible
+- In the targeted path, `candidate_scores` is always empty; when `decision_status = Selected`, `confidence_score` is `0.0`; `rejection_reasons` contains the specified backend's Phase 1 or Phase 2 reason code if eligibility checking failed, or is empty if the backend was eligible or not found in the registry
 
 ---
 
@@ -541,8 +543,8 @@ The Scheduler must produce the following OpenTelemetry span on every invocation.
 
 ### NoEligibleSolver
 
-**Condition:** All registered backends fail eligibility filtering (Phase 1 or Phase 2 of FR-5), or the backend registry is empty (standard path); or the specified backend fails eligibility filtering (targeted path).
-**Behavior:** Scheduler produces a `NoEligibleSolver` decision record. Standard path: identifies every backend and its rejection reason (from Phase 1 or Phase 2). Targeted path: identifies the specified backend and its rejection reason only; `selection_mode = explicitly_targeted` is recorded. In both paths, invocation returns a structured failure.
+**Condition:** All registered backends fail eligibility filtering (Phase 1 or Phase 2 of FR-5), or the backend registry is empty (standard path); or the specified backend fails eligibility filtering, or the specified `backend_id` is not found in the backend registry (targeted path).
+**Behavior:** Scheduler produces a `NoEligibleSolver` decision record. Standard path: identifies every backend and its rejection reason (from Phase 1 or Phase 2). Targeted path with eligibility failure: identifies the specified backend's Phase 1 or Phase 2 rejection reason only. Targeted path with unregistered `backend_id`: no rejection reason entry (no eligibility checking was performed). In all cases, `selection_mode = explicitly_targeted` is recorded and invocation returns a structured failure.
 **Fallback:** None. Fallback strategy (e.g., retry with a different objective, adjust problem constraints) is the caller's responsibility. In the targeted path, no alternative backend is evaluated regardless of availability.
 **Caller-visible result:** Structured failure record. Use `selection_mode` to distinguish standard-path from targeted-path `NoEligibleSolver` outcomes.
 
