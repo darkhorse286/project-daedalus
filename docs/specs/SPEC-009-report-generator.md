@@ -124,7 +124,7 @@ The Worker passes the following on every invocation. All required inputs must be
 | Input | Required | Type | Source | Notes |
 |---|---|---|---|---|
 | `job_id` | Yes | UUID string | Worker (from job message) | Evidence record set root identifier (SPEC-006 FR-2) |
-| `job_record` | Yes | JobRecord | In-memory (loaded by Worker in FR-4, updated through FR-18) | Job lifecycle state, timestamps, `problem_id`, `scheduler_config_id`, `backend_id` (nullable; present when `backend_id` was specified in the job submission per ADR-013; added to `jobs` table by SPEC-012 amendment) (SPEC-006 FR-4.2) |
+| `job_record` | Yes | JobRecord | In-memory (loaded by Worker in FR-4, updated through FR-18) | Job lifecycle state, timestamps, `problem_id`, `scheduler_config_id` (SPEC-006 FR-4.2); `backend_id` nullable, present when `backend_id` was specified in the original job submission (SPEC-012 amendment per ADR-013) |
 | `decision_record` | Yes | DecisionRecord | In-memory (from Core invocation FR-5, updated with quality evaluation FR-15) | Scheduler decision including backend selection, predicted values, `actual_outcome`, `hindsight_quality` (SPEC-003 FR-10; SPEC-007 FR-4) |
 | `solver_run_record` | Yes | SolverRunRecord | In-memory (composed from SolverResponse, persisted in FR-16) | Solver execution inputs and outputs including outcome, statistics, reproducibility tuple (SPEC-006 FR-6.2) |
 | `quality_evaluation_record` | No | QualityEvaluationRecord or null | In-memory (from Core quality evaluation FR-15, persisted in FR-16) | Quality evaluation result (SPEC-007 FR-9); null when quality evaluation was not invoked (no route plan present) |
@@ -195,17 +195,16 @@ Rendered for every job.
 | Objective mode | `decision_record.objective_mode` |
 | Decision status | `decision_record.decision_status` |
 | Selection mode | `decision_record.selection_mode` (`policy_selected` or `explicitly_targeted`) |
-| Selected backend | `decision_record.selected_backend_id` |
-| Requested backend | Rendered only when `selection_mode = explicitly_targeted`. Source: `decision_record.selected_backend_id` when `decision_status = Selected` (targeted backend was eligible and selected); `job_record.backend_id` when `decision_status ≠ Selected` (targeted backend failed eligibility; see targeted-path note below). |
+| Selected backend | `decision_record.selected_backend_id`. When `selection_mode = explicitly_targeted` and `decision_status = Selected`, this is both the backend specified by the caller and the backend confirmed eligible and selected by the Scheduler; `selection_mode` provides the context for this attribution. |
 | Predicted latency | `decision_record.predicted_latency` |
 | Predicted quality tier | `decision_record.predicted_quality` |
 | Predicted cost | `decision_record.predicted_cost` |
-| Confidence score | `decision_record.confidence_score`. `0.0` when `selection_mode = explicitly_targeted` and `decision_status = Selected` (scoring bypassed; `selection_mode` distinguishes this from the standard-path single-eligible-backend case); null when `selection_mode = explicitly_targeted` and `decision_status = NoEligibleSolver` (rendered as "N/A" per content rendering rules). |
+| Confidence score | `decision_record.confidence_score`. `0.0` when `selection_mode = explicitly_targeted` and `decision_status = Selected` (scoring bypassed); `selection_mode = explicitly_targeted` distinguishes this from the standard-path case where only one backend passed all filter phases. |
 | Candidate scores | `decision_record.candidate_scores` (all evaluated backends with scores; empty when `selection_mode = explicitly_targeted` because scoring is bypassed in the targeted path) |
 | Rejection reasons | `decision_record.rejection_reasons` (per-backend rejection detail; in the targeted path, contains only the specified backend's rejection reason when eligibility checking was performed and failed) |
 | Decision timestamp | `decision_record.timestamp` (ISO 8601 UTC) |
 
-**Targeted-path rendering note:** When `selection_mode = explicitly_targeted`, the Scheduler bypassed candidate scoring and directed execution to the specified backend without policy evaluation. `candidate_scores` is empty and `confidence_score` is `0.0` (when `decision_status = Selected`) or null (when `decision_status = NoEligibleSolver`); `selection_mode = explicitly_targeted` distinguishes these values from their standard-path counterparts. The `requested_backend` field is rendered alongside `selection_mode` to allow readers to verify that the evidence was produced by the claimed backend. The `job_record.backend_id` source for `requested_backend` applies when `decision_status ≠ Selected` (i.e., the targeted backend failed eligibility); per SPEC-009 FR-2 and SPEC-005 FR-13, such jobs reach terminal state `Failed` and the Report Generator is not invoked at MVP scope — this data source is documented for completeness per ADR-013.
+**Targeted-path rendering note:** When `selection_mode = explicitly_targeted`, the Scheduler bypassed candidate scoring and directed execution to the specified backend without policy evaluation. `candidate_scores` is empty and `confidence_score` is `0.0`; `selection_mode = explicitly_targeted` distinguishes these values from their standard-path counterparts. The `Selected backend` row identifies the backend specified by the caller and confirmed by the Scheduler, satisfying the ADR-013 attribution traceability requirement.
 
 #### Section 4: Solver Execution
 
@@ -281,8 +280,6 @@ The `execution_seed` is not rendered. See Security Considerations.
 - The `violated_stop_ids` list does not appear in any rendered section
 - A report rendered from identical evidence inputs is byte-identical (FR-12)
 - `selection_mode` is rendered in Section 3 on every invocation
-- When `selection_mode = explicitly_targeted`, the `requested_backend` field is rendered in Section 3, sourced from `decision_record.selected_backend_id` when `decision_status = Selected`, or from `job_record.backend_id` when `decision_status ≠ Selected`
-- When `selection_mode = policy_selected`, the `requested_backend` field is not rendered in Section 3
 
 ---
 
@@ -680,9 +677,9 @@ On message redelivery, the Worker re-executes the job and passes the newly produ
 
 17. **Integration: Idempotency — metadata record upsert** — Given message redelivery for `job_id = X` after a prior successful report generation, verify that after re-execution exactly one report metadata record exists for `job_id = X`, its `report_id` matches the most recently generated file, and no duplicate records were created.
 
-18. **Unit: Standard-path report — Section 3 `selection_mode`** — A job with `decision_record.selection_mode = policy_selected` produces a report where Section 3 renders `selection_mode = policy_selected`. The `requested_backend` field is absent from Section 3.
+18. **Unit: Standard-path report — Section 3 `selection_mode`** — A job with `decision_record.selection_mode = policy_selected` produces a report where Section 3 renders `selection_mode = policy_selected`.
 
-19. **Unit: Targeted-path report — Section 3 targeted backend** — A job with `decision_record.selection_mode = explicitly_targeted` and `decision_status = Selected` produces a report where Section 3 renders `selection_mode = explicitly_targeted` and `requested_backend` sourced from `decision_record.selected_backend_id`. `candidate_scores` renders as empty and `confidence_score` renders as `0.0000`.
+19. **Unit: Targeted-path report — Section 3 `selection_mode`** — A job with `decision_record.selection_mode = explicitly_targeted` and `decision_status = Selected` produces a report where Section 3 renders `selection_mode = explicitly_targeted`, `selected_backend_id` identifying the targeted backend, empty `candidate_scores`, and `confidence_score = 0.0000`.
 
 ---
 
@@ -849,7 +846,7 @@ This feature is complete when:
 - All test contracts defined in the Testability section pass
 - The `report.generate` span is emitted and verifiable in the OpenTelemetry Collector on every job execution
 - A complete HTML evidence report is generated for a `Succeeded` job and is retrievable via `GET /v1/reports/{report_id}` (SPEC-008 FR-13)
-- A targeted-path evidence report (from a job with `decision_record.selection_mode = explicitly_targeted`) correctly renders `selection_mode = explicitly_targeted` and `requested_backend` in Section 3, with empty `candidate_scores` and `confidence_score = 0.0`
+- A targeted-path evidence report (from a job with `decision_record.selection_mode = explicitly_targeted`) correctly renders `selection_mode = explicitly_targeted` in Section 3, with `selected_backend_id` identifying the targeted backend, empty `candidate_scores`, and `confidence_score = 0.0`
 - Report metadata records are persisted with all required fields from FR-10, including non-null `file_path`
 - SPEC-006 FR-9 is updated to reference SPEC-009 FR-10 as the authoritative report metadata schema extension
 - Engineering review passes
