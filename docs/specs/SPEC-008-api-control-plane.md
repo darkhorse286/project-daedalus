@@ -427,7 +427,13 @@ The response includes both the job lifecycle state (`status`) and, for completed
 - `report_available = true` only when a report metadata record (SPEC-006 FR-9) exists for the job
 - The API does not cache job status; every polling request reads from PostgreSQL
 
-**Note — `NoEligibleSolver` path distinction:** The `failure_reason` field reflects the coarse failure classification from the failure record (`failure_class`). The status response does not distinguish a targeted-path `NoEligibleSolver` (Scheduler rejected the specified backend with `selection_mode = explicitly_targeted`) from a standard-path `NoEligibleSolver` (Scheduler found no eligible backend by policy). Both produce the same `failure_reason`. Callers requiring this distinction — e.g., the experiment harness determining whether targeted ineligibility occurred — should consult the evidence report (`GET /v1/jobs/{job_id}/report`) or, in experiment context, the trial evidence state returned by the collect-evidence endpoint (FR-21), which includes the Scheduler decision record with `selection_mode`.
+**Note — `NoEligibleSolver` path distinction:** The `failure_reason` field reflects the coarse failure classification from the failure record (`failure_class`). The status response does not distinguish a targeted-path `NoEligibleSolver` (Scheduler rejected the specified backend with `selection_mode = explicitly_targeted`) from a standard-path `NoEligibleSolver` (Scheduler found no eligible backend by policy). Both produce the same `failure_reason`. This is intentional: `GET /v1/jobs/{job_id}` is a lifecycle-state endpoint; it does not surface Scheduler decision detail.
+
+Callers requiring this distinction should use the path appropriate to their context:
+
+- **Experiment context (FR-21):** Call `POST /v1/experiments/{experiment_id}/trials/{trial_id}/collect-evidence`. The trial evidence state returned by FR-21 includes Scheduler decision record fields, including `selection_mode`. This is the correct path for the experiment harness determining whether targeted ineligibility occurred.
+- **Evidence report:** The evidence report (`GET /v1/jobs/{job_id}/report`) includes Scheduler decision information for `Completed` jobs only. `NoEligibleSolver` produces a `Failed` job; `Failed` jobs do not produce evidence reports (`report_available = false`). The evidence report path is not applicable for `NoEligibleSolver` failures.
+- **Direct API callers (non-experiment):** No API endpoint currently surfaces `selection_mode` for `Failed` jobs outside experiment context.
 
 ---
 
@@ -1657,6 +1663,8 @@ The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark 
 
 49. **Integration: Trial submission linkage — backend_id mismatch** — `POST /v1/experiments/{id}/trials/{id}/submit` with a `job_id` whose `backend_id` (non-null) does not match the trial's `backend_id` returns HTTP 409 with `error_code = JOB_BACKEND_MISMATCH`.
 
+50. **Integration: Trial submission linkage — null backend_id bypasses identity check** — `POST /v1/experiments/{id}/trials/{id}/submit` with a `job_id` whose `backend_id` is null (standard-path job submission) returns HTTP 200 regardless of the trial's `backend_id` value, provided all other validation passes. Backend identity validation is intentionally bypassed when `jobs.backend_id` is null (POD-1 null-bypass rule).
+
 ---
 
 # Observability Requirements
@@ -1905,6 +1913,8 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [x] ADR-013 applied — optional `backend_id` field added to FR-2, FR-3, FR-4, FR-5, FR-7; observability updated in FR-17; testability cases 44–48 added
 - [x] POD-1 applied — FR-25 backend identity validation added (step 7); `JOB_BACKEND_MISMATCH` added to FR-14 error codes; testability case 49 added; standard-path null bypass documented in FR-25 acceptance criteria
 - [x] POD-2 applied — FR-8 clarifying note added: targeted-path vs standard-path `NoEligibleSolver` distinction is not surfaced in status response; callers requiring this distinction directed to evidence report or FR-21 collect-evidence
+- [x] ARCH-002 applied — FR-8 note revised: evidence report path corrected to note it applies to Completed jobs only; Failed jobs (NoEligibleSolver) do not produce evidence reports; experiment context path (FR-21) and direct-caller gap documented
+- [x] ARCH-003 applied — testability case 50 added: null-bypass integration test verifying standard-path jobs (backend_id = NULL) bypass FR-25 backend identity validation
 
 ---
 
@@ -1919,7 +1929,7 @@ This feature is complete when:
 - OQ-7 Sub-problem A (routing problem creation without job creation) and Sub-problem B (trial record registration) are resolved before Generated Mode harness implementation begins
 - OQ-8 (SchedulerRejected/HarnessError trial notification) is resolved before full experiment lifecycle implementation begins
 - ADR-013 backend targeting contract (FR-2, FR-3, FR-4, FR-5, FR-7) is implemented: optional `backend_id` accepted at submission, stored in job record, forwarded in queue message; empty-string rejection enforced; no capability registry check performed; `jobs.backend_id ≠ experiment_trials.backend_id` check enforced at FR-25 trial submission linkage; `JOB_BACKEND_MISMATCH` (HTTP 409) returned on mismatch
-- All test contracts defined in the Testability section pass (items 1 through 49)
+- All test contracts defined in the Testability section pass (items 1 through 50)
 - The `job.submit`, `experiment.submit`, `experiment.trial_submit`, `experiment.evidence_collect`, and `experiment.summarize` spans are emitted and verifiable in the OpenTelemetry Collector
 - `job.submit` span includes `backend_id` attribute when present in the submission request
 - SPEC-001 FR-17 defines `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 references SPEC-001 FR-17
