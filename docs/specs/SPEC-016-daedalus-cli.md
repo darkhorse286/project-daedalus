@@ -12,13 +12,13 @@
 
 **Created:** 2026-06-20
 
-**Last Updated:** 2026-06-23 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated. Acceptance Review (amendment) revisions applied: AC-SF-001 benchmark submit testability entries added; AC-SF-002 FR-12 result manifest AC and testability entry updated to include problem_id and evidence_status; AC-SF-003 experiment run JSON output mode testability entries added; AC-SF-004 submission phase error handling testability entries added; AC-SF-005 evidence_status = Error non-fatal testability entry added; AC-NTH-001 experiment summary ACs differentiate EXPERIMENT_NOT_FOUND from EXPERIMENT_SUMMARY_NOT_FOUND; AC-NTH-002 evidence_status added to cli.experiment.evidence_collect log event. OQ-2 resolved — CLI implementation language is C++; ADR-001 and ADR-010 added to Related ADRs.)
+**Last Updated:** 2026-06-25 (Accepted: Engineering Review completed; Architecture Review completed; Acceptance Review completed; NB-A JSON error schema prose corrected; NB-B FR-5 flag inheritance clarified; NB-C --open stdout interaction specified. Amended: ADR-012 / SPEC-020 experiment orchestration requirements applied — FR-12 replaced with SPEC-020-compliant orchestration model; FR-17 through FR-22 added; benchmark command group added; long-running session exception documented; OQ-3 superseded. Architecture Review revisions applied: ARCH-001 Outputs table FR references corrected; ARCH-002 FR-17 benchmark manifest schema expanded to full SPEC-008 FR-19 contract; ARCH-003 FR-25 idempotency claim corrected and TRIAL_ALREADY_SUBMITTED recovery defined; ARCH-004 submission phase error handling specified; ARCH-005 Architectural Impact table updated. Acceptance Review (amendment) revisions applied: AC-SF-001 benchmark submit testability entries added; AC-SF-002 FR-12 result manifest AC and testability entry updated to include problem_id and evidence_status; AC-SF-003 experiment run JSON output mode testability entries added; AC-SF-004 submission phase error handling testability entries added; AC-SF-005 evidence_status = Error non-fatal testability entry added; AC-NTH-001 experiment summary ACs differentiate EXPERIMENT_NOT_FOUND from EXPERIMENT_SUMMARY_NOT_FOUND; AC-NTH-002 evidence_status added to cli.experiment.evidence_collect log event. OQ-2 resolved — CLI implementation language is C++; ADR-001 and ADR-010 added to Related ADRs. ADR-013 amendment applied 2026-06-25: FR-18 per-trial submission amended to include trial's `backend_id` from trial record (C-1); stale unresolved-dependency paragraph replaced with ADR-013 resolution note (C-2); OQ-6 resolved by ADR-013 (C-3); ADR-013 added to Related ADRs (M-1); `JOB_BACKEND_MISMATCH` handling added to FR-18 submission phase error handling (M-2); `backend_id` added to `cli.experiment.trial_submit` log event (m-1); testability entries and Definition of Done item added for `backend_id` propagation (m-2, m-3).)
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-010, ADR-012
+**Related ADRs:** ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-010, ADR-012, ADR-013
 
 **Related Specs:** SPEC-001, SPEC-002, SPEC-003, SPEC-005, SPEC-008, SPEC-009, SPEC-012, SPEC-020
 
@@ -807,7 +807,7 @@ The CLI emits structured log events to stderr in JSON format when `DAEDALUS_LOG=
 | `cli.generation.complete` | Generator returned | `difficulty_tier`, `time_windowed_stop_count`, `total_demand` |
 | `cli.poll.tick` | Status poll completed | `job_id`, `status`, `elapsed_seconds` |
 | `cli.experiment.submit` | Experiment manifest submitted | `experiment_id`, `experiment_name`, `planned_trial_count` |
-| `cli.experiment.trial_submit` | Trial linked to job | `experiment_id`, `trial_id`, `job_id`, `problem_config_index`, `repetition_index`, `solver_set_index` |
+| `cli.experiment.trial_submit` | Trial linked to job | `experiment_id`, `trial_id`, `job_id`, `backend_id`, `problem_config_index`, `repetition_index`, `solver_set_index` |
 | `cli.experiment.trial_complete` | Trial job reaches terminal state | `experiment_id`, `trial_id`, `job_id`, `job_status`, `solver_outcome` |
 | `cli.experiment.evidence_collect` | Evidence collection triggered | `experiment_id`, `trial_id`, `job_id`, `http_status`, `evidence_status` |
 | `cli.experiment.complete` | Experiment reaches terminal status | `experiment_id`, `experiment_status`, `total_trials`, `elapsed_seconds` |
@@ -896,7 +896,7 @@ Benchmark submitted.
 **Per-trial submission:**
 
 For each trial in submission order:
-1. Submit a job via `POST /v1/jobs`, specifying the trial's `problem_id` (from the Fixed workload set) and the experiment's `scheduler_config_id`.
+1. Submit a job via `POST /v1/jobs`, specifying the trial's `problem_id` (from the Fixed workload set), the experiment's `scheduler_config_id`, and the trial's `backend_id` copied directly from the trial record returned by `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22). No transformation of `backend_id` is performed by the CLI.
 2. Link the trial to the job by calling `POST /v1/experiments/{experiment_id}/trials/{trial_id}/submit` with the returned `job_id` (SPEC-008 FR-25).
 3. Proceed to the next trial without waiting for the current job to execute.
 
@@ -907,8 +907,9 @@ For each trial in submission order:
 - **`POST /v1/experiments/{id}/trials/{trial_id}/submit` HTTP 5xx (after successful job submit):** Retry up to 3 consecutive attempts. On the third consecutive 5xx, exit with code 1. The job has been created and will execute; the orphaned state is logged at `DAEDALUS_LOG=debug` for investigation.
 - **`POST /v1/experiments/{id}/trials/{trial_id}/submit` network failure (after successful job submit):** Retry once. On second consecutive failure, the CLI retries with the same `job_id`; if `TRIAL_ALREADY_SUBMITTED` is returned (first attempt succeeded), the CLI recovers per the Idempotency section. If HTTP 5xx or network failure persists, exit with code 1.
 - **`TRIAL_ALREADY_SUBMITTED` from `POST /v1/experiments/{id}/trials/{trial_id}/submit`:** Treat as success-on-retry. Call `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22), retrieve the already-linked `job_id` for that trial, and continue to the next trial. Do not exit.
+- **`JOB_BACKEND_MISMATCH` from `POST /v1/experiments/{id}/trials/{trial_id}/submit`:** Treat as a fatal CLI programming error. This error indicates that the job was submitted with a `backend_id` that does not match the trial's `backend_id` — a condition that cannot occur if the CLI correctly copied `backend_id` from the trial record (FR-18 per-trial submission step 1). Do not retry. Exit with code 1. No alternative backend is attempted.
 
-**Per-backend job targeting — unresolved dependency (ENG-003 / OQ-6):** The current `POST /v1/jobs` contract (SPEC-008 FR-2) accepts `problem_id` and `scheduler_config_id` but provides no `backend_id` field. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy — there is no mechanism in the current API contract to guarantee that the job submitted for a `backend-vrp-greedy-v1` trial is actually processed by that backend rather than another eligible backend. Per-backend job routing is therefore an unresolved implementation dependency. See OQ-6. Until OQ-6 is resolved, multi-backend experiments cannot guarantee correct per-backend execution.
+**Per-backend job targeting (ADR-013):** `backend_id` is part of the `POST /v1/jobs` contract (SPEC-008 FR-2, amended per ADR-013). The CLI copies `backend_id` directly from the trial record (`experiment_trials.backend_id`) into each per-trial job submission; no transformation is performed. SPEC-008 FR-25 enforces the evidence integrity invariant: if `jobs.backend_id` (non-null) does not match `experiment_trials.backend_id`, the trial linkage call returns `JOB_BACKEND_MISMATCH` (HTTP 409). Per-backend evidence attribution is guaranteed through this mechanism for all experiment trials. OQ-6 is resolved by ADR-013.
 
 **Timeout during submission phase:** The `--timeout` clock runs from manifest submission, including the submission phase. If `--timeout` expires during the submission phase, the CLI completes the two-step submission (job submit + trial link) for the current trial, then exits with code 4 without beginning the next trial's submission. Trials already submitted and linked are preserved in the API. No result manifest is written.
 
@@ -946,6 +947,8 @@ After all trials have evidence collection attempted and `experiment.status` is n
 - `POST /v1/jobs` network failure during the submission phase is retried once; on a second consecutive failure for the same trial, the CLI exits with code 1.
 - `POST /v1/experiments/{id}/trials/{trial_id}/submit` returning HTTP 5xx (after successful job submit) is retried up to 3 consecutive attempts; on the third consecutive 5xx, the CLI exits with code 1.
 - `TRIAL_ALREADY_SUBMITTED` (HTTP 409) from the trial-link endpoint is treated as success-on-retry: the CLI calls `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22) to retrieve the already-linked `job_id` and proceeds; it does not exit.
+- Each per-trial `POST /v1/jobs` request includes `backend_id` equal to `experiment_trials.backend_id` for that trial, as returned by `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22).
+- `JOB_BACKEND_MISMATCH` (HTTP 409) from the trial-link endpoint causes immediate exit with code 1; no retry is attempted.
 
 ---
 
@@ -1361,10 +1364,12 @@ The following behaviors must be proven before this feature is considered complet
 - A manifest with an empty `solver_set` exits with code 2.
 - A manifest rejected by the API (HTTP 400) prints all `field_errors` and exits with code 2.
 - Trials are submitted in `(problem_config_index asc, repetition_index asc, solver_set_index asc)` order.
+- The `backend_id` returned by `GET /v1/experiments/{experiment_id}/trials` for each trial is included unchanged in the corresponding `POST /v1/jobs` request body; the value in the request matches `experiment_trials.backend_id` exactly.
 - `POST /v1/jobs` returning HTTP 5xx during the submission phase causes the CLI to exit with code 1; the trial-link step is not attempted for the failed trial.
 - `POST /v1/jobs` network failure during the submission phase is retried once; on a second consecutive failure for the same trial, the CLI exits with code 1.
 - `POST /v1/experiments/{id}/trials/{trial_id}/submit` returning HTTP 5xx (after a successful job submit) is retried up to 3 consecutive attempts; on the third consecutive 5xx, the CLI exits with code 1.
 - `TRIAL_ALREADY_SUBMITTED` (HTTP 409) from the trial-link endpoint is treated as success-on-retry: the CLI calls `GET /v1/experiments/{id}/trials` to retrieve the already-linked `job_id` and continues to the next trial; it does not exit.
+- `JOB_BACKEND_MISMATCH` (HTTP 409) from the trial-link endpoint causes immediate exit with code 1; no retry is attempted.
 - Evidence collection is triggered for each trial immediately when its job reaches a terminal state.
 - When collect-evidence returns HTTP 200 with `evidence_status = Error`, the CLI records the outcome in the result manifest and completion table and does not exit; the overall exit code is not affected by `evidence_status = Error`.
 - When one trial's job reaches `status = Failed`, the CLI exits with code 5 and reports all other trial outcomes.
@@ -1524,21 +1529,11 @@ This question asked whether experiment results should be persisted beyond the lo
 
 ### OQ-6: Per-Backend Job Targeting Mechanism
 
-**Question:** How does `daedalus experiment run` ensure that the job submitted for a specific trial runs on the backend identified by the trial's `backend_id`?
+**Status: Resolved by ADR-013.**
 
-**Why it matters:** `POST /v1/jobs` (SPEC-008 FR-2) accepts `problem_id` and `scheduler_config_id` but no `backend_id`. For an experiment with `solver_set: ["backend-vrp-greedy-v1", "backend-vrp-metaheuristic-v1"]`, the CLI submits two jobs per (problem, repetition) combination. With a single experiment-wide `scheduler_config_id`, the Scheduler selects the backend by policy for both jobs — there is no mechanism to guarantee that the job for the `backend-vrp-greedy-v1` trial actually runs on that backend. This renders multi-backend experiments non-deterministic with respect to which backend produces which trial's evidence.
+ADR-013 extended `POST /v1/jobs` (SPEC-008 FR-2) with an optional `backend_id` field that directs the Scheduler to the specified backend without policy-based fallback (targeted path). The CLI includes the trial's `backend_id` in each per-trial `POST /v1/jobs` submission (FR-18 per-trial submission step 1), sourced directly from `experiment_trials.backend_id` as returned by `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22). SPEC-008 FR-25 enforces the evidence integrity invariant (`JOB_BACKEND_MISMATCH`) for non-null `backend_id`. Per-backend evidence attribution is guaranteed through the accepted architecture.
 
-SPEC-008 FR-18 acknowledges this as "Backend capability-profile validation gap (F-13)." SPEC-008 FR-25 (Trial Submission Linkage) validates `problem_id` alignment but not `backend_id` alignment. Without a resolution, a multi-backend experiment produces results where the per-backend attribution is unverifiable.
-
-**Candidate resolutions (for SPEC-008-R1 scope):**
-- (a) Extend `POST /v1/jobs` with an optional `backend_id` field for experiment context that directs the Scheduler to a specific backend.
-- (b) Require each trial to use a per-backend `scheduler_config_id` (one config per backend in the `solver_set`) instead of a single experiment-wide config.
-- (c) Add backend-identity validation to SPEC-008 FR-25 (Trial Submission Linkage), rejecting the link if the job's actual backend (from the Scheduler decision record) does not match the trial's `backend_id`.
-- (d) Accept that backend targeting is best-effort at MVP and rely on Scheduler determinism for single-backend deployments; document this as an accepted risk.
-
-**Owner:** SPEC-008 owns the `POST /v1/jobs` contract and FR-25 validation. Resolution requires a SPEC-008 amendment. SPEC-016 cannot unilaterally resolve this; FR-18 documents the dependency.
-
-**Blocking:** Blocking for correct multi-backend experiment implementation. Fixed Mode experiments with a single-backend `solver_set` are unaffected. The CLI can submit and link trials without resolution; correctness of per-backend attribution is the gap.
+**No further action required on this question.**
 
 ---
 
@@ -1564,7 +1559,7 @@ SPEC-008 FR-18 acknowledges this as "Backend capability-profile validation gap (
 - [x] OQ-2 resolved — CLI is implemented in C++ (ADR-001, ADR-010).
 - [ ] OQ-4 resolved — `--wait` default behavior (non-blocking; current spec uses opt-in).
 - [ ] OQ-5 resolved — Generated Mode implementation (depends on SPEC-008 OQ-7; non-blocking for Fixed Mode).
-- [ ] OQ-6 resolved — per-backend job targeting mechanism (blocking for correct multi-backend experiments; requires SPEC-008-R1 amendment).
+- [x] OQ-6 resolved — per-backend job targeting mechanism resolved by ADR-013; `backend_id` included in per-trial `POST /v1/jobs` submissions (FR-18); evidence integrity enforced by SPEC-008 FR-25 `JOB_BACKEND_MISMATCH`.
 
 ---
 
@@ -1581,6 +1576,7 @@ This feature is complete when:
 - `report show` (FR-10) retrieves and writes the HTML report via SPEC-008 FR-12, FR-13.
 - `config create`, `config list`, `config get`, `config default` (FR-11) correctly interact with SPEC-008 FR-10.
 - `experiment run` (FR-12) accepts a SPEC-020 Fixed mode manifest, submits it to `POST /v1/experiments`, drives the trial orchestration loop (FR-18), collects evidence per trial, confirms experiment auto-completion, and writes the result manifest.
+- Each trial's `backend_id` (from `GET /v1/experiments/{experiment_id}/trials`) is included in the corresponding per-trial `POST /v1/jobs` submission, enabling per-backend evidence attribution per ADR-013.
 - `experiment run` rejects Generated mode manifests with exit code 1 (OQ-5 dependency).
 - `experiment run` exits with code 6 on `experiment.status = Failed`; code 5 on any trial `status = Failed`; code 4 on `--timeout` expiry.
 - `benchmark submit` (FR-17) submits a benchmark manifest and prints the response.
