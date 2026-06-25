@@ -12,13 +12,13 @@
 
 **Created:** 2026-06-15
 
-**Last Updated:** 2026-06-22
+**Last Updated:** 2026-06-25
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-004, ADR-006, ADR-009, ADR-010, ADR-011, ADR-012
+**Related ADRs:** ADR-004, ADR-006, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-004, SPEC-005, SPEC-006, SPEC-007, SPEC-008, SPEC-009, SPEC-010, SPEC-011, SPEC-020
 
@@ -318,6 +318,7 @@ The central job lifecycle record. Created by the API at submission time. Updated
 | `job_id` | `uuid` | NOT NULL | PRIMARY KEY | SPEC-006 FR-2; SPEC-008 FR-7 |
 | `problem_id` | `uuid` | NOT NULL | FK → `routing_problems(problem_id)` | SPEC-001; SPEC-008 FR-4 |
 | `scheduler_config_id` | `uuid` | NOT NULL | FK → `scheduler_configs(scheduler_config_id)` | SPEC-008 FR-4 |
+| `backend_id` | `text` | NULL | | ADR-013; SPEC-008 FR-2 (as amended); null represents standard-path submission; see FR-6.6 |
 | `status` | `text` | NOT NULL | CHECK (see FR-6.2) | SPEC-005; SPEC-006 FR-4.2 |
 | `cancellation_requested` | `boolean` | NOT NULL | DEFAULT `false` | SPEC-005 FR-12; SPEC-008 FR-11 |
 | `created_at` | `timestamptz` | NOT NULL | | Set by API; immutable after creation (SPEC-006 FR-4.3) |
@@ -367,11 +368,28 @@ CHECK (
 - Worker reads this field at the pre-execution check (SPEC-005 FR-12)
 - Worker never writes `cancellation_requested` (SPEC-005 FR-12)
 
+**FR-6.6: `backend_id` column semantics and write ownership:**
+
+`backend_id` is an optional job-level routing directive added by ADR-013. It is written by the API at job creation time when `backend_id` is present in the `POST /v1/jobs` request body (SPEC-008 FR-4 as amended per ADR-013). The column is immutable after creation; no component modifies it after the initial row is written.
+
+| Value | Meaning |
+|---|---|
+| NULL | Standard-path submission. The Scheduler evaluates all eligible backends and selects one by policy. |
+| Non-null string | Targeted-path submission. The Scheduler validates eligibility for the specified backend only and directs execution to it without fallback. |
+
+The Worker reads `backend_id` from the queue message payload (not from the `jobs` table directly) and forwards it to the Scheduler when present (SPEC-005 FR-5 as amended per ADR-013). The Worker never writes `backend_id`.
+
+`backend_id` in `jobs` is distinct from `backend_id` in `solver_run_records` (FR-8). `jobs.backend_id` is the caller-supplied routing directive recorded at submission time; `solver_run_records.backend_id` is the backend that actually executed the job, recorded at evidence persistence time. In the targeted path, these values are identical when the targeted backend is eligible and selected. When the targeted backend is ineligible (`decision_status = NoEligibleSolver`), `solver_run_records` has no row because no execution occurred, and `jobs.backend_id` is the sole schema record of the intended target.
+
+`backend_id` carries no FK constraint. Its value is not validated against the Scheduler capability profile registry at submission time (FR-2; ADR-013 Accepted Risk 1). `backend_id` is not an experiment reference; its presence does not imply the job is part of an experiment. Experiment-to-job linkage is held exclusively in `experiment_trials.job_id` (ADR-012 Decision 4; FR-21.4).
+
 **Acceptance Criteria:**
 - `status` is constrained to the four states in FR-6.2
 - The terminal state CHECK constraint prevents contradictory `completed_at`/`failed_at` values
 - `cancellation_requested` defaults to `false` at creation and is never set to null
 - `created_at` is set once by the API and is never updated
+- `backend_id` is `text NULL`; NULL represents a standard-path submission; the column is written once by the API at job creation and is never updated
+- `backend_id` carries no FK constraint; its value is not validated against the Scheduler capability profile registry at submission time (FR-2)
 
 ---
 
@@ -392,13 +410,14 @@ Stores the Scheduler's decision for each job, including backend selection ration
 | `objective_mode` | `text` | NOT NULL | | SPEC-003 FR-10 |
 | `workload_features_snapshot` | `jsonb` | NOT NULL | | SPEC-003 FR-10; SPEC-010 FR-10; see FR-3 |
 | `decision_status` | `text` | NOT NULL | | SPEC-003 FR-10 |
+| `selection_mode` | `text` | NOT NULL | CHECK (see FR-7.5); DEFAULT `'policy_selected'` | ADR-013; written by Worker at Phase 1; see FR-7.5 |
 | `selected_backend_id` | `text` | NULL | | SPEC-003 FR-10; null when no backend selected |
 | `candidate_scores` | `jsonb` | NOT NULL | DEFAULT `'[]'::jsonb` | SPEC-003 FR-10 |
 | `rejection_reasons` | `jsonb` | NOT NULL | DEFAULT `'{}'::jsonb` | SPEC-003 FR-10 |
 | `predicted_latency` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected |
 | `predicted_cost` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected |
 | `predicted_quality` | `text` | NULL | | SPEC-003 FR-10; null when no backend selected |
-| `confidence_score` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected |
+| `confidence_score` | `double precision` | NULL | | SPEC-003 FR-10; null when no backend selected; `0.0` in the targeted path when `decision_status = Selected` (scoring bypassed; see FR-7.5); NULL in the targeted path when `decision_status = NoEligibleSolver` |
 | `timestamp` | `timestamptz` | NOT NULL | | Decision creation time |
 | `actual_outcome` | `jsonb` | NULL | | SPEC-003 FR-10; SPEC-007 FR-4; written in Phase 2 |
 | `hindsight_quality` | `double precision` | NULL | | SPEC-003 FR-10; SPEC-007 FR-7; written in Phase 2 |
@@ -437,11 +456,46 @@ Phase 2 is the only authorized UPDATE to `decision_records`. All other columns a
 
 Phase 2 is idempotent: if the Worker re-executes due to message redelivery, the same values are re-computed (SPEC-007 FR-10 determinism guarantees identical output from identical inputs) and re-applied without producing divergent records.
 
+**FR-7.5: `selection_mode` CHECK constraint and targeted-path column semantics:**
+
+**CHECK constraint:**
+
+```sql
+CHECK (selection_mode IN ('policy_selected', 'explicitly_targeted'))
+```
+
+| Value | Meaning |
+|---|---|
+| `policy_selected` | Standard path. The Scheduler evaluated all eligible backends and selected one by its objective function and eligibility rules. |
+| `explicitly_targeted` | Targeted path. The caller specified `backend_id` in the job submission. The Scheduler validated only the specified backend's eligibility and directed execution to it without fallback. |
+
+**Default:** `DEFAULT 'policy_selected'`. All decision records produced before ADR-013 implementation were standard-path selections; the default ensures backward-compatible column addition without a data migration.
+
+**Phase 1 field:** `selection_mode` is a Scheduler-produced Phase 1 field. It is written in the same Phase 1 INSERT (ON CONFLICT DO UPDATE) that writes all other Scheduler-produced columns. The Phase 2 UPDATE (`actual_outcome`, `hindsight_quality`) does not modify `selection_mode`. The rule from FR-7.4 — "Phase 2 is the only authorized UPDATE to `decision_records`. All other columns are immutable after Phase 1" — applies to `selection_mode`.
+
+**Targeted-path semantics for related columns:**
+
+When `selection_mode = 'explicitly_targeted'`, the following column semantics apply:
+
+| Column | Targeted-path value | Rationale |
+|---|---|---|
+| `candidate_scores` | `'[]'` (empty array) | Scoring was bypassed; no backends were scored (SPEC-003 FR-7) |
+| `confidence_score` | `0.0` when `decision_status = Selected`; NULL when `decision_status = NoEligibleSolver` | When `Selected`: scoring was bypassed; `selection_mode = explicitly_targeted` distinguishes this `0.0` from the standard-path single-eligible-backend case (SPEC-003 FR-7). When `NoEligibleSolver`: no backend was selected; absence semantics are consistent with standard-path `NoEligibleSolver` behavior (SPEC-003 FR-10). |
+| `rejection_reasons` | Contains the targeted backend's Phase 1 or Phase 2 rejection reason code when eligibility checking was performed and failed; `'{}'` when the targeted backend was eligible or when the specified `backend_id` was not found in the registry (no eligibility checking performed) | Only the targeted backend is evaluated; non-targeted backends produce no entries (SPEC-003 FR-9) |
+| `selected_backend_id` | Non-null when targeted backend was eligible; null when ineligible or not found in registry | Standard FK semantics; null indicates no backend was selected |
+
+**Distinguishing `confidence_score = 0.0` cases:** When `decision_status = Selected`, the standard path produces `confidence_score = 0.0` when only one backend passed all filter phases (SPEC-003 FR-7). In that case, `selection_mode = 'explicitly_targeted'` is the definitive disambiguator: it indicates that the `0.0` reflects a scoring bypass, not a policy-computed margin. When `selection_mode = 'explicitly_targeted' AND decision_status = NoEligibleSolver`, `confidence_score` is NULL — the targeted-path rejection case follows the same absence semantics as the standard-path `NoEligibleSolver` case, not a sentinel value (SPEC-003 FR-7, FR-10).
+
+**No-fallback record:** The combination `decision_status = 'NoEligibleSolver' AND selection_mode = 'explicitly_targeted'` identifies a targeted-path eligibility failure or unregistered `backend_id`. The intended target is `jobs.backend_id`; `selected_backend_id` is null because no backend was selected. No new `decision_status` value is introduced; the existing `NoEligibleSolver` value is reused (ADR-013 Decision 3).
+
 **Acceptance Criteria:**
 - `UNIQUE (job_id)` ensures exactly one decision record per job
 - `workload_features_snapshot` is `jsonb NOT NULL` and contains all six SPEC-010 features plus `feature_schema_version`
 - `actual_outcome` and `hindsight_quality` are nullable; null is the initial state after Phase 1; they are set in Phase 2
 - Phase 2 is the only authorized UPDATE; all other columns are immutable after Phase 1 write
+- `selection_mode` is `text NOT NULL` constrained to `policy_selected` and `explicitly_targeted`; `DEFAULT 'policy_selected'` applies without data migration to rows written before ADR-013 implementation
+- `selection_mode = 'explicitly_targeted'` always implies `candidate_scores = '[]'`; `confidence_score = 0.0` applies only when `selection_mode = 'explicitly_targeted' AND decision_status = Selected`; `confidence_score` is NULL when `selection_mode = 'explicitly_targeted' AND decision_status = NoEligibleSolver`; these are application-layer invariants enforced by the Scheduler (SPEC-003 FR-7, FR-10 as amended per ADR-013)
+- `selection_mode` is a Phase 1 field; it is written at Phase 1 and is never modified by the Phase 2 UPDATE
 
 ---
 
@@ -893,12 +947,22 @@ The Worker does not read or write any experiment table (`benchmark_manifests`, `
 
 The CLI (SPEC-016) does not read from or write to PostgreSQL directly. All CLI access to experiment state (experiment submission, status polling, trial results) flows through SPEC-008 API endpoints. No direct CLI-to-database connections exist.
 
+**FR-15.5: `jobs.backend_id` and `decision_records.selection_mode` write ownership (ADR-013):**
+
+`jobs.backend_id` is written by the API at job creation time as part of the same CREATE operation that writes the initial `jobs` row (FR-6.6). This is an additive extension of the API's existing write authority on `jobs`. The Worker reads `backend_id` from the queue message payload and never reads the column from the `jobs` table directly. The Worker never writes `jobs.backend_id`.
+
+`decision_records.selection_mode` is written by the Worker at Phase 1 persistence as part of the same INSERT (ON CONFLICT DO UPDATE) that writes all other Scheduler-produced columns (FR-7.4, FR-7.5). This is an additive extension of the Worker's existing Phase 1 write authority on `decision_records`. The API does not write `selection_mode`.
+
+The FR-15 ownership table does not require structural changes to represent these additions; both columns are written by the existing authorized writer for their respective tables. FR-15.5 documents the additive column-level extensions for implementor clarity.
+
 **Acceptance Criteria:**
 - No component other than the API writes to `routing_problems` or `scheduler_configs`
 - No component other than the Worker writes to `decision_records`, `solver_run_records`, `quality_evaluation_records`, `failure_records`, or `report_metadata_records`
 - No component other than the API writes to any experiment table
 - Core issues no direct database queries
 - The Worker issues no reads or writes to any experiment table
+- `jobs.backend_id` is written only by the API at job creation; the Worker never writes this column
+- `decision_records.selection_mode` is written only by the Worker at Phase 1; the API never writes this column
 
 ---
 
@@ -1009,6 +1073,7 @@ The schema defined in FR-4 through FR-11 must directly support the following que
 | `hindsight_quality` by backend and size class | `solver_run_records.backend_id`, `quality_evaluation_records.hindsight_quality`, `decision_records.workload_features_snapshot->>'problem_size_class'` |
 | Failure stage distribution | `failure_records.failure_stage`, COUNT |
 | Report generation success rate | `report_metadata_records.generation_status`, COUNT |
+| Distribution of `policy_selected` vs. `explicitly_targeted` decisions, and targeted-path eligibility failure rate | `decision_records.selection_mode`, `decision_records.decision_status`, COUNT |
 
 **Acceptance Criteria:**
 - Every persistence write failure produces a structured log event with required fields
@@ -1594,6 +1659,14 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 
 30. **Schema: ExperimentSummary partial UNIQUE constraint** -- Given an `experiment_artifacts` row for `experiment_id = E` with `artifact_type = 'ExperimentSummary'`, attempt to INSERT a second row with the same `experiment_id` and `artifact_type = 'ExperimentSummary'`. Verify PostgreSQL rejects the insert with a unique constraint violation. Verify that an `experiment_artifacts` row with `artifact_type = 'QualityStatsAggregate'` and the same `experiment_id` is accepted (partial index does not restrict non-ExperimentSummary rows).
 
+31. **Schema: `selection_mode` CHECK constraint** -- Insert a `decision_records` row with `selection_mode = 'policy_selected'`. Verify the insert is accepted. Insert a `decision_records` row with `selection_mode = 'explicitly_targeted'`. Verify the insert is accepted. Insert a `decision_records` row with `selection_mode = 'forced'`. Verify PostgreSQL rejects the insert with a CHECK constraint violation.
+
+32. **Schema: `jobs.backend_id` nullable** -- Insert a `jobs` row with `backend_id = NULL`. Verify the insert is accepted (standard-path submission). Insert a separate `jobs` row with `backend_id = 'qubo-simulated-annealing'`. Verify the insert is accepted (targeted-path submission). Verify the two rows are independent and that the first row retains `backend_id = NULL`.
+
+33. **Integration: targeted-path successful execution evidence** -- Execute a complete job via the targeted path (non-null `backend_id` in submission; targeted backend is eligible and selected). Query `jobs` for this `job_id` and verify `backend_id` is non-null and matches the submitted value. Query `decision_records` and verify `selection_mode = 'explicitly_targeted'`, `candidate_scores = '[]'`, `confidence_score = 0.0`, and `selected_backend_id` is non-null and matches `jobs.backend_id`. Verify `decision_status = 'Selected'`.
+
+34. **Integration: targeted-path eligibility failure evidence** -- Execute a targeted-path job where the specified `backend_id` is ineligible for the submitted routing problem. Query `decision_records` and verify `decision_status = 'NoEligibleSolver'`, `selection_mode = 'explicitly_targeted'`, `rejection_reasons` is non-empty, `selected_backend_id` is null, and `confidence_score` is NULL (targeted-path `NoEligibleSolver` follows standard-path absence semantics for `confidence_score`; SPEC-003 FR-10). Query `jobs` and verify `backend_id` is non-null and matches the intended target. Verify no `solver_run_records` row exists for this `job_id` (no execution occurred).
+
 ---
 
 # Observability Requirements
@@ -1689,6 +1762,8 @@ No specific latency targets are defined for persistence operations at this stage
 - **SPEC-020 OQ-1 (Blocking — Resolved by this amendment):** SPEC-020 OQ-1 asked "What is the persistence schema for experiment manifests, trial records, and experiment artifacts?" The answer is defined in FR-19 through FR-23 of this document. SPEC-020 OQ-1 is resolved. A separate SPEC-020 amendment should update OQ-1 status from Blocking to Resolved and reference FR-19 through FR-23 as the resolution.
 
 - **ADR-012 SPEC-012-R1 directions (applied):** All SPEC-012-R1 directions specified in ADR-012 Documentation Updates have been applied by this amendment: experiment and benchmark persistence tables defined (FR-19 through FR-23); FR-15 updated to add API read access for `decision_records` and `quality_evaluation_records` (Worker-only write authority on both tables, per SPEC-006 FR-1.3, is unchanged); the prohibition against adding `experiment_id` to `jobs` is documented in FR-21.4 and Constraint 10.
+
+- **ADR-013 SPEC-012 directions (applied):** All SPEC-012-directed changes from ADR-013 Documentation Updates Required have been applied by this amendment: nullable `backend_id` column added to `jobs` (FR-6, FR-6.6); `selection_mode` column added to `decision_records` with CHECK constraint and `DEFAULT 'policy_selected'` (FR-7, FR-7.5); targeted-path persistence semantics for `candidate_scores`, `confidence_score`, and `rejection_reasons` defined in FR-7.5; FR-15.5 added to document `jobs.backend_id` API write ownership and `decision_records.selection_mode` Worker Phase 1 write ownership. No other SPEC-012 tables, columns, or constraints are affected by ADR-013.
 
 - **SPEC-001 (Routing Problem Model):** SPEC-020 Documentation Updates Required identifies an optional experiment provenance field to be added to routing problem submissions so that harness-generated problems (Generated Mode) are distinguishable from regular job submissions. This is a SPEC-001 amendment; SPEC-012 does not add the field preemptively. When SPEC-001 is amended to introduce this field, SPEC-012 must be revised to add the corresponding column to `routing_problems`.
 
@@ -1797,6 +1872,11 @@ No specific latency targets are defined for persistence operations at this stage
 - [x] FR-14.2 creation order updated to include all thirteen tables
 - [x] Constraints 9 and 10 document experiment table write authority and jobs table no-experiment-id rule
 - [x] SPEC-020 OQ-1 resolution documented in Documentation Updates Required
+- [x] `jobs.backend_id` column defined as `text NULL`, written by the API at creation time, immutable after creation, carrying no FK constraint (FR-6, FR-6.6)
+- [x] `decision_records.selection_mode` column defined as `text NOT NULL DEFAULT 'policy_selected'` with CHECK constraint limiting values to `policy_selected` and `explicitly_targeted` (FR-7, FR-7.5)
+- [x] Targeted-path column semantics for `candidate_scores`, `confidence_score`, and `rejection_reasons` defined in FR-7.5; `confidence_score = 0.0` only when `selection_mode = 'explicitly_targeted' AND decision_status = Selected`; `confidence_score` is NULL when `selection_mode = 'explicitly_targeted' AND decision_status = NoEligibleSolver`
+- [x] FR-15.5 documents `jobs.backend_id` API write ownership and `decision_records.selection_mode` Worker Phase 1 write ownership
+- [x] ADR-013 SPEC-012 amendment directions fully applied
 
 ---
 
@@ -1813,6 +1893,8 @@ This feature is complete when:
 - `execution_seed` does not appear in any log event, API response, span attribute, or report output, verified by integration test
 - The `worker.evidence.persist` span carries `artifacts_written` and `persistence_outcome` on every Worker execution
 - A complete job execution (API submission through Worker completion with Succeeded outcome) produces retrievable rows in `routing_problems`, `scheduler_configs`, `jobs`, `decision_records`, `solver_run_records`, `quality_evaluation_records`, and `report_metadata_records` with no FK violations
+- A targeted-path job execution (submitted with non-null `backend_id`, eligible backend) produces a `jobs` row with non-null `backend_id` and a `decision_records` row with `selection_mode = 'explicitly_targeted'`, `candidate_scores = '[]'`, and `confidence_score = 0.0`, verified by integration test (Testability item 33)
+- A targeted-path eligibility failure (ineligible or unregistered `backend_id`) produces a `decision_records` row with `decision_status = 'NoEligibleSolver'`, `selection_mode = 'explicitly_targeted'`, and `confidence_score = NULL`, with `jobs.backend_id` as the sole schema record of the intended target, verified by integration test (Testability item 34)
 - Engineering review passes
 - Specification status is updated to Accepted
 
