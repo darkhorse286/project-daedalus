@@ -12,13 +12,13 @@
 
 **Created:** 2026-06-12
 
-**Last Updated:** 2026-06-23
+**Last Updated:** 2026-06-25
 
 **Supersedes:** None
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-011, ADR-012
+**Related ADRs:** ADR-002, ADR-003, ADR-004, ADR-006, ADR-009, ADR-011, ADR-012, ADR-013
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006, SPEC-009, SPEC-012, SPEC-016, SPEC-020
 
@@ -109,9 +109,19 @@ A job submission request is an HTTP POST to the job submission endpoint. The req
 | `routing_problem` | object | Conditional | A routing problem per SPEC-001 FR-11 JSON serialization contract. Required when `problem_id` is absent. Mutually exclusive with `problem_id`. |
 | `problem_id` | UUID string | Conditional | References an existing routing problem record. When provided, `routing_problem` must be absent. Used in experiment context to submit multiple jobs against the same routing problem (ADR-012 Decision 3, SPEC-020 FR-4 instance-sharing invariant). |
 | `scheduler_config_id` | UUID string | No | References an existing scheduler configuration (SPEC-003 FR-13). When absent, the default configuration is used (SPEC-003 FR-14). |
+| `backend_id` | string | No | Backend targeting directive (ADR-013). When absent, the Scheduler selects by policy (standard path — behavior unchanged). When present, the Scheduler validates eligibility for the specified backend and directs execution to it without policy-based fallback (targeted path). The experiment harness always provides `backend_id` for trial job submissions (ADR-013 Decision 2); standard callers may omit it. The API validates `backend_id` as a non-empty string; no existence check against the Scheduler capability profile registry is performed (registry not persisted in PostgreSQL per SPEC-012 FR-2 scope). |
 
 **Submission mode:**
 Exactly one of `routing_problem` or `problem_id` must be present. When neither or both are provided, the request is rejected with HTTP 400. When `problem_id` is provided, the job references an existing routing problem record without creating a new one, enabling the instance-sharing invariant required by experiment cross-solver comparisons (ADR-012 Decision 3, SPEC-012 FR-6). The one-problem-one-job constraint of FR-7 applies only to standard (non-experiment) submissions; in experiment context, multiple jobs may reference the same `problem_id` per ADR-012 Decision 3.
+
+**Backend targeting paths (ADR-013):**
+
+| Path | Condition | Scheduler behavior |
+|---|---|---|
+| Standard path | `backend_id` absent | Scheduler evaluates all eligible backends, scores candidates, and selects by policy |
+| Targeted path | `backend_id` present | Scheduler validates eligibility for the specified backend only; selects it if eligible; records `selection_mode = explicitly_targeted`; no fallback if ineligible |
+
+The targeted path is transparent to the API: the API forwards `backend_id` in the job record and queue message without performing eligibility evaluation or backend selection. The API does not distinguish experiment-context submissions from standard submissions; it does not inspect why a `backend_id` was provided.
 
 **Routing problem fields** (per SPEC-001):
 
@@ -147,6 +157,8 @@ Exactly one of `routing_problem` or `problem_id` must be present. When neither o
 - A `scheduler_config_id` that is not a valid UUID format is rejected with HTTP 400
 - When `routing_problem` is provided, the object must satisfy the schema above; any missing required field or type violation is rejected with HTTP 400 identifying the offending field(s)
 - When `problem_id` is provided, no routing problem field validation is performed
+- A `backend_id` that is an empty string is rejected with HTTP 400; absence of `backend_id` is not a validation failure on any submission path
+- A valid `backend_id` (non-empty string) is accepted without any existence check against the Scheduler capability profile registry
 
 ---
 
@@ -190,6 +202,14 @@ When `problem_id` is provided instead of `routing_problem` (experiment context),
 |---|---|
 | `problem_id` exists in PostgreSQL | A provided `problem_id` that references no record in `routing_problems` is rejected: HTTP 400, `error_code = PROBLEM_NOT_FOUND` |
 
+**`backend_id` validation (when present):**
+
+| Rule | Description |
+|---|---|
+| `backend_id` non-empty string | A provided `backend_id` that is an empty string is rejected: HTTP 400, `backend_id must be a non-empty string` |
+| No existence check | `backend_id` is not validated against the Scheduler capability profile registry; capability profiles are not persisted in PostgreSQL (SPEC-012 FR-2 scope). An unregistered `backend_id` is detected at Scheduler execution time, not at submission time (ADR-013 Accepted Risks). |
+| Absence not a failure | Absent `backend_id` means standard-path execution; no validation failure is produced |
+
 **Scheduler configuration validation:**
 
 | Rule | Description |
@@ -200,12 +220,12 @@ When `problem_id` is provided instead of `routing_problem` (experiment context),
 **Validation ordering (routing_problem path — standard submission):**
 
 1. Structural validation — all failures collected and returned together.
-2. Fast domain validation — applied only when structural validation passes. All domain failures collected and returned together in a single response.
+2. Fast domain validation — applied only when structural validation passes. All domain failures collected and returned together in a single response. `backend_id` non-empty check applied here when `backend_id` is present.
 3. Scheduler configuration existence check — applied only when domain validation passes.
 
 **Validation ordering (problem_id path — experiment context):**
 
-1. Structural validation — validate `problem_id` is a valid UUID format; validate `routing_problem` is absent.
+1. Structural validation — validate `problem_id` is a valid UUID format; validate `routing_problem` is absent. `backend_id` non-empty check applied here when `backend_id` is present.
 2. `problem_id` existence check — validate the referenced routing problem exists in PostgreSQL.
 3. Scheduler configuration existence check — applied only when step 2 passes.
 
@@ -219,8 +239,10 @@ If the API accepts a routing problem that Core subsequently rejects (ADR-009 div
 - All validation failures in a layer are collected and returned in a single response — callers receive all errors, not just the first
 - A `scheduler_config_id` that references no stored configuration is rejected with HTTP 400 — the system does not silently substitute the default (SPEC-001 FR-13)
 - A submission that passes all validation stages proceeds to FR-4 persistence
-- When `problem_id` is provided, fast domain validation is skipped entirely; only `problem_id` existence and scheduler config validation apply
+- When `problem_id` is provided, fast domain validation is skipped entirely; only `problem_id` existence, `backend_id` non-empty check (when present), and scheduler config validation apply
 - A `problem_id` that references no record in `routing_problems` is rejected with HTTP 400 with `error_code = PROBLEM_NOT_FOUND` before any persistence
+- A `backend_id` present but empty string is rejected with HTTP 400; `backend_id` absent is not a validation failure
+- The API does not validate `backend_id` against the Scheduler capability profile registry
 - The API does not re-run Core's authoritative validation in C#; it implements the fast-feedback approximation defined in ADR-009
 
 ---
@@ -236,7 +258,7 @@ After all validation passes, the API creates the job and persists the routing pr
 2. Generate `job_id`: UUID, system-generated. The `job_id` is the caller's correlation handle and the Evidence Log root key (SPEC-006 FR-2).
 3. Resolve `scheduler_config_id`: use the provided value, or the default configuration's ID (SPEC-003 FR-14).
 4. Persist the routing problem record to PostgreSQL with `problem_id`. All SPEC-001 fields are persisted. Persistence completes before queue publication (SPEC-001 FR-12).
-5. Create the job record in PostgreSQL with `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp (SPEC-006 FR-4.2).
+5. Create the job record in PostgreSQL with `job_id`, `problem_id`, `scheduler_config_id`, `backend_id` (nullable — stored when present in the request, NULL when absent), `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp (SPEC-006 FR-4.2).
 6. Steps 4 and 5 execute atomically: either both succeed or neither is committed. If persistence fails, no job message is published and HTTP 500 is returned to the caller.
 
 **Creation sequence — problem_id path (experiment context):**
@@ -244,7 +266,7 @@ After all validation passes, the API creates the job and persists the routing pr
 1. Use the caller-provided `problem_id`. No routing problem record is created.
 2. Generate `job_id`: UUID, system-generated.
 3. Resolve `scheduler_config_id`: use the provided value, or the default configuration's ID (SPEC-003 FR-14).
-4. Create the job record in PostgreSQL with `job_id`, the provided `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp.
+4. Create the job record in PostgreSQL with `job_id`, the provided `problem_id`, `scheduler_config_id`, `backend_id` (nullable — stored when present in the request, NULL when absent), `status = Pending`, `cancellation_requested = false`, and `created_at` timestamp.
 5. Step 4 executes atomically. If persistence fails, no job message is published and HTTP 500 is returned.
 
 Note: In the problem_id path, the `problem_id` returned in the response and in the queue message is the caller-supplied value, not a system-generated one. The `problem_id` in the response is unchanged from the input. Multiple jobs may reference the same `problem_id` via this path without violating referential integrity (SPEC-012 FR-6: no UNIQUE constraint on `jobs.problem_id`).
@@ -256,6 +278,7 @@ Note: In the problem_id path, the `problem_id` returned in the response and in t
 - In the routing_problem path: the routing problem record is persisted to PostgreSQL before the job message is published to RabbitMQ
 - The job record initial status is `Pending`
 - The job record initializes `cancellation_requested = false`; the field must exist in the record at creation so that FR-11 can write `true` to it when a cancellation request is accepted
+- When `backend_id` is present in the request, the job record stores the value in the nullable `backend_id` column; when absent, the column is NULL
 - A PostgreSQL failure during persistence causes HTTP 500; no queue message is published
 - The `problem_id` appears on all subsequent log events, spans, and evidence records for the job
 
@@ -268,14 +291,17 @@ After successful persistence, the API publishes a job message to the RabbitMQ ro
 
 **Message content:**
 
-| Field | Value |
-|---|---|
-| `job_id` | The UUID generated in FR-4 |
-| `problem_id` | The UUID generated in FR-4 |
-| `scheduler_config_id` | The resolved configuration identifier |
+| Field | Value | Present |
+|---|---|---|
+| `job_id` | The UUID generated in FR-4 | Always |
+| `problem_id` | The UUID generated in FR-4 | Always |
+| `scheduler_config_id` | The resolved configuration identifier | Always |
+| `backend_id` | The backend targeting directive from the request | When `backend_id` was present in the submission request; absent from the message when the request did not include `backend_id` |
+
+Absence of `backend_id` in the queue message signals standard-path execution to the Worker; presence signals targeted-path execution. The Worker forwards `backend_id` to the Scheduler when present (SPEC-005 FR-5).
 
 **AMQP message metadata:**
-At publication time, the API injects W3C TraceContext (`traceparent`, optionally `tracestate`) from the active `job.submit` span context into the AMQP message `application_headers`. This is message-level metadata, distinct from the message payload body. The payload fields (`job_id`, `problem_id`, `scheduler_config_id`) are unchanged. The trace context schema carried in `application_headers` is owned by ADR-011.
+At publication time, the API injects W3C TraceContext (`traceparent`, optionally `tracestate`) from the active `job.submit` span context into the AMQP message `application_headers`. This is message-level metadata, distinct from the message payload body. The trace context schema carried in `application_headers` is owned by ADR-011.
 
 **Publication semantics:**
 
@@ -286,7 +312,8 @@ At publication time, the API injects W3C TraceContext (`traceparent`, optionally
 
 **Acceptance Criteria:**
 - No job message is published unless routing problem and job records are committed to PostgreSQL
-- The published message payload body contains exactly `job_id`, `problem_id`, and `scheduler_config_id`
+- The published message payload body contains `job_id`, `problem_id`, and `scheduler_config_id` on every submission
+- When `backend_id` is present in the submission request, the published message payload includes `backend_id`; when absent from the request, `backend_id` is not included in the message
 - The published AMQP message includes W3C TraceContext (`traceparent`, optionally `tracestate`) injected from the active `job.submit` span context into the AMQP message `application_headers` (ADR-011)
 - A RabbitMQ publication failure after successful PostgreSQL persistence causes HTTP 500; the persisted job record remains with `status = Pending`
 - The API publishes to the `routing-jobs` queue as defined by ADR-003; no other queue is used for job dispatch
@@ -336,6 +363,12 @@ FR-7 defines the primary job-lifecycle public identifiers: `job_id` and `problem
 - Stable for the lifetime of the problem record
 - **Cardinality constraint (scoped):** In standard job submissions (routing_problem path), each routing problem is associated with exactly one job. In experiment context (problem_id path, ADR-012 Decision 3), a routing problem may be referenced by multiple jobs. This relaxation applies only when the `problem_id` path in FR-2 is used. The SPEC-012 FR-6 schema already supports multiple jobs referencing the same `problem_id`; no UNIQUE constraint exists on `jobs.problem_id`. The instance-sharing invariant is a correctness requirement for cross-solver quality comparisons under SPEC-007 FR-7 (SPEC-020 FR-4, ADR-012 Decision 3).
 
+**`backend_id` — the backend targeting directive (ADR-013):**
+- An optional string field supplied by the caller on `POST /v1/jobs`
+- When present, stored in the job record (nullable `backend_id` column per SPEC-012) and included in the queue message payload
+- A routing directive for the Scheduler: it indicates which backend to target; it is not an experiment reference and does not link the job to any experiment or trial (ADR-013 Decision 7)
+- `backend_id` is not a public lifecycle identifier in the same sense as `job_id` or `problem_id`; it is not returned in submission responses or status responses
+
 **Internal identifiers not exposed in API responses:**
 - `decision_id` — Scheduler decision record key (SPEC-003 internal)
 - `execution_seed` — derived by the Worker (SPEC-005 FR-7); must not appear in API responses or logs (SPEC-005 Security Considerations)
@@ -349,6 +382,7 @@ FR-7 defines the primary job-lifecycle public identifiers: `job_id` and `problem
 - No API response includes `decision_id`, `execution_seed`, or internal solver execution identifiers
 - A caller who polls `GET /v1/jobs/{job_id}` receives the same `problem_id` that was returned at submission
 - The `jobs` table does not contain an `experiment_id` column; experiment-to-job linkage is held in `experiment_trials.job_id` (SPEC-012 FR-21.4, ADR-012 Decision 4)
+- `backend_id` is a job record field and queue message field, not a submission response field; it is stored at job creation but is not part of the caller-facing identifier contract
 
 ---
 
@@ -779,6 +813,7 @@ The API is responsible for emitting the required OpenTelemetry spans for the sta
 | `job_id` | The generated job identifier |
 | `problem_id` | The generated problem identifier |
 | `scheduler_config_id` | The resolved scheduler configuration identifier |
+| `backend_id` | The backend targeting directive when present in the request; omitted from the span when absent (ADR-013) |
 | `stop_count` | Number of stops in the submitted routing problem |
 | `vehicle_count` | Vehicle count |
 | `validation_passed` | Boolean: whether validation succeeded |
@@ -800,7 +835,7 @@ The API is responsible for emitting the required OpenTelemetry spans for the sta
 
 | Event name | Endpoint | Required fields |
 |---|---|---|
-| `api.job.submitted` | POST /v1/jobs | `job_id`, `problem_id`, `scheduler_config_id`, `stop_count`, `vehicle_count` |
+| `api.job.submitted` | POST /v1/jobs | `job_id`, `problem_id`, `scheduler_config_id`, `stop_count`, `vehicle_count`, `backend_id` (when present) |
 | `api.job.validation_failed` | POST /v1/jobs | `problem_id` (not yet assigned), `failure_count`, `failure_codes` |
 | `api.job.publish_failed` | POST /v1/jobs | `job_id`, `problem_id`, `error_type` |
 | `api.job.cancel_requested` | POST /v1/jobs/{id}/cancel | `job_id`, `current_status` |
@@ -826,7 +861,7 @@ The API propagates the `job.submit` span context to the Worker's `job.consume` s
 
 **Acceptance Criteria:**
 - `job.submit` is emitted on every job submission attempt, successful or not
-- All required `job.submit` attributes are present on every emission
+- All required `job.submit` attributes are present on every emission; `backend_id` is included in the span when present in the submission request and omitted when absent
 - `job.submit` span status is `Error` on any 4xx or 5xx response
 - The `job.submit` span context is injected as W3C TraceContext in AMQP message `application_headers` on every successful publication (FR-5)
 - `experiment.submit` is emitted on every experiment manifest submission attempt
@@ -1359,7 +1394,7 @@ The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark 
 
 | Input | Source | Authoritative Owner | Format | Used By | Notes |
 |---|---|---|---|---|---|
-| Job record | PostgreSQL | SPEC-006 FR-4.2 (schema); ODR-6 | `job_id`, `problem_id`, `scheduler_config_id`, `status`, `cancellation_requested`, `created_at`, `updated_at`, `completed_at`, `failed_at` | FR-3 (config validation), FR-8 (status response), FR-11 (terminal state check) | Created by API; `status`, `updated_at`, `completed_at`, `failed_at` updated by Worker (SPEC-005) |
+| Job record | PostgreSQL | SPEC-006 FR-4.2 (schema); ODR-6 | `job_id`, `problem_id`, `scheduler_config_id`, `backend_id` (nullable), `status`, `cancellation_requested`, `created_at`, `updated_at`, `completed_at`, `failed_at` | FR-3 (config validation), FR-8 (status response), FR-11 (terminal state check) | Created by API; `status`, `updated_at`, `completed_at`, `failed_at` updated by Worker (SPEC-005); `backend_id` written at job creation, NULL when not supplied (ADR-013, SPEC-012) |
 | Solver run record | PostgreSQL | SPEC-006 FR-6.2 | `solver_outcome` and associated fields | FR-8 (status response — `solver_outcome` field for `Completed` jobs) | Written by Worker (SPEC-005); absent for `Failed` and non-terminal jobs |
 | Failure record | PostgreSQL | SPEC-006 FR-8 | Failure classification fields including `failure_reason` | FR-8 (status response — `failure_reason` field for `Failed` jobs) | Written by Worker (SPEC-005); absent for `Completed` and non-terminal jobs |
 | Report metadata record | PostgreSQL | SPEC-006 FR-9.2 | `report_id`, `job_id`, `report_format`, `generated_at`, `generation_status` | FR-8 (existence check for `report_available`), FR-12 (report discovery response), FR-13 (file path lookup for report serving) | Written by Worker (SPEC-005 FR-17); may be absent if report generation failed or job is not yet terminal |
@@ -1381,7 +1416,7 @@ The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark 
 | Cancellation acknowledgement | HTTP caller | JSON per FR-14 error or 202 body | |
 | Routing problem record | PostgreSQL | Per SPEC-001 | Persisted before queue publication |
 | Job record | PostgreSQL | `job_id`, `problem_id`, `scheduler_config_id`, `status = Pending`, `cancellation_requested = false`, `created_at` (SPEC-006 FR-4.2) | Initial creation; Worker updates status |
-| Job message | RabbitMQ `routing-jobs` | `{job_id, problem_id, scheduler_config_id}` | Consumed by Worker (SPEC-005) |
+| Job message | RabbitMQ `routing-jobs` | `{job_id, problem_id, scheduler_config_id, backend_id (optional)}` | Consumed by Worker (SPEC-005); `backend_id` included when present in the submission request (ADR-013) |
 | OTel spans | OpenTelemetry Collector | Traces per FR-17 | `job.submit` and secondary spans |
 | Structured log events | Stdout (JSON) | Per ADR-006 | At each lifecycle stage |
 
@@ -1603,6 +1638,16 @@ The complete benchmark summary payload per SPEC-020 FR-14 Artifact 4: benchmark 
 
 43. **Integration: Trial submission linkage — experiment completed** — `POST /v1/experiments/{id}/trials/{id}/submit` for an experiment whose `status = Completed` returns HTTP 409 with `error_code = EXPERIMENT_NOT_ACTIVE`.
 
+44. **Unit: backend_id absent — standard path** — A valid `POST /v1/jobs` submission without `backend_id` returns HTTP 202; the published queue message does not contain a `backend_id` field; the job record has `backend_id = NULL` in PostgreSQL.
+
+45. **Unit: backend_id present — targeted path** — A valid `POST /v1/jobs` submission with `backend_id = "qubo-simulated-annealing"` returns HTTP 202; the published queue message contains `backend_id = "qubo-simulated-annealing"`; the job record stores `backend_id = "qubo-simulated-annealing"` in PostgreSQL.
+
+46. **Unit: backend_id empty string — rejected** — A `POST /v1/jobs` submission with `backend_id = ""` returns HTTP 400 with `error_code = VALIDATION_ERROR` and a `field_errors` entry identifying `backend_id` before any persistence occurs.
+
+47. **Unit: backend_id in job.submit span** — A `POST /v1/jobs` submission with `backend_id` present produces a `job.submit` span that includes the `backend_id` attribute matching the submitted value.
+
+48. **Unit: backend_id absent — span attribute omitted** — A `POST /v1/jobs` submission without `backend_id` produces a `job.submit` span that does not include a `backend_id` attribute.
+
 ---
 
 # Observability Requirements
@@ -1621,6 +1666,7 @@ Operational questions the API spans, logs, and metrics must answer:
 10. How long does the experiment auto-completion sequence (ExperimentSummary computation, benchmark summary update) take?
 11. For a given `experiment_id`, how many trials are in each status at a given moment?
 12. How often is `POST /v1/experiments/{id}/trials/{id}/collect-evidence` called for non-terminal jobs (JOB_NOT_TERMINAL rejections)?
+13. For a given `job_id`, was the job submitted with a `backend_id` (targeted path) or without (standard path)? Answered by the `backend_id` attribute on the `job.submit` span and the `backend_id` field in the `api.job.submitted` log event.
 
 These are answered by:
 - The `job.submit` span (submission latency, validation outcome, scheduler config)
@@ -1679,7 +1725,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 
 # Documentation Updates Required
 
-- **docs/architecture.md**: The API Responsibilities section accurately describes the API's role at a high level. SPEC-008 is the authoritative binding contract. No architecture.md changes are required.
+- **docs/architecture.md**: The API Responsibilities section accurately describes the API's role at a high level. SPEC-008 is the authoritative binding contract. ADR-013 requires architecture.md updates (Experiment Execution Flow sequence diagram, RabbitMQ section payload description, removal of SPEC-016 OQ-6 from Implementation Blockers); those are architecture.md's governance scope and are not owned by this specification.
 - **SPEC-001 (revision complete)**: `average_vehicle_speed_kmh` is formally defined in SPEC-001 FR-17 as a required routing problem field per ODR-1. SPEC-008 FR-2 and FR-3 now reference SPEC-001 FR-17 as the authoritative definition.
 - **SPEC-003**: The scheduler configuration endpoint contract defined in SPEC-008 FR-10 is the API's implementation of the configuration persistence model implied by SPEC-003 FR-13. No SPEC-003 changes are required.
 - **SPEC-005 FR-12**: The cancellation delivery mechanism is resolved (ODR-5). SPEC-008 FR-11 (API writes `cancellation_requested`) and SPEC-005 FR-12 (Worker reads flag at pre-execution check) are consistent. No further cross-spec updates required for cancellation.
@@ -1847,6 +1893,7 @@ PostgreSQL and RabbitMQ connection pool sizes are implementation planning concer
 - [x] OQ-6 resolved — trace context propagation mechanism: W3C TraceContext in AMQP message `application_headers`; Worker establishes navigable trace relationship (ADR-011)
 - [ ] OQ-7 resolved — Generated Mode routing problem creation (Sub-problem A) and trial record registration (Sub-problem B) (blocking for Generated Mode harness)
 - [ ] OQ-8 resolved — CLI notification mechanism for SchedulerRejected and HarnessError trials (blocking for full lifecycle handling)
+- [x] ADR-013 applied — optional `backend_id` field added to FR-2, FR-3, FR-4, FR-5, FR-7; observability updated in FR-17; testability cases 44–48 added
 
 ---
 
@@ -1860,10 +1907,13 @@ This feature is complete when:
 - OQ-6 (trace context propagation) is resolved and incorporated in FR-17 — satisfied
 - OQ-7 Sub-problem A (routing problem creation without job creation) and Sub-problem B (trial record registration) are resolved before Generated Mode harness implementation begins
 - OQ-8 (SchedulerRejected/HarnessError trial notification) is resolved before full experiment lifecycle implementation begins
-- All test contracts defined in the Testability section pass (items 1 through 43)
+- ADR-013 backend targeting contract (FR-2, FR-3, FR-4, FR-5, FR-7) is implemented: optional `backend_id` accepted at submission, stored in job record, forwarded in queue message; empty-string rejection enforced; no capability registry check performed
+- All test contracts defined in the Testability section pass (items 1 through 48)
 - The `job.submit`, `experiment.submit`, `experiment.trial_submit`, `experiment.evidence_collect`, and `experiment.summarize` spans are emitted and verifiable in the OpenTelemetry Collector
+- `job.submit` span includes `backend_id` attribute when present in the submission request
 - SPEC-001 FR-17 defines `average_vehicle_speed_kmh` (ODR-1) and SPEC-008 FR-2 references SPEC-001 FR-17
 - The `jobs` table has no `experiment_id` column; Worker experiment-unawareness is verified by schema inspection
+- The `jobs` table has a nullable `backend_id` column (SPEC-012); existing rows have NULL (standard-path backward compatibility)
 - Fixed Mode experiment submission rejects unresolvable `problem_ids` atomically (no partial experiment state)
 - Evidence collection is idempotent: repeated calls for a `Collected` trial return HTTP 200 without re-reading Evidence Log tables
 - Experiment auto-completes to `Completed` when the last trial reaches terminal trial_status
