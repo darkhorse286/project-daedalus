@@ -18,9 +18,9 @@
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-006, ADR-009, ADR-012, ADR-013
+**Related ADRs:** ADR-002, ADR-006, ADR-009, ADR-010, ADR-012, ADR-013
 
-**Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006, SPEC-007, SPEC-008, SPEC-009, SPEC-020, SPEC-021
+**Related Specs:** SPEC-007, SPEC-008, SPEC-009, SPEC-020, SPEC-021
 
 ---
 
@@ -76,7 +76,7 @@ Browser [User]
       → (existing artifacts: ExperimentSummary, BenchmarkSummary, evidence reports, trial records)
 ```
 
-The Dashboard renders the structured experiment summary from SPEC-008 FR-23 as a tabular comparison view. It renders the benchmark summary from SPEC-008 FR-24 as a cross-experiment evidence view. It renders the trial results from SPEC-008 FR-22 as a navigable comparison matrix. It links trials to their evidence reports via the job detail chain (SPEC-008 FR-8, FR-12, FR-13).
+The Dashboard renders the structured experiment summary from SPEC-008 FR-23 as a tabular comparison view. It renders the benchmark summary from SPEC-008 FR-24 as a cross-experiment evidence view. It renders the trial results from SPEC-008 FR-22 as a navigable comparison matrix. It navigates to evidence reports via SPEC-008 FR-12 (report discovery) and FR-13 (report content retrieval). Job detail navigation targets SPEC-021 FR-6; the Dashboard does not call `GET /v1/jobs/{job_id}` directly.
 
 The Dashboard does not define new API endpoints. All data it displays originates from existing SPEC-008 endpoints.
 
@@ -104,8 +104,8 @@ The Dashboard does not define new API endpoints. All data it displays originates
 | Presenting structured benchmark summary and cross-experiment evidence | **SPEC-022 (this spec)** |
 | Navigating from trial to job detail and evidence report | **SPEC-022 (this spec)** |
 | Presenting scheduler targeting context at the experiment level | **SPEC-022 (this spec)** |
-| Presenting execution metadata in a sortable, filterable table | **SPEC-022 (this spec)** |
-| Downloading evidence artifacts (reports, summary JSON) | **SPEC-022 (this spec)** |
+| Presenting execution metadata in a sortable table | **SPEC-022 (this spec)** |
+| Presenting download options for evidence artifacts (reports, summary JSON) from Dashboard views; complements the equivalent download capabilities in SPEC-021 FR-7, FR-8.3, and FR-8.4 | **SPEC-022 (this spec)** |
 
 The Dashboard does not:
 
@@ -153,7 +153,7 @@ The user enters an `experiment_id` (UUID) via an entry form. The Dashboard issue
 A UUID format check is applied client-side before the API request is issued. An entry that fails the UUID format check is rejected with an inline error before an API call is made.
 
 **Experiment list (contingent on OQ-3):**
-If a `GET /v1/experiments` list endpoint is defined (SPEC-008 OQ-1, SPEC-021 OQ-1), the Dashboard provides a browseable list of experiments ordered most-recently-created first. The list displays:
+If a `GET /v1/experiments` list endpoint is defined (SPEC-022 OQ-3), the Dashboard provides a browseable list of experiments ordered most-recently-created first. The list displays:
 
 | Column | Source | Notes |
 |---|---|---|
@@ -286,6 +286,9 @@ A comparison table with one row per solver backend presents the following fields
 | Max (km) | Maximum `hindsight_quality` |
 | Eligible Trial Count | Trials with `quality_comparison_eligible = true` |
 
+**Quality aggregate scope note:**
+When the experiment contains multiple problem configurations (`problem_config_index` values ≥ 2), the mean, standard deviation, minimum, and maximum `hindsight_quality` statistics in this table are aggregates spanning different routing problem instances. `hindsight_quality` is dimensionally comparable only within the same routing problem (SPEC-007 FR-7); these cross-problem aggregates are informational only. Per-(problem, solver) comparisons with explicit problem scope are available in the Experiment Summary Detail (FR-6).
+
 **Per-solver runtime statistics:**
 
 | Column | Description |
@@ -297,6 +300,9 @@ A comparison table with one row per solver backend presents the following fields
 
 **Per-solver outcome distribution:**
 For each solver, the count of each `solver_outcome` value across all trials is displayed: `Succeeded`, `Infeasible`, `Timeout`, `Cancelled`, `Failed`, `ContractViolation`.
+
+**Solver rows with no evidence:**
+A solver with no collected evidence trials (all trials in `SchedulerRejected` or `HarnessError` status) still occupies a row in the quality and runtime statistics tables, with "—" placeholders for all numeric columns. The outcome distribution for that solver shows rejection or error counts. Row presence is determined by solver set membership; cell content is determined by evidence availability.
 
 **Cross-solver ranking:**
 The cross-solver ranking from the summary payload is presented without recomputation. A note is displayed alongside the ranking: "Rankings are based on quality-comparison-eligible trials sharing the same routing problem instance (SPEC-007 FR-7)." When no quality-comparison-eligible trials exist across any (problem, repetition) intersection, a note is displayed indicating that quality comparison is not applicable for this experiment.
@@ -386,7 +392,7 @@ When `GET /v1/jobs/{job_id}/report` returns HTTP 404, the view displays a not-av
 
 **Acceptance Criteria:**
 - Every Trial Matrix cell and Execution Metadata row with `trial_status = Completed` and `job_id` non-null provides a report navigation link
-- The report HTML content is rendered in-browser byte-identical to the SPEC-008 FR-13 response body
+- The report HTML content is rendered in-browser without modification; the Dashboard does not modify, transform, or augment the HTML as served by SPEC-008 FR-13
 - The Dashboard does not inject any content into the rendered report HTML
 - A download option allows saving the HTML file to disk
 - The four metadata fields are displayed alongside the report content
@@ -470,7 +476,6 @@ The Execution Metadata View presents per-trial execution detail for an experimen
 | Trial Status | `trial_status` | Visually differentiated |
 | Solver Outcome | `solver_outcome` | When evidence collected; blank otherwise |
 | Duration (ms) | `execution_duration_ms` | When available; null displayed as "—" |
-| Solution Present | `solution_present` | When available |
 | Evidence Status | `evidence_status` | When terminal |
 | Job Link | `job_id` | Links to job detail when non-null; blank when null |
 | Report | When `trial_status = Completed` | Link navigates to FR-7 |
@@ -491,15 +496,8 @@ The Execution Metadata View presents per-trial execution detail for an experimen
 **Description:**
 The Dashboard surfaces system observability metadata that is accessible through the SPEC-008 API. It does not query the OpenTelemetry Collector, Prometheus, or Grafana.
 
-**Job timing (from SPEC-008 FR-8):**
-When the user navigates to job detail from any Dashboard view (via a `job_id` link), the following timing fields from `GET /v1/jobs/{job_id}` are displayed:
-
-| Field | Condition | Notes |
-|---|---|---|
-| `created_at` | Always | ISO 8601 UTC |
-| `updated_at` | Always | ISO 8601 UTC |
-| `completed_at` | When `status = Completed` | ISO 8601 UTC |
-| `failed_at` | When `status = Failed` | ISO 8601 UTC |
+**Job detail navigation:**
+When the user navigates to job detail from any Dashboard view via a `job_id` link, the destination view is SPEC-021 FR-6. SPEC-021 FR-6 owns the job detail presentation, including timing fields from `GET /v1/jobs/{job_id}`. SPEC-022 does not specify requirements for the job detail view.
 
 **Experiment timeline (from SPEC-008 FR-20):**
 The FR-3 Experiment Overview displays `submitted_at`, `started_at`, and `completed_at` to provide a view of the experiment's total wall-clock duration.
@@ -508,7 +506,6 @@ The FR-3 Experiment Overview displays `submitted_at`, `started_at`, and `complet
 The `request_id` from SPEC-008 FR-14 error responses is displayed in all API error conditions to support operator correlation with API observability data. The `request_id` is propagated unchanged from the API error body.
 
 **Acceptance Criteria:**
-- Job timing fields are displayed in any job detail view reached from the Dashboard
 - The experiment timeline fields are displayed in FR-3
 - The Dashboard does not query OTel, Prometheus, or Grafana
 - `request_id` is displayed for all API error responses; it is not regenerated or altered by the Dashboard
@@ -600,6 +597,8 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 - The Dashboard does not provide a Generated Mode experiment configuration view (SPEC-008 OQ-7 deferred)
 - The Dashboard does not provide a benchmark list view at MVP scope (no list endpoint for benchmarks exists in SPEC-008)
 - The Dashboard does not display the raw `experiment_seed` or per-trial `trial_seed` values; seeds are reproducibility inputs, not display data
+- The Dashboard does not display the `trial_type` field from the SPEC-008 FR-22 trial record at MVP scope
+- The Dashboard does not display `solution_present` from trial records at MVP scope; this field is not included in the SPEC-008 FR-22 trial record response
 
 ---
 
@@ -638,7 +637,6 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 | Trial results response | `GET /v1/experiments/{experiment_id}/trials` (SPEC-008 FR-22) | JSON | Rendered in FR-4, FR-9 |
 | Experiment summary response | `GET /v1/experiments/{experiment_id}/summary` (SPEC-008 FR-23) | JSON | Rendered in FR-5, FR-6 |
 | Benchmark summary response | `GET /v1/benchmarks/{benchmark_id}/summary` (SPEC-008 FR-24) | JSON | Rendered in FR-8 |
-| Job status response | `GET /v1/jobs/{job_id}` (SPEC-008 FR-8) | JSON | For job detail via FR-10 |
 | Report metadata response | `GET /v1/jobs/{job_id}/report` (SPEC-008 FR-12) | JSON | For FR-7 report navigation |
 | Report HTML content | `GET /v1/reports/{report_id}` (SPEC-008 FR-13) | `text/html` | Rendered verbatim in FR-7 |
 
@@ -765,7 +763,7 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 
 14. **Integration: Report navigation from Trial Matrix** — A cell with `trial_status = Completed` and `job_id` non-null provides a report link; activating the link issues `GET /v1/jobs/{job_id}/report` and, on HTTP 200, fetches and renders the report HTML from the returned `report_url`.
 
-15. **Integration: Report rendered without modification** — The HTML content from `GET /v1/reports/{report_id}` is rendered byte-identical to the API response body. No Dashboard-injected content appears in the rendered output.
+15. **Integration: Report rendered without modification** — The HTML content from `GET /v1/reports/{report_id}` is rendered in-browser without modification. The Dashboard does not inject, transform, or augment the report HTML. No Dashboard-generated content appears within the rendered report boundaries.
 
 16. **Integration: Report not available message** — When `GET /v1/jobs/{job_id}/report` returns HTTP 404, the FR-7 view displays a not-available message. The Trial Matrix view is still accessible.
 
@@ -796,6 +794,10 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 29. **Integration: Per-(problem, solver) table in FR-6** — For a `Completed` experiment with 2 problem configs and 2 backends, the Experiment Summary Detail view renders 4 rows in the per-(problem, solver) table plus 1 experiment-level aggregate row.
 
 30. **Unit: Constraint — no non-GET requests** — Inspect all network requests issued by any Dashboard view. Verify no POST, PUT, PATCH, or DELETE methods are issued to the Daedalus API.
+
+31. **Integration: Cross-problem quality aggregate note** — For a completed experiment with multiple `problem_config_index` values (≥ 2), the Solver Comparison View (FR-5) displays the quality aggregate scope note alongside the per-solver quality statistics table, explaining that the aggregated `hindsight_quality` statistics span multiple routing problem instances and are not valid cross-problem quality comparisons under SPEC-007 FR-7.
+
+32. **Integration: Dashboard-to-API exclusivity** — Inspect all network requests issued by any Dashboard view during a complete session (experiment lookup, trial matrix, solver comparison, evidence report navigation, benchmark summary). Verify that all requests target SPEC-008 API endpoints only. No requests are issued to the OpenTelemetry Collector, Prometheus endpoint, or Grafana API.
 
 ---
 
@@ -851,15 +853,20 @@ The Solver Comparison View (FR-5) derives its content from the already-computed 
 **No per-trial API calls:**
 The Trial Matrix (FR-4) and Execution Metadata View (FR-9) are both derived from a single `GET /v1/experiments/{experiment_id}/trials` response. This prevents the N×M API call pattern that would arise from fetching each trial's job detail individually.
 
+**Trial results cache consistency:**
+When the user navigates between FR-4 and FR-9 within the same session, the implementation should serve both views from the same cached API response (keyed by `experiment_id`) to avoid temporal inconsistency between the matrix and metadata table. Cache invalidation occurs on each auto-refresh cycle. The caching strategy is an implementation planning decision.
+
 ---
 
 # Documentation Updates Required
 
-- **docs/architecture.md**: When the Dashboard is deployed as a separate application (OQ-1 Option 2), the System Context diagram should include the Dashboard as a new client node parallel to the CLI and Web UI (SPEC-021). If the Dashboard is implemented as part of the SPEC-021 Web UI application (OQ-1 Option 1), no separate architecture node is added. Resolution depends on OQ-1.
+- **docs/architecture.md**: The System Context diagram currently contains no browser-client nodes; neither the SPEC-021 Web UI nor the SPEC-022 Dashboard appears in the current diagram. When OQ-1 resolves, the architecture.md update should add both the Web UI (SPEC-021) and the Experiment Dashboard (SPEC-022) as browser-client nodes in a single revision. If the Dashboard is implemented as part of the SPEC-021 Web UI (OQ-1 Option 1), a single combined "Web UI / Dashboard" client node is appropriate. If implemented as a separate application (OQ-1 Option 2), two distinct client nodes are added. Deferring both additions to a single revision prevents a partial update that includes one browser client but not the other.
 
 - **SPEC-020 (Benchmark and Experiment Harness)**: The Scope and Responsibility Boundary table in SPEC-020 already references "Dashboard visualization of benchmark and experiment summaries | SPEC-022 (pending specification)." When SPEC-022 is accepted, SPEC-020 should be updated to replace "(pending specification)" with the accepted status reference.
 
 - **SPEC-021 (Web UI)**: SPEC-021 FR-8 provides basic experiment observation (raw status view, raw trial table, raw summary JSON). SPEC-022 provides the structured visualization and comparison layer. When SPEC-022 is accepted, SPEC-021 Documentation Updates Required should note that structured experiment visualization is owned by SPEC-022 and that SPEC-021 FR-8 represents the basic observation baseline. If OQ-1 resolves to a single unified application, the two specifications' FR-8 and SPEC-022 views should be reconciled in a joint implementation planning session.
+
+  **Note on `executing` trial count:** SPEC-022 FR-3 suppresses the `executing` count from the `trial_counts` breakdown (always 0 at MVP scope per SPEC-008 FR-20). SPEC-021 FR-8.1 renders all trial status categories. This is an intentional behavioral difference reflecting the MVP constraint; it should be acknowledged in the joint implementation planning session if OQ-1 resolves to a single unified application.
 
 ---
 
@@ -875,7 +882,7 @@ The Trial Matrix (FR-4) and Execution Metadata View (FR-9) are both derived from
 1. **Part of SPEC-021:** Dashboard views are added to the Web UI application. Single deployment unit, same origin, shared technology stack. No additional CORS configuration.
 2. **Separate application:** Dashboard has its own deployment unit. Different origin from the Web UI; API CORS headers must permit both origins.
 
-**Owner:** Project Owner decision. The ADR governing SPEC-021 OQ-2 (technology stack) should address this relationship simultaneously.
+**Owner:** Project Owner decision. The ADR governing SPEC-021 OQ-2 (technology stack) should address this relationship simultaneously. That ADR must explicitly enumerate SPEC-022 OQ-1 and OQ-2 as governed questions; if it does not, SPEC-022 requires a separate ADR for the deployment model decision.
 
 **Blocking:** Blocking for implementation planning. Not blocking for Draft status.
 
@@ -887,7 +894,7 @@ The Trial Matrix (FR-4) and Execution Metadata View (FR-9) are both derived from
 
 **Why it matters:** If the Dashboard is part of the SPEC-021 Web UI (OQ-1 Option 1), this question is answered by SPEC-021 OQ-2. If implemented separately, an independent ADR is required.
 
-**Owner:** Resolved by the ADR governing SPEC-021 OQ-2 if OQ-1 selects Option 1; otherwise requires a separate ADR.
+**Owner:** Resolved by the ADR governing SPEC-021 OQ-2 if OQ-1 selects Option 1; that ADR must explicitly enumerate SPEC-022 OQ-2 as a governed question for this resolution to apply. If it does not, or if OQ-1 selects Option 2, a separate ADR is required.
 
 **Blocking:** Not blocking for Draft status. Blocking for implementation.
 
@@ -895,15 +902,15 @@ The Trial Matrix (FR-4) and Execution Metadata View (FR-9) are both derived from
 
 ### OQ-3: Experiment List Endpoint Dependency
 
-**Question:** The Experiment Browser (FR-2) benefits from a `GET /v1/experiments` list endpoint. This endpoint is referenced in SPEC-021 OQ-1 and SPEC-016 OQ-1 but is not currently defined in SPEC-008. Should this endpoint be defined as a SPEC-008 amendment before Dashboard implementation begins, or does the Dashboard use the entry-form fallback?
+**Question:** The Experiment Browser (FR-2) benefits from a `GET /v1/experiments` list endpoint. This endpoint is not currently defined in SPEC-008; experiment access is by identifier only. SPEC-021 FR-8 acknowledges this gap. Should this endpoint be defined as a SPEC-008 amendment before Dashboard implementation begins, or does the Dashboard use the entry-form fallback?
 
 **Why it matters:** Without a list endpoint, the Dashboard entry experience is a text entry form. A list endpoint would make experiments discoverable without requiring the user to know the `experiment_id` in advance.
 
 **Options:**
-1. Define `GET /v1/experiments` as a SPEC-008 amendment. This resolves SPEC-021 OQ-1, SPEC-016 OQ-1, and SPEC-022 OQ-3 simultaneously.
+1. Define `GET /v1/experiments` as a SPEC-008 amendment. This resolves SPEC-022 OQ-3 simultaneously with any equivalent dependency in SPEC-016.
 2. Implement the entry-form fallback at MVP scope; defer the list endpoint.
 
-**Owner:** Project Owner decision on SPEC-008 amendment scope. Resolution aligns with SPEC-021 OQ-1.
+**Owner:** Project Owner decision on SPEC-008 amendment scope. Resolution is independent of SPEC-021 OQ-1 (which tracks the job list endpoint, `GET /v1/jobs`).
 
 **Blocking:** Blocking for full FR-2 implementation. The entry-form fallback in FR-2 is not blocked.
 
@@ -918,6 +925,22 @@ The Trial Matrix (FR-4) and Execution Metadata View (FR-9) are both derived from
 **Owner:** Resolved by SPEC-021 OQ-4 if OQ-1 selects Option 1; otherwise addressed by the same ADR governing OQ-2.
 
 **Blocking:** Not blocking for Draft status. Blocking for implementation.
+
+---
+
+### OQ-5: Per-solver Quality Statistics Payload Dependency
+
+**Question:** FR-5 presents a per-solver quality statistics table with columns for mean, standard deviation, minimum, and maximum `hindsight_quality`, and eligible trial count. These columns are described as "derived from the QualityStatsAggregate entries in the summary payload." SPEC-020 FR-12 defines QualityStatsAggregate at the per-(problem, solver) scope. SPEC-020 FR-14 Artifact 3 defines `per_solver_summary` as containing outcome distribution totals and combined runtime statistics per solver, but does not include per-solver (cross-problem) quality aggregate fields. SPEC-020 FR-13 explicitly excludes cross-problem `hindsight_quality` aggregation. Does SPEC-020 FR-14 Artifact 3 provide per-solver quality aggregate fields (cross-problem mean, std dev, min, max `hindsight_quality`, eligible trial count), or does quality data exist only at the per-(problem, solver) scope?
+
+**Why it matters:** Constraint 3 prohibits the Dashboard from computing statistics independently. If per-solver quality aggregates are not present in the payload, the Dashboard cannot produce FR-5's quality statistics columns without aggregating across per-(problem, solver) entries — a prohibited operation. In that case, FR-5 must either remove the quality statistics columns or SPEC-020 must be amended to include per-solver quality aggregates in the ExperimentSummary artifact.
+
+**Options:**
+1. Confirm that SPEC-020 FR-14 Artifact 3 includes per-solver quality aggregate fields (requires a SPEC-020 clarification or amendment to explicitly define these fields in the `per_solver_summary` or as a separate per-solver aggregate structure).
+2. Remove quality statistics columns (mean, std dev, min, max `hindsight_quality`, eligible trial count) from FR-5's per-solver table; retain runtime statistics and outcome distribution columns, which are confirmed present in `per_solver_summary`. Cross-solver quality comparisons remain available via the per-problem `cross_solver_comparison` ranking in FR-5 and the per-(problem, solver) table in FR-6.
+
+**Owner:** Project Owner decision on SPEC-020 scope. Resolution requires SPEC-020 clarification or amendment.
+
+**Blocking:** Blocking for FR-5 quality statistics column implementation. FR-5 runtime statistics, outcome distribution, cross-solver ranking, reproducibility annotation, and targeted execution note are not blocked.
 
 ---
 
@@ -953,6 +976,7 @@ The Trial Matrix (FR-4) and Execution Metadata View (FR-9) are both derived from
 - [ ] OQ-2 documented (technology stack)
 - [ ] OQ-3 documented (experiment list endpoint dependency)
 - [ ] OQ-4 documented (API base URL discovery)
+- [ ] OQ-5 documented (per-solver quality statistics payload dependency)
 
 ---
 
@@ -965,6 +989,7 @@ This feature is complete when:
 - OQ-2 resolved: technology stack and serving mechanism defined via ADR before implementation begins
 - OQ-3 resolved: either `GET /v1/experiments` is defined in a SPEC-008 amendment and the full experiment browser is implemented, or the entry-form fallback per FR-2 is in place
 - OQ-4 resolved: API base URL discovery mechanism defined
+- OQ-5 resolved: per-solver quality statistics payload confirmed in SPEC-020 FR-14 Artifact 3 or FR-5 quality statistics columns revised accordingly
 - The Dashboard accesses the API solely through SPEC-008 HTTP GET endpoints; no POST, PUT, PATCH, or DELETE requests are issued; no direct database, queue, or Worker access exists
 - The Trial Matrix (FR-4) renders without per-trial API calls; all cell data is derived from a single `GET /v1/experiments/{experiment_id}/trials` response
 - The Solver Comparison View (FR-5) derives all statistics from the SPEC-008 FR-23 payload without independent recomputation
