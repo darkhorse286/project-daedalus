@@ -6,7 +6,7 @@
 
 **Title:** Experiment Dashboard
 
-**Status:** Draft
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
@@ -286,7 +286,7 @@ When the experiment has not yet reached `Completed`, this view displays a "Summa
 For each solver, the count of each `solver_outcome` value across all trials is displayed: `Succeeded`, `Infeasible`, `Timeout`, `Cancelled`, `Failed`, `ContractViolation`.
 
 **Solver rows with no evidence:**
-A solver with no collected evidence trials (all trials in `SchedulerRejected` or `HarnessError` status) still occupies a row in the runtime statistics table, with "—" placeholders for all numeric columns. The outcome distribution for that solver shows rejection or error counts. Row presence is determined by solver set membership; cell content is determined by evidence availability.
+A solver with no collected evidence trials (all trials in `SchedulerRejected` or `HarnessError` status) still occupies a row in both the runtime statistics table and the outcome distribution table. In the runtime statistics table, all numeric columns display "—" placeholders. In the outcome distribution table, rejection or error counts are displayed where applicable. Row presence is determined by solver set membership; cell content is determined by evidence availability.
 
 **Cross-solver ranking:**
 The cross-solver ranking from the summary payload is presented without recomputation. A note is displayed alongside the ranking: "Rankings are based on quality-comparison-eligible trials sharing the same routing problem instance (SPEC-007 FR-7)." When no quality-comparison-eligible trials exist across any (problem, repetition) intersection, a note is displayed indicating that quality comparison is not applicable for this experiment.
@@ -311,6 +311,7 @@ The full experiment summary JSON payload is offered for download without transfo
 - `EXPERIMENT_SUMMARY_NOT_FOUND` displays a not-yet-available message with a link to FR-3; the message is distinct from a not-found error
 - Per-solver runtime statistics are rendered from `per_solver_summary` without recomputation by the Dashboard
 - Per-solver outcome distribution is rendered from `per_solver_summary` without recomputation by the Dashboard
+- Every solver in the experiment solver set occupies a row in both the runtime statistics table and the outcome distribution table; solvers with no collected evidence trials are not suppressed
 - The cross-solver ranking is derived from `cross_solver_comparison` in the summary payload without recomputation by the Dashboard
 - The cross-solver ranking note is displayed alongside the ranking
 - When no quality-comparison-eligible trials exist, a note explains that quality comparison is not applicable for the cross-solver ranking; runtime statistics and outcome distribution are still displayed
