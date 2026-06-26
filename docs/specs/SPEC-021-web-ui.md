@@ -6,7 +6,7 @@
 
 **Title:** Daedalus Web UI
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Author:** Darkhorse286
 
