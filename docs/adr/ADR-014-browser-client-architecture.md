@@ -79,6 +79,8 @@ React Router provides URL-based navigation. Experiment ID, job ID, and benchmark
 
 No Redux, Zustand, or global state management library is adopted at MVP scope. Server state is owned by TanStack Query. Navigation state is owned by React Router URL parameters. Local UI state uses React's built-in `useState` and `useReducer`. This division covers all state patterns required by SPEC-021 and SPEC-022 without additional libraries.
 
+TanStack Query and React Router are selected at the ADR level rather than deferred to implementation planning because accepted specification requirements directly determine the required architectural behavior, not merely a preference between interchangeable alternatives. TanStack Query is the only practical implementation path for the polling lifecycle, terminal-state stop, and shared server-state caching defined by SPEC-021 FR-6, FR-8.1 and SPEC-022 FR-3, FR-4 and SPEC-022 Performance Considerations; no manual polling implementation or alternative library eliminates the cache-sharing requirement without equivalent complexity. React Router is the only practical implementation path for the URL-based experiment and job navigation, breadcrumb derivation, and direct-URL deep-linking described in SPEC-021 and SPEC-022; URL state management is an architectural pattern, not a library preference. Library choices within the React ecosystem that are not driven by accepted specification requirements remain implementation-planning decisions, consistent with ADR-002's approach of deferring choices that are not architecturally determined.
+
 ## Decision 5: Deployment Model — Dedicated web-ui Docker Compose Container
 
 The browser client is deployed as a dedicated `web-ui` service in the Docker Compose environment. The `web-ui` container runs Nginx serving the Vite static build output (HTML, JS, CSS). The container is accessible at `http://localhost:3000` (host port 3000) by default.
@@ -89,7 +91,7 @@ The Nginx configuration applies the HTML5 History API fallback (`try_files $uri 
 
 The `web-ui` container does not act as a reverse proxy for API requests. The browser client origin and the API origin are distinct; CORS headers are required on the API permitting the browser client origin. In the standard Docker Compose configuration, the browser client is at `http://localhost:3000` and the API is at `http://localhost:5000`. This is consistent with the CORS requirements stated in SPEC-021 Architectural Impact, SPEC-021 Assumptions, and SPEC-022 Architectural Impact.
 
-The API container (port 5000) and all other Docker Compose services are unchanged. The topology grows from nine containers to ten. This resolves SPEC-021 OQ-3 as Option 1 (separate `web-ui` container).
+The API container (port 5000) and all other Docker Compose services are unchanged. One Browser Client service (`web-ui`) is added to the Docker Compose deployment. This resolves SPEC-021 OQ-3 as Option 1 (separate `web-ui` container).
 
 ## Decision 6: API Base URL Discovery — Build-Time Environment Variable
 
@@ -108,6 +110,8 @@ Browser clients do not emit OpenTelemetry spans. Browser clients do not inject `
 The `request_id` field from SPEC-008 FR-14 error responses is displayed in the browser UI for all API error conditions, as required by SPEC-021 FR-9 and SPEC-022 FR-12. This enables operators to correlate browser-observed errors with API-side OTel spans and Prometheus metrics without browser-side trace propagation.
 
 Browser-side OTel instrumentation adds SDK bundle weight, a browser-to-OTel-Collector network dependency, and initialization complexity. None of these costs are justified for a developer-tool UI operating in a local Docker Compose environment. ADR-011 established that trace continuity across the API-to-Worker boundary is satisfied by W3C TraceContext in AMQP headers; no trace gap exists at the browser-to-API boundary that instrumentation would close.
+
+For successful API requests, the `job_id` returned in the HTTP 202 response body is displayed in the browser UI per SPEC-021 FR-2 and FR-6. This `job_id` is the operational correlation handle for locating the corresponding `job.submit` span in the API and all descendent Worker spans in the observability backend. This is consistent with ADR-011's treatment of `job_id` as a required attribute on both `job.submit` and `job.consume` spans (SPEC-008 FR-17, SPEC-005 FR-19) and its designation as a correlation handle sufficient for success-path operator queries.
 
 ## Decision 8: Future Evolution — Dashboard Extraction Is a Deferred Option
 
@@ -275,7 +279,7 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 - SPEC-022 navigation to SPEC-021 FR-6 for job detail is a same-application internal route transition. No cross-origin navigation issue exists.
 - TanStack Query's polling behavior (`refetchInterval: false` on terminal status) directly implements the auto-polling stop-on-terminal-state requirement in SPEC-021 FR-6, FR-8.1 and SPEC-022 FR-3, FR-4 without custom polling infrastructure.
 - The `[trials, experiment_id]` cache key shared by SPEC-022 FR-4 and FR-9 satisfies the trial results cache consistency requirement in SPEC-022 Performance Considerations without manual cache coordination.
-- Docker Compose topology addition is minimal: one `web-ui` container. Existing nine containers are unchanged.
+- Docker Compose topology addition is minimal: one `web-ui` Browser Client service. All existing Docker Compose services are unchanged.
 - No browser-side OTel SDK dependency reduces bundle size and eliminates a tracing endpoint accessibility requirement from the browser origin.
 - React + TypeScript provides the highest employer-signaling value of the candidate frameworks for this portfolio project.
 
@@ -300,7 +304,7 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 |---|---|
 | Browser Client (SPEC-021, SPEC-022) | New component. Consumes SPEC-008 endpoints from a browser context. |
 | API Layer (SPEC-008, ASP.NET Core) | CORS configuration required for the browser client origin. No endpoint contract changes. |
-| Docker Compose Topology | One new container: `web-ui` (Nginx). Default host port: 3000. Topology grows from nine to ten containers. |
+| Docker Compose Topology | One new Browser Client service: `web-ui` (Nginx). Default host port: 3000. All existing services unchanged. |
 | CLI (SPEC-016) | None. Browser client has no interaction with CLI responsibilities or execution paths. |
 | Worker (SPEC-005) | None. |
 | Scheduler | None. |
@@ -341,13 +345,14 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 - This ADR does not specify the React Router route map structure beyond the URL parameter patterns described in Decision 4. The full route hierarchy is an implementation planning concern.
 - This ADR does not specify the TanStack Query query key taxonomy beyond the examples given in Decision 4. Consistent key structure is an implementation discipline, not a decision governed here.
 - SPEC-021 OQ-1 (Job List API Endpoint, `GET /v1/jobs`) and SPEC-022 OQ-3 (Experiment List Endpoint, `GET /v1/experiments`) are not resolved by this ADR. These questions govern API capabilities owned by SPEC-008 and its amendment process.
+- Browser report rendering sandbox policy is not specified by this ADR. The browser architecture permits sandboxed rendering of HTML evidence reports in an embedded frame. The concrete sandbox policy — which script, navigation, and form-submission restrictions to apply — remains an implementation planning decision governed by SPEC-021 Security Considerations and SPEC-022 Security Considerations. Both specifications describe the sandboxing requirement and classify the specific policy as implementation planning.
 
 ---
 
 # Documentation Updates
 
 - **docs/architecture.md**: The System Context diagram requires a new browser client node (`Web UI / Dashboard`) with an arrow to the Daedalus API. The Container Topology diagram requires a new `web-ui` (Nginx) service node at port 3000. Both diagrams should be updated in a single revision after this ADR is accepted. The Governing Specifications section count should be updated to reflect the additional ADR.
-- **SPEC-021**: OQ-2, OQ-3, and OQ-4 should be marked resolved, citing ADR-014. The Documentation Updates Required section of SPEC-021 notes that architecture.md and SPEC-008 must be updated; those updates are now governed by this ADR's documentation note and by the CORS consequence below.
+- **SPEC-021**: OQ-2, OQ-3, and OQ-4 should be marked resolved, citing ADR-014. The Documentation Updates Required section of SPEC-021 notes that architecture.md and SPEC-008 must be updated; those updates are now governed by this ADR's documentation note and by the CORS consequence below. Additionally, because ADR-014 resolves SPEC-022 OQ-1 as a unified Browser Client application, SPEC-021 Documentation Updates Required should be expanded to note that SPEC-021 FR-8 (basic experiment observation views) and SPEC-022 structured visualization views must be reconciled during implementation planning — including the intentional behavioral difference in `executing`-trial rendering between SPEC-021 FR-8.1 (renders all trial status categories) and SPEC-022 FR-3 (suppresses the `executing` count as always-zero at MVP scope). This is an implementation-planning coordination item, not a specification amendment.
 - **SPEC-022**: OQ-1, OQ-2, and OQ-4 should be marked resolved, citing ADR-014.
 - **SPEC-008**: The CORS requirement is now specific: the API must permit the browser client origin. In the standard Docker Compose configuration, this is `http://localhost:3000`. A SPEC-008 amendment or Constraints update should record this as a deployment configuration requirement. No endpoint contract changes are required.
 
@@ -385,7 +390,7 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 
 **Decision 4:** TanStack Query for server state (fetching, caching, polling, background revalidation). React Router for client-side navigation and URL state. No Redux.
 
-**Decision 5:** Dedicated `web-ui` Docker Compose container (Nginx, multi-stage build). Browser client and API are at distinct origins; CORS required on the API for the browser client origin. Default Docker Compose configuration: browser client at `http://localhost:3000`, API at `http://localhost:5000`. Topology grows from nine to ten containers.
+**Decision 5:** Dedicated `web-ui` Docker Compose container (Nginx, multi-stage build). Browser client and API are at distinct origins; CORS required on the API for the browser client origin. Default Docker Compose configuration: browser client at `http://localhost:3000`, API at `http://localhost:5000`. One Browser Client service is added to the Docker Compose deployment; all existing services are unchanged.
 
 **Decision 6:** Build-time environment variable (`VITE_API_BASE_URL`, default `http://localhost:5000`) embedded in the Vite static build artifact. Rebuild required to change the API URL.
 
