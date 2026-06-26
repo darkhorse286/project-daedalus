@@ -44,7 +44,7 @@ The unified application resolves SPEC-022 OQ-1 (relationship to SPEC-021) as Opt
 
 ## Decision 2: React with TypeScript, Built with Vite
 
-React (version 18 or later) with TypeScript (version 5 or later) is the browser client framework and language. Vite is the build tooling.
+React with TypeScript is the browser client framework and language. Vite is the build tooling.
 
 React with TypeScript provides a production-grade component model, strong type safety for API response shapes, and an ecosystem suited to the UI patterns required by SPEC-021 and SPEC-022: form-heavy job submission with dynamic stop rows, auto-polling status views, complex data tables with custom cell logic, evidence report sandboxed rendering, and file download. TypeScript enforces API response contract discipline at compile time, a direct alignment with the project's evidence-integrity principle.
 
@@ -54,7 +54,7 @@ No server-side rendering is adopted. The browser client is a pure static SPA. SS
 
 ## Decision 3: UI Component Strategy — shadcn/ui (Radix UI + Tailwind CSS) with TanStack Table
 
-UI components are sourced from shadcn/ui, which combines Radix UI headless primitives with Tailwind CSS utility styling. TanStack Table (v8 or later) is used for the data-heavy tabular views required by SPEC-021 FR-8.2 (trial results table) and SPEC-022 FR-4 (Trial Matrix), FR-5 (Solver Comparison tables), and FR-9 (Execution Metadata table).
+UI components are sourced from shadcn/ui, which combines Radix UI headless primitives with Tailwind CSS utility styling. TanStack Table is used for the data-heavy tabular views required by SPEC-021 FR-8.2 (trial results table) and SPEC-022 FR-4 (Trial Matrix), FR-5 (Solver Comparison tables), and FR-9 (Execution Metadata table).
 
 This combination provides:
 
@@ -67,7 +67,7 @@ No full-featured component library (MUI, Mantine, Ant Design) is adopted. Full-f
 
 ## Decision 4: State Management — TanStack Query for Server State, React Router for Navigation
 
-TanStack Query (React Query v5 or later) is the server-state management layer. React Router (v6 or later) is the client-side routing library.
+TanStack Query is the server-state management layer. React Router is the client-side routing library.
 
 TanStack Query handles fetching, caching, polling, and background revalidation:
 
@@ -87,7 +87,7 @@ The `web-ui` Dockerfile is a multi-stage build: a Node.js build stage executes `
 
 The Nginx configuration applies the HTML5 History API fallback (`try_files $uri /index.html`) required for React Router client-side navigation. Without this, direct URL navigation (e.g., `http://localhost:3000/experiments/some-uuid`) returns HTTP 404 from Nginx instead of loading the SPA.
 
-The `web-ui` container does not act as a reverse proxy for API requests. The browser issues API calls directly from `http://localhost:3000` to `http://localhost:5000`. These are distinct origins; CORS headers are required on the API permitting the `http://localhost:3000` origin. This is consistent with the CORS requirements stated in SPEC-021 Architectural Impact, SPEC-021 Assumptions, and SPEC-022 Architectural Impact.
+The `web-ui` container does not act as a reverse proxy for API requests. The browser client origin and the API origin are distinct; CORS headers are required on the API permitting the browser client origin. In the standard Docker Compose configuration, the browser client is at `http://localhost:3000` and the API is at `http://localhost:5000`. This is consistent with the CORS requirements stated in SPEC-021 Architectural Impact, SPEC-021 Assumptions, and SPEC-022 Architectural Impact.
 
 The API container (port 5000) and all other Docker Compose services are unchanged. The topology grows from nine containers to ten. This resolves SPEC-021 OQ-3 as Option 1 (separate `web-ui` container).
 
@@ -114,6 +114,14 @@ Browser-side OTel instrumentation adds SDK bundle weight, a browser-to-OTel-Coll
 The Experiment Dashboard (SPEC-022) may in a future state be extracted into a micro-frontend, an independently deployed browser application, or a web component. Such extraction is an architectural option, not the current architecture. Any extraction requires a future ADR.
 
 No micro-frontend infrastructure — module federation, import maps, shared dependency coordination across separately deployed bundles — is introduced at MVP scope. Decision 1 (single SPA) is adopted without forward-compatibility provisions for extraction. The added complexity of micro-frontend infrastructure is not justified by MVP requirements.
+
+**Extraction invariant:** Any future extraction of the Experiment Dashboard into a separate deployment unit, micro-frontend, or web component shall preserve the API-only interaction model established by this ADR. Extracted Dashboard deployments remain passive consumers of the SPEC-008 API; they do not interact with the Control Plane, Scheduler, Worker, or any infrastructure component directly. This invariant is binding on any future ADR that governs Dashboard extraction.
+
+## Browser Client Responsibilities
+
+Browser clients own presentation and user interaction. Business rules, domain validation, scheduling decisions, evidence computation, and other domain behavior remain authoritative within the Control Plane and downstream services.
+
+The browser client presents API-sourced data, performs structural input validation only (not domain validation, per ADR-009), orchestrates user interaction flows, and renders experiment evidence sourced from SPEC-008 endpoints without recomputation. The browser client does not perform domain validation, compute quality statistics or outcome distributions, make scheduling decisions, communicate with the Scheduler, Worker, or any infrastructure component directly, or bypass the Control Plane. This boundary reinforces ADR-009 (domain validation authority), ADR-012 (API as state authority, browser as consumer), and ADR-013 (backend targeting is a Control Plane decision).
 
 ---
 
@@ -273,7 +281,7 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 
 ## Negative
 
-- CORS configuration on the API is required for the `http://localhost:3000` origin before the browser client can issue any API request.
+- CORS configuration on the API is required for the browser client origin before the browser client can issue any API request.
 - Changing the API base URL requires rebuilding the `web-ui` Docker image with an updated build argument.
 - Node.js build toolchain (Vite, npm) is added to the repository alongside C++, C#, and Python. Toolchain diversity increases onboarding surface.
 - shadcn/ui component initialization copies component source files into the project. This is a one-time setup cost per component type and must be repeated when adding new component categories.
@@ -282,7 +290,7 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 
 - TanStack Query's cache invalidation correctness depends on query keys being consistently keyed by identifier. Incorrect or missing cache invalidation after a mutation (job cancellation returning HTTP 202) produces stale data in sibling views. This is a known implementation risk mitigated by the testability cases for SPEC-021 FR-6 cancellation behavior and SPEC-022 FR-4/FR-9 cache sharing.
 - Nginx must be configured with `try_files $uri /index.html` for React Router history mode. Omitting this configuration causes direct URL navigation to return HTTP 404 from Nginx. This is a required deployment configuration noted for implementors.
-- CORS permitting `http://localhost:3000` applies to the local Docker Compose environment only. Any internet-facing deployment must review and narrow the CORS policy to the specific deployment origin before exposure.
+- CORS permitting the browser client origin applies to the local Docker Compose environment only. Any internet-facing deployment must review and narrow the CORS policy to the specific deployment origin before exposure.
 
 ---
 
@@ -291,8 +299,8 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 | Component | Impact |
 |---|---|
 | Browser Client (SPEC-021, SPEC-022) | New component. Consumes SPEC-008 endpoints from a browser context. |
-| API Layer (SPEC-008, ASP.NET Core) | CORS configuration required for `http://localhost:3000`. No endpoint contract changes. |
-| Docker Compose Topology | One new container: `web-ui` (Nginx, port 3000). Topology grows from nine to ten containers. |
+| API Layer (SPEC-008, ASP.NET Core) | CORS configuration required for the browser client origin. No endpoint contract changes. |
+| Docker Compose Topology | One new container: `web-ui` (Nginx). Default host port: 3000. Topology grows from nine to ten containers. |
 | CLI (SPEC-016) | None. Browser client has no interaction with CLI responsibilities or execution paths. |
 | Worker (SPEC-005) | None. |
 | Scheduler | None. |
@@ -320,9 +328,9 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 
 1. The Docker Compose build environment provides a Node.js runtime capable of running Vite and npm during the `web-ui` image build stage. The runtime image contains only Nginx and static build output; Node.js is not present in the runtime stage.
 2. `http://localhost:5000` is the default and expected API base URL in the standard Docker Compose configuration. This matches the existing `api` service port mapping and Assumption 1 in SPEC-021 and SPEC-022.
-3. CORS configuration on the ASP.NET Core API (permitting `http://localhost:3000`) is achievable via standard ASP.NET Core middleware configuration without any endpoint contract changes or new functional requirements.
-4. React 18's concurrent rendering features and React Router v6's route parameter and loader APIs are forward-compatible with the component patterns required by SPEC-021 and SPEC-022. No React 19 Server Component or React Server Action APIs are used.
-5. TanStack Query's `refetchInterval` parameter accepts a function receiving the latest query data, enabling status-conditional polling stop (`refetchInterval: (data) => isTerminal(data?.status) ? false : 3000`). This is a documented and stable API in TanStack Query v5.
+3. CORS configuration on the ASP.NET Core API (permitting the browser client origin) is achievable via standard ASP.NET Core middleware configuration without any endpoint contract changes or new functional requirements.
+4. React's concurrent rendering features and React Router's route parameter and loader APIs are forward-compatible with the component patterns required by SPEC-021 and SPEC-022. No React Server Component or React Server Action APIs are used.
+5. TanStack Query's `refetchInterval` parameter accepts a function receiving the latest query data, enabling status-conditional polling stop (`refetchInterval: (data) => isTerminal(data?.status) ? false : 3000`). This is a documented and stable TanStack Query API.
 
 ---
 
@@ -341,16 +349,16 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 - **docs/architecture.md**: The System Context diagram requires a new browser client node (`Web UI / Dashboard`) with an arrow to the Daedalus API. The Container Topology diagram requires a new `web-ui` (Nginx) service node at port 3000. Both diagrams should be updated in a single revision after this ADR is accepted. The Governing Specifications section count should be updated to reflect the additional ADR.
 - **SPEC-021**: OQ-2, OQ-3, and OQ-4 should be marked resolved, citing ADR-014. The Documentation Updates Required section of SPEC-021 notes that architecture.md and SPEC-008 must be updated; those updates are now governed by this ADR's documentation note and by the CORS consequence below.
 - **SPEC-022**: OQ-1, OQ-2, and OQ-4 should be marked resolved, citing ADR-014.
-- **SPEC-008**: The CORS requirement is now specific: the API must permit `http://localhost:3000` as the browser client origin. A SPEC-008 amendment or Constraints update should record this as a deployment configuration requirement. No endpoint contract changes are required.
+- **SPEC-008**: The CORS requirement is now specific: the API must permit the browser client origin. In the standard Docker Compose configuration, this is `http://localhost:3000`. A SPEC-008 amendment or Constraints update should record this as a deployment configuration requirement. No endpoint contract changes are required.
 
 ---
 
 # Review Triggers
 
 - A new browser-facing feature requires separate authentication, separate origin, or isolation from the SPEC-021/SPEC-022 view set. Decision 1 (single SPA) should be revisited.
-- The project is extended to a multi-user or internet-facing deployment. CORS permitting `http://localhost:3000` is not appropriate in that context; Decision 5 and Decision 6 require revision.
+- The project is extended to a multi-user or internet-facing deployment. CORS permitting a localhost origin is not appropriate in that context; Decision 5 and Decision 6 require revision.
 - React reaches a major version with breaking changes to the concurrent rendering model or hook semantics that require a migration decision.
-- TanStack Query v5 introduces breaking changes to the `refetchInterval` or cache key APIs that conflict with the polling patterns in SPEC-021 or SPEC-022.
+- TanStack Query introduces breaking changes to the `refetchInterval` or cache key APIs that conflict with the polling patterns in SPEC-021 or SPEC-022.
 - ADR-007 review trigger is satisfied (IBM Quantum Hardware integration begins): if the Experiment Dashboard requires real-time hardware execution monitoring, browser-side OTel instrumentation may become warranted. Revisit Decision 7.
 - A non-CLI caller — automation service, CI pipeline, or another non-browser client — requires experiment submission capability. ADR-012 Decision 1 review trigger already identifies this case; if it results in a server-side orchestration model, the browser client's relationship to that model should be assessed.
 
@@ -371,13 +379,13 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 
 **Decision 1:** SPEC-021 and SPEC-022 are feature areas of one SPA. No separate browser application is deployed for the Experiment Dashboard.
 
-**Decision 2:** React 18+ with TypeScript 5+ and Vite. No server-side rendering.
+**Decision 2:** React with TypeScript and Vite. No server-side rendering.
 
 **Decision 3:** shadcn/ui (Radix UI + Tailwind CSS) for UI components. TanStack Table for data-heavy tabular views (Trial Matrix, Execution Metadata, Solver Comparison).
 
 **Decision 4:** TanStack Query for server state (fetching, caching, polling, background revalidation). React Router for client-side navigation and URL state. No Redux.
 
-**Decision 5:** Dedicated `web-ui` Docker Compose container (Nginx, multi-stage build) at host port 3000. API remains at port 5000. CORS required for `http://localhost:3000`. Topology grows from nine to ten containers.
+**Decision 5:** Dedicated `web-ui` Docker Compose container (Nginx, multi-stage build). Browser client and API are at distinct origins; CORS required on the API for the browser client origin. Default Docker Compose configuration: browser client at `http://localhost:3000`, API at `http://localhost:5000`. Topology grows from nine to ten containers.
 
 **Decision 6:** Build-time environment variable (`VITE_API_BASE_URL`, default `http://localhost:5000`) embedded in the Vite static build artifact. Rebuild required to change the API URL.
 
@@ -389,7 +397,7 @@ Build-time environment variable injection is simpler and sufficient for a Docker
 
 **Primary Benefit:** Six open questions across two accepted specifications resolved in a single ADR with a coherent, minimal-complexity architecture that preserves all existing component boundaries (ADR-002 API separation, ADR-011 trace posture, ADR-012 CLI independence) and requires one new Docker Compose container.
 
-**Primary Cost:** CORS configuration on the API for `http://localhost:3000` is a deployment prerequisite. Changing the API URL requires a container rebuild. Node.js build toolchain is added to the repository.
+**Primary Cost:** CORS configuration on the API for the browser client origin is a deployment prerequisite. Changing the API URL requires a container rebuild. Node.js build toolchain is added to the repository.
 
 **Evidence Supporting the Decisions:** SPEC-022 FR-4 Trial Matrix structure (headless table requirement); SPEC-021 FR-6/FR-8.1 and SPEC-022 FR-3/FR-4 polling patterns (TanStack Query alignment); SPEC-022 Performance Considerations cache sharing requirement (shared TanStack Query key); ADR-002 API boundary (separate container required); ADR-011 CLI observability posture (no browser trace injection); SPEC-021 OQ-3 Option 1 and SPEC-022 OQ-1 Option 1 (selected options as described in the accepted specifications).
 
