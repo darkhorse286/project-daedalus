@@ -12,7 +12,7 @@
 
 **Created:** 2026-06-25
 
-**Last Updated:** 2026-06-25
+**Last Updated:** 2026-06-26
 
 **Supersedes:** None
 
@@ -273,22 +273,6 @@ The Solver Comparison View presents per-solver aggregate statistics derived from
 **Unavailable state:**
 When the experiment has not yet reached `Completed`, this view displays a "Summary not yet available" message with a link back to FR-3. `EXPERIMENT_SUMMARY_NOT_FOUND` (HTTP 404) is the expected condition; it is presented as a not-yet-available state, not an error.
 
-**Per-solver quality statistics:**
-A comparison table with one row per solver backend presents the following fields derived from the QualityStatsAggregate entries in the summary payload (field labels; exact field names are per SPEC-020 FR-12, FR-14):
-
-| Column | Description |
-|---|---|
-| Backend | `backend_id` |
-| Sample Count | Number of trials contributing to the aggregate |
-| Mean Hindsight Quality (km) | Mean `hindsight_quality` across eligible trials; lower is better |
-| Std Dev (km) | Standard deviation of `hindsight_quality` |
-| Min (km) | Minimum `hindsight_quality` |
-| Max (km) | Maximum `hindsight_quality` |
-| Eligible Trial Count | Trials with `quality_comparison_eligible = true` |
-
-**Quality aggregate scope note:**
-When the experiment contains multiple problem configurations (`problem_config_index` values ≥ 2), the mean, standard deviation, minimum, and maximum `hindsight_quality` statistics in this table are aggregates spanning different routing problem instances. `hindsight_quality` is dimensionally comparable only within the same routing problem (SPEC-007 FR-7); these cross-problem aggregates are informational only. Per-(problem, solver) comparisons with explicit problem scope are available in the Experiment Summary Detail (FR-6).
-
 **Per-solver runtime statistics:**
 
 | Column | Description |
@@ -302,7 +286,7 @@ When the experiment contains multiple problem configurations (`problem_config_in
 For each solver, the count of each `solver_outcome` value across all trials is displayed: `Succeeded`, `Infeasible`, `Timeout`, `Cancelled`, `Failed`, `ContractViolation`.
 
 **Solver rows with no evidence:**
-A solver with no collected evidence trials (all trials in `SchedulerRejected` or `HarnessError` status) still occupies a row in the quality and runtime statistics tables, with "—" placeholders for all numeric columns. The outcome distribution for that solver shows rejection or error counts. Row presence is determined by solver set membership; cell content is determined by evidence availability.
+A solver with no collected evidence trials (all trials in `SchedulerRejected` or `HarnessError` status) still occupies a row in the runtime statistics table, with "—" placeholders for all numeric columns. The outcome distribution for that solver shows rejection or error counts. Row presence is determined by solver set membership; cell content is determined by evidence availability.
 
 **Cross-solver ranking:**
 The cross-solver ranking from the summary payload is presented without recomputation. A note is displayed alongside the ranking: "Rankings are based on quality-comparison-eligible trials sharing the same routing problem instance (SPEC-007 FR-7)." When no quality-comparison-eligible trials exist across any (problem, repetition) intersection, a note is displayed indicating that quality comparison is not applicable for this experiment.
@@ -325,11 +309,11 @@ The full experiment summary JSON payload is offered for download without transfo
 **Acceptance Criteria:**
 - The Solver Comparison View is accessible only when `GET /v1/experiments/{experiment_id}/summary` returns HTTP 200
 - `EXPERIMENT_SUMMARY_NOT_FOUND` displays a not-yet-available message with a link to FR-3; the message is distinct from a not-found error
-- The quality statistics comparison table has one row per solver backend in the experiment's solver set
-- The outcome distribution is displayed per solver
-- The cross-solver ranking is derived from the summary payload without recomputation by the Dashboard
+- Per-solver runtime statistics are rendered from `per_solver_summary` without recomputation by the Dashboard
+- Per-solver outcome distribution is rendered from `per_solver_summary` without recomputation by the Dashboard
+- The cross-solver ranking is derived from `cross_solver_comparison` in the summary payload without recomputation by the Dashboard
 - The cross-solver ranking note is displayed alongside the ranking
-- When no quality-comparison-eligible trials exist, a note explains that quality comparison is not applicable; the quality statistics table is still displayed for runtime and outcome data
+- When no quality-comparison-eligible trials exist, a note explains that quality comparison is not applicable for the cross-solver ranking; runtime statistics and outcome distribution are still displayed
 - The `reproducibility_class` annotation is always displayed
 - The targeted execution note is always displayed
 - The experiment summary JSON is offered for download
@@ -607,7 +591,7 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 1. The Daedalus API is reachable by the browser at a known base URL before the Dashboard is used. The default is `http://localhost:5000`, consistent with the Docker Compose port mapping (architecture.md).
 2. No authentication or authorization is required at MVP scope, consistent with SPEC-008 Security Considerations. The Dashboard mirrors the API's MVP authentication posture.
 3. The API emits CORS headers permitting requests from the Dashboard's browser origin, as required by SPEC-021 Architectural Impact. The specific CORS configuration depends on OQ-2 (serving mechanism).
-4. The experiment summary artifact (SPEC-008 FR-23, SPEC-020 FR-14 Artifact 3) contains all fields required for FR-5 and FR-6 rendering: per-(problem, solver) QualityStatsAggregates with quality and runtime statistics, outcome distributions, cross-solver comparison, and reproducibility annotation. The payload structure is authoritative in SPEC-020 FR-12, FR-13, FR-14.
+4. The experiment summary artifact (SPEC-008 FR-23, SPEC-020 FR-14 Artifact 3) contains all fields required for FR-5 and FR-6 rendering. FR-5 uses `per_solver_summary` for per-solver runtime statistics and outcome distribution, `cross_solver_comparison` for cross-solver ranking, and the experiment-level `reproducibility_class` for the reproducibility annotation. FR-6 uses per-(problem, solver) `QualityStatsAggregate` entries for quality statistics (mean, std dev, min, max `hindsight_quality`) and runtime statistics at per-(problem, solver) scope. The payload structure is authoritative in SPEC-020 FR-12, FR-13, FR-14.
 5. The benchmark summary artifact (SPEC-008 FR-24, SPEC-020 FR-14 Artifact 4) contains per-experiment summary fields and cross-experiment comparison data sufficient for FR-8 rendering.
 6. The `GET /v1/experiments/{experiment_id}/trials` response (SPEC-008 FR-22) provides all trial fields required for the Trial Matrix (FR-4) and Execution Metadata View (FR-9) without additional per-trial API calls.
 7. The Docker Compose environment is the expected deployment context. The Dashboard is accessible at a browser-reachable address within that environment.
@@ -753,7 +737,7 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 
 9. **Integration: Solver comparison — summary not yet available** — For a `Running` experiment, `GET /v1/experiments/{experiment_id}/summary` returns HTTP 404 with `EXPERIMENT_SUMMARY_NOT_FOUND`; the Solver Comparison view displays a not-yet-available message with a link to FR-3; no error state is displayed.
 
-10. **Integration: Solver comparison table population** — For a `Completed` experiment with two solver backends, the Solver Comparison view renders a table with two rows, one per backend, each populated with quality and runtime statistics from the summary payload.
+10. **Integration: Solver comparison table population** — For a `Completed` experiment with two solver backends, the Solver Comparison view renders a table with two rows, one per backend, each populated with runtime statistics and outcome distribution from `per_solver_summary` in the summary payload.
 
 11. **Integration: Solver comparison — no quality comparison eligible** — When no trial has `quality_comparison_eligible = true`, the cross-solver ranking note states that quality comparison is not applicable; the outcome distribution and runtime statistics tables are still displayed.
 
@@ -795,9 +779,7 @@ The Dashboard never renders stack traces, connection strings, PostgreSQL error c
 
 30. **Unit: Constraint — no non-GET requests** — Inspect all network requests issued by any Dashboard view. Verify no POST, PUT, PATCH, or DELETE methods are issued to the Daedalus API.
 
-31. **Integration: Cross-problem quality aggregate note** — For a completed experiment with multiple `problem_config_index` values (≥ 2), the Solver Comparison View (FR-5) displays the quality aggregate scope note alongside the per-solver quality statistics table, explaining that the aggregated `hindsight_quality` statistics span multiple routing problem instances and are not valid cross-problem quality comparisons under SPEC-007 FR-7.
-
-32. **Integration: Dashboard-to-API exclusivity** — Inspect all network requests issued by any Dashboard view during a complete session (experiment lookup, trial matrix, solver comparison, evidence report navigation, benchmark summary). Verify that all requests target SPEC-008 API endpoints only. No requests are issued to the OpenTelemetry Collector, Prometheus endpoint, or Grafana API.
+31. **Integration: Dashboard-to-API exclusivity** — Inspect all network requests issued by any Dashboard view during a complete session (experiment lookup, trial matrix, solver comparison, evidence report navigation, benchmark summary). Verify that all requests target SPEC-008 API endpoints only. No requests are issued to the OpenTelemetry Collector, Prometheus endpoint, or Grafana API.
 
 ---
 
@@ -930,17 +912,13 @@ When the user navigates between FR-4 and FR-9 within the same session, the imple
 
 ### OQ-5: Per-solver Quality Statistics Payload Dependency
 
-**Question:** FR-5 presents a per-solver quality statistics table with columns for mean, standard deviation, minimum, and maximum `hindsight_quality`, and eligible trial count. These columns are described as "derived from the QualityStatsAggregate entries in the summary payload." SPEC-020 FR-12 defines QualityStatsAggregate at the per-(problem, solver) scope. SPEC-020 FR-14 Artifact 3 defines `per_solver_summary` as containing outcome distribution totals and combined runtime statistics per solver, but does not include per-solver (cross-problem) quality aggregate fields. SPEC-020 FR-13 explicitly excludes cross-problem `hindsight_quality` aggregation. Does SPEC-020 FR-14 Artifact 3 provide per-solver quality aggregate fields (cross-problem mean, std dev, min, max `hindsight_quality`, eligible trial count), or does quality data exist only at the per-(problem, solver) scope?
+**Status: Resolved — Project Owner Decision, 2026-06-26**
 
-**Why it matters:** Constraint 3 prohibits the Dashboard from computing statistics independently. If per-solver quality aggregates are not present in the payload, the Dashboard cannot produce FR-5's quality statistics columns without aggregating across per-(problem, solver) entries — a prohibited operation. In that case, FR-5 must either remove the quality statistics columns or SPEC-020 must be amended to include per-solver quality aggregates in the ExperimentSummary artifact.
+**Decision:** Option 2 selected. SPEC-022 is amended to remove per-solver quality statistics columns from FR-5. SPEC-020, SPEC-008, and SPEC-007 are not amended.
 
-**Options:**
-1. Confirm that SPEC-020 FR-14 Artifact 3 includes per-solver quality aggregate fields (requires a SPEC-020 clarification or amendment to explicitly define these fields in the `per_solver_summary` or as a separate per-solver aggregate structure).
-2. Remove quality statistics columns (mean, std dev, min, max `hindsight_quality`, eligible trial count) from FR-5's per-solver table; retain runtime statistics and outcome distribution columns, which are confirmed present in `per_solver_summary`. Cross-solver quality comparisons remain available via the per-problem `cross_solver_comparison` ranking in FR-5 and the per-(problem, solver) table in FR-6.
+**Rationale:** SPEC-007 FR-7 establishes that `hindsight_quality` is dimensionally comparable only within the same routing problem; cross-problem comparison is not meaningful. SPEC-020 FR-13 correctly avoids cross-problem `hindsight_quality` aggregation. Per-solver (cross-problem) quality aggregates are not valid evidence. Adding them to SPEC-020 would introduce a computation that contradicts SPEC-007 FR-7. Quality comparison remains available at the correct scope: per-problem cross-solver ranking via `cross_solver_comparison` in FR-5, and per-(problem, solver) quality statistics via QualityStatsAggregates in FR-6.
 
-**Owner:** Project Owner decision on SPEC-020 scope. Resolution requires SPEC-020 clarification or amendment.
-
-**Blocking:** Blocking for FR-5 quality statistics column implementation. FR-5 runtime statistics, outcome distribution, cross-solver ranking, reproducibility annotation, and targeted execution note are not blocked.
+**Resolution:** FR-5 per-solver quality statistics table (mean, std dev, min, max `hindsight_quality`, eligible trial count) removed. FR-5 retains runtime statistics and outcome distribution from `per_solver_summary`, cross-solver ranking from `cross_solver_comparison`, reproducibility annotation, and targeted execution note. SPEC-020, SPEC-008, and SPEC-007 are unchanged.
 
 ---
 
@@ -976,7 +954,7 @@ When the user navigates between FR-4 and FR-9 within the same session, the imple
 - [ ] OQ-2 documented (technology stack)
 - [ ] OQ-3 documented (experiment list endpoint dependency)
 - [ ] OQ-4 documented (API base URL discovery)
-- [ ] OQ-5 documented (per-solver quality statistics payload dependency)
+- [x] OQ-5 documented and resolved (per-solver quality statistics payload dependency — Option B, quality columns removed from FR-5)
 
 ---
 
@@ -989,7 +967,7 @@ This feature is complete when:
 - OQ-2 resolved: technology stack and serving mechanism defined via ADR before implementation begins
 - OQ-3 resolved: either `GET /v1/experiments` is defined in a SPEC-008 amendment and the full experiment browser is implemented, or the entry-form fallback per FR-2 is in place
 - OQ-4 resolved: API base URL discovery mechanism defined
-- OQ-5 resolved: per-solver quality statistics payload confirmed in SPEC-020 FR-14 Artifact 3 or FR-5 quality statistics columns revised accordingly
+- OQ-5 resolved: FR-5 per-solver quality statistics columns removed (Project Owner Decision, 2026-06-26); quality comparison available via cross-solver ranking in FR-5 and per-(problem, solver) quality statistics in FR-6
 - The Dashboard accesses the API solely through SPEC-008 HTTP GET endpoints; no POST, PUT, PATCH, or DELETE requests are issued; no direct database, queue, or Worker access exists
 - The Trial Matrix (FR-4) renders without per-trial API calls; all cell data is derived from a single `GET /v1/experiments/{experiment_id}/trials` response
 - The Solver Comparison View (FR-5) derives all statistics from the SPEC-008 FR-23 payload without independent recomputation
