@@ -18,7 +18,7 @@
 
 **Superseded By:** None
 
-**Related ADRs:** ADR-002, ADR-003, ADR-006, ADR-009, ADR-012, ADR-013
+**Related ADRs:** ADR-002, ADR-006, ADR-009, ADR-012, ADR-013
 
 **Related Specs:** SPEC-001, SPEC-003, SPEC-005, SPEC-006, SPEC-007, SPEC-008, SPEC-009, SPEC-012, SPEC-016, SPEC-020
 
@@ -149,7 +149,7 @@ The Web UI provides a form for submitting a routing job via `POST /v1/jobs` (SPE
 
 | Field | Type | Required | Client-side check |
 |---|---|---|---|
-| `id` | Non-negative integer | Yes | Non-empty; parseable as non-negative integer; unique within form |
+| `id` | Non-negative integer | Yes | Non-empty; parseable as non-negative integer; duplicate-free within form (structural consistency aid to prevent malformed submissions; domain uniqueness is enforced by the API per SPEC-001 FR-4 and ADR-009) |
 | `latitude` | Decimal | Yes | Non-empty; parseable as a number |
 | `longitude` | Decimal | Yes | Non-empty; parseable as a number |
 | `demand` | Non-negative integer | Yes | Non-empty; parseable as non-negative integer |
@@ -293,7 +293,7 @@ The job dashboard requires a `GET /v1/jobs` list endpoint in the API. This endpo
 | Report | `report_available` | Visible link to the evidence report view (FR-7) when `true`; otherwise absent |
 
 **Auto-refresh:**
-The dashboard auto-refreshes at a configurable interval (default: 5 seconds) by re-querying the job list endpoint. Auto-refresh is active while the dashboard view is displayed and pauses or stops when the user navigates away.
+The dashboard auto-refreshes periodically by re-querying the job list endpoint. Auto-refresh is active while the dashboard view is displayed and pauses or stops when the user navigates away.
 
 **Job selection:**
 Each job row is interactive. Selecting a job navigates to the Job Detail View (FR-6) for that job.
@@ -337,7 +337,7 @@ The Web UI provides a detail view for a single job, identified by `job_id`. This
 Per SPEC-008 FR-9, `status = Completed` does not indicate solver success. When `status = Completed` and `solver_outcome` is `Infeasible`, `Timeout`, `Cancelled`, `Failed`, or `ContractViolation`, the view presents an explanatory note distinguishing the solver-level outcome from a Worker lifecycle failure. This is consistent with the SPEC-008 FR-9 caller guidance. A `solver_outcome = Failed` on a `Completed` job is distinct from `status = Failed`; the view must not conflate them.
 
 **Status polling:**
-For non-terminal jobs (`Pending`, `Processing`), the view auto-polls `GET /v1/jobs/{job_id}` at a configurable interval (default: 3 seconds). Polling continues until the job transitions to `Completed` or `Failed`, then stops. The display updates without a full page reload.
+For non-terminal jobs (`Pending`, `Processing`), the view auto-polls `GET /v1/jobs/{job_id}` periodically. Polling continues until the job transitions to `Completed` or `Failed`, then stops. The display updates without a full page reload.
 
 **Report access:**
 When `report_available = true`, the view displays a prominent link to the Evidence Report View (FR-7) for this job.
@@ -380,7 +380,7 @@ The Web UI fetches report metadata via `GET /v1/jobs/{job_id}/report` (SPEC-008 
 The Web UI fetches the report content via the `report_url` returned by discovery, which resolves to `GET /v1/reports/{report_id}` (SPEC-008 FR-13). The API serves the content with `Content-Type: text/html`.
 
 **In-browser rendering:**
-The HTML report content is rendered in the browser. The rendering mechanism is determined during implementation planning (OQ-2). The Web UI must not modify the report content. The Report Generator owns the report content; SPEC-008 FR-13 confirms the API does not transform it; the Web UI must similarly serve as a transparent renderer.
+The HTML report content is rendered in the browser. The rendering mechanism is an implementation planning decision. The Web UI must not modify the report content. The Report Generator owns the report content; SPEC-008 FR-13 confirms the API does not transform it; the Web UI must similarly serve as a transparent renderer.
 
 **Download option:**
 The user can save the HTML report file to disk. The download uses the report file served by the API without modification.
@@ -417,7 +417,7 @@ The Web UI provides read-only observation of experiments that were orchestrated 
 The experiment observation views are read-only. No write operations to experiment, trial, or benchmark records are performed by the Web UI.
 
 **Experiment lookup:**
-The user enters an `experiment_id` to access a specific experiment. No experiment list view is included at MVP scope (see OQ-3).
+The user enters an `experiment_id` to access a specific experiment. No experiment list view is included at MVP scope. No experiment list endpoint is currently defined in SPEC-008; experiment access is by identifier only, mirroring the job list dependency captured in OQ-1.
 
 ### FR-8.1: Experiment Status View
 
@@ -447,7 +447,7 @@ Navigation from the experiment status view:
 - Link to the experiment summary view (FR-8.3) when `status = Completed`
 
 **Auto-refresh:**
-For experiments in non-terminal states (`Created`, `Running`), the view auto-refreshes at a configurable interval (default: 10 seconds). Auto-refresh stops when `status = Completed` or `status = Failed`.
+For experiments in non-terminal states (`Created`, `Running`), the view auto-refreshes periodically. Auto-refresh stops when `status = Completed` or `status = Failed`.
 
 ### FR-8.2: Trial Results View
 
@@ -515,12 +515,8 @@ All API error responses (SPEC-008 FR-14 format) are surfaced to the user in a co
 | 400 | `VALIDATION_ERROR` | Display each `field_errors` entry; associate with the corresponding form field where possible; show a summary for errors without a field mapping |
 | 400 | `INVALID_SCHEDULER_CONFIG` | Display `field_errors` entries on the scheduler configuration creation form |
 | 400 | `SCHEDULER_CONFIG_NOT_FOUND` | Display on the job submission form at the scheduler config field |
-| 400 | `PROBLEM_NOT_FOUND` | Display on the job submission form |
-| 400 | `EXPERIMENT_CONFIG_INVALID` | Display `field_errors` entries; surface all unresolvable identifiers listed |
-| 400 | `BENCHMARK_CONFIG_INVALID` | Display `field_errors` entries |
 | 404 | Any | Contextual not-found message identifying the resource type and ID |
 | 409 | `JOB_ALREADY_TERMINAL` | "This job has already reached a terminal state; cancellation is not applicable" |
-| 409 | `BENCHMARK_ALREADY_EXISTS` | "A benchmark with this ID already exists" |
 | 409 | Any other | Display the `message` field from the SPEC-008 FR-14 error body |
 | 500 | `INTERNAL_ERROR` | "An unexpected server error occurred. Please try again or contact the system operator." Reference the `request_id` for support correlation. |
 | Network error | — | "Unable to reach the Daedalus API. Verify the API is running and the URL is correct." |
@@ -584,7 +580,7 @@ API calls issued by the Web UI to the API will produce `job.submit`, `api.status
 3. The API is configured to emit Cross-Origin Resource Sharing (CORS) headers permitting requests from the Web UI's origin. Without CORS headers, browser security policy will block API calls from the Web UI. This is a required API configuration change (see Architectural Impact).
 4. HTML evidence reports produced by the Report Generator (SPEC-009) are well-formed HTML and render correctly in a modern browser without transformation.
 5. The SPEC-008 FR-10 `GET /v1/scheduler-configs` response list places the default configuration as the first entry. The Web UI relies on this ordering to identify the default configuration for visual distinction.
-6. All experiment state observable by the Web UI (FR-8) was produced by the CLI (SPEC-016). The Web UI has no mechanism to create experiment state.
+6. All experiment state is owned by the API (ADR-012 Decision 2). At MVP scope, the CLI is the expected experiment orchestration executor (ADR-012 Decision 1). The Web UI displays whatever experiment state is present in the API regardless of how it was produced. The Web UI has no mechanism to create experiment state.
 7. The Docker Compose environment is the expected deployment context. The Web UI is accessible at a browser-reachable address within that environment.
 
 ---
@@ -597,7 +593,7 @@ API calls issued by the Web UI to the API will produce `job.submit`, `api.status
 4. The Web UI must not modify, transform, or augment HTML evidence report content before rendering. The report is the Report Generator's artifact; the Web UI is a transparent renderer.
 5. The Web UI must not fabricate, regenerate, or alter `request_id` values from SPEC-008 FR-14 error responses; these are propagated unchanged per FR-9.
 6. The Web UI technology stack is governed by a separate ADR. No implementation technology is prescribed by this specification.
-7. The Web UI serving mechanism and Docker Compose integration are governed by OQ-2 and OQ-3. No container topology is prescribed by this specification.
+7. The Web UI technology stack is governed by OQ-2. The Web UI serving mechanism and Docker Compose integration are governed by OQ-3. No container topology is prescribed by this specification.
 
 ---
 
@@ -708,7 +704,7 @@ API calls issued by the Web UI to the API will produce `job.submit`, `api.status
 ### Auto-Refresh API Error
 
 **Condition:** An auto-refresh poll (`GET /v1/jobs/{job_id}`, `GET /v1/experiments/{experiment_id}`) returns a non-200 response or fails with a network error.
-**Behavior:** The error is surfaced per FR-9. Auto-refresh may pause or retry at the next interval depending on implementation planning (OQ-2). The last successfully received data remains displayed.
+**Behavior:** The error is surfaced per FR-9. Auto-refresh may pause or retry at the next attempt depending on the implementation. The last successfully received data remains displayed.
 **Recovery:** If the error is transient, the next successful poll restores the current state. If persistent, the user must reload.
 
 ---
@@ -717,7 +713,7 @@ API calls issued by the Web UI to the API will produce `job.submit`, `api.status
 
 | Component | Impact |
 |---|---|
-| **API** (SPEC-008) | Requires CORS header configuration. Browser security policy requires the API to emit `Access-Control-Allow-Origin` and related CORS headers for requests from the Web UI's browser origin. This is a required deployment configuration change; it does not modify any API endpoint contract or introduce new endpoints. CORS configuration scope is defined by OQ-2 and OQ-3 (serving mechanism determines the origin). |
+| **API** (SPEC-008) | Requires CORS header configuration. Browser security policy requires the API to emit `Access-Control-Allow-Origin` and related CORS headers for requests from the Web UI's browser origin. This is a required deployment configuration change; it does not modify any API endpoint contract or introduce new endpoints. CORS configuration scope is defined by OQ-3 (serving mechanism determines the origin). |
 | **Web UI** | New component. Consumes SPEC-008 endpoints from a browser context. No existing component behavior is modified. |
 | **Docker Compose topology** | New service entry required when the Web UI is containerized. The exact topology addition depends on OQ-3 (serving mechanism). The API's published port must remain accessible from the browser. |
 | **Worker** | None. The Web UI has no direct interaction with the Worker. |
@@ -792,7 +788,11 @@ This specification requires the API to be configured to emit CORS response heade
 
 29. **Unit: Error display — no internal details** — An HTTP 500 response body does not result in stack traces, connection strings, or internal component names appearing in the rendered UI.
 
-30. **Unit: CORS — API calls reach the API** — With CORS headers configured on the API, a browser-issued `POST /v1/jobs` from the Web UI origin reaches the API and returns HTTP 202 without being blocked by browser same-origin policy.
+30. **Integration: CORS — API calls reach the API** — With CORS headers configured on the API, a browser-issued `POST /v1/jobs` from the Web UI origin reaches the API and returns HTTP 202 without being blocked by browser same-origin policy.
+
+31. **Integration: Dashboard auto-refresh stops on navigation** — While the job dashboard (FR-5) is auto-refreshing, navigating away from the dashboard view stops further polling requests against the job list endpoint; no additional calls are issued after navigation.
+
+32. **Integration: Experiment polling stops on terminal state** — For an experiment with auto-refresh active across FR-8.1 and FR-8.2, when the experiment transitions to `status = Completed` or `status = Failed`, the auto-refresh stops issuing further requests to `GET /v1/experiments/{experiment_id}` and `GET /v1/experiments/{experiment_id}/trials`.
 
 ---
 
@@ -819,6 +819,8 @@ All user input collected by the Web UI is transmitted to the API as HTTP request
 
 **Report rendering:**
 HTML evidence reports are produced by the Report Generator (SPEC-009), served by the API (SPEC-008 FR-13), and rendered by the browser. The report content is authored by the system, not by untrusted user input. The Web UI must not inject user-supplied content into rendered report HTML.
+
+When report content is rendered in an embedded frame within the Web UI page, the frame must apply appropriate browser sandboxing to restrict script execution, form submission, and top-level navigation originating from report content. The specific sandboxing policy is an implementation planning decision resolved alongside OQ-2. SPEC-009 governs safe generation of report HTML content and is the authority for what the report may contain; the Web UI governs the rendering container and is responsible for the sandbox policy applied to it.
 
 **CORS configuration:**
 The API must be configured to emit CORS headers permitting requests from the Web UI's origin. The permitted origin should be scoped narrowly to the Web UI's serving address within the Docker Compose environment. Wildcard `*` CORS is acceptable only in a fully trusted local development environment; it must not be used in any environment with network exposure.
@@ -902,6 +904,23 @@ HTML report file sizes are bounded by SPEC-009 report content. Reports are serve
 
 ---
 
+### OQ-4: API Base URL Discovery
+
+**Question:** How does the Web UI browser application discover the Daedalus API base URL at runtime?
+
+**Why it matters:** The Web UI must know the API base URL to issue any API request. Assumption 1 states the default is `http://localhost:5000`, but defines no mechanism by which this URL is communicated to the browser application. For a browser-hosted application, the URL cannot be read from environment variables at runtime as a CLI would; it must be embedded at build time, fetched from a well-known location, or derived from the current origin. The correct mechanism depends on the serving approach resolved in OQ-3: if the Web UI is served from the API container at a sub-path (OQ-3 Option 2), the API URL is the same origin and no external configuration is required; if the Web UI is served separately (OQ-3 Options 1 or 3), the API URL must be communicated to the browser application through a defined channel.
+
+**Options under consideration:**
+1. Build-time environment variable (e.g., `VITE_API_BASE_URL` or equivalent): the API URL is baked into the static build artifact at build time. Simple; requires a rebuild to change the URL.
+2. Runtime configuration file: a `config.json` served alongside the static assets at a fixed relative path; the browser fetches it on startup before issuing API calls. Allows URL reconfiguration without a rebuild.
+3. Same-origin derivation: the Web UI derives the API URL from `window.location.origin`. Only applicable under OQ-3 Option 2 (serving from the API container).
+
+**Owner:** Resolution is a dependency of OQ-3. The correct mechanism cannot be selected until the serving approach is known. The selection may be addressed within the same ADR that resolves OQ-3.
+
+**Blocking:** Not blocking for Draft or Proposed spec status. Blocking for Web UI implementation.
+
+---
+
 # Acceptance Checklist
 
 - [ ] Problem is clearly defined
@@ -931,6 +950,7 @@ HTML report file sizes are bounded by SPEC-009 report content. Reports are serve
 - [ ] OQ-1 documented (job list endpoint dependency)
 - [ ] OQ-2 documented (technology stack)
 - [ ] OQ-3 documented (serving mechanism and CORS)
+- [ ] OQ-4 documented (API base URL discovery)
 
 ---
 
@@ -942,6 +962,7 @@ This feature is complete when:
 - OQ-1 resolved: either `GET /v1/jobs` is defined in a SPEC-008 amendment and the full dashboard is implemented, or the fallback job-ID lookup form is implemented per FR-5 fallback behavior
 - OQ-2 resolved: Web UI technology stack is selected via ADR before implementation begins
 - OQ-3 resolved: serving mechanism and Docker Compose integration are defined; CORS configuration on the API is applied and verified
+- OQ-4 resolved: API base URL discovery mechanism is defined; the Web UI locates the API at runtime without manual configuration in standard deployment
 - The Web UI accesses the API solely through SPEC-008 HTTP endpoints; no direct database, queue, or Worker access exists
 - Client-side structural validation is in place; no SPEC-001 domain validation is duplicated in the Web UI
 - The job submission form (FR-2) produces correct SPEC-008 FR-2 JSON request bodies for all field combinations (with and without `scheduler_config_id`, with and without `backend_id`)
