@@ -280,7 +280,7 @@ Else:
 
 **Computational cost:** O(N^2) in stop count, requiring up to N(N−1)/2 Haversine evaluations. For Large-class problems (76+ stops per SPEC-001 FR-7), this is approximately 2,850 evaluations at 76 stops. The Core already computes pairwise Haversine distances for solver use (SPEC-001 FR-5, FR-14); implementations may reuse these distances rather than recomputing them.
 
-**Determinism:** Haversine uses transcendental functions (cos, sin, sqrt, asin). These produce semantically equivalent results under IEEE 754 double precision across conforming C++17 toolchains (ADR-010 Decision 2, Decision 6). Bitwise identical results are not guaranteed and are not required.
+**Determinism:** Haversine uses transcendental functions (cos, sin, sqrt, asin). These produce semantically equivalent results under IEEE 754 double precision across conforming C++20 toolchains (ADR-010 Decision 2, Decision 6). Bitwise identical results are not guaranteed and are not required.
 
 **Defined in:** SPEC-010
 
@@ -442,7 +442,7 @@ Feature extraction must be deterministic. Given the same routing problem input, 
 **Determinism requirements:**
 - Feature computation uses only inputs from the routing problem. No external state, configuration, time-of-day, process ID, or random source is used.
 - Floating-point arithmetic in feature computation uses IEEE 754 double precision. Extended precision is prohibited per ADR-010 Decision 6.
-- Haversine distance computations (used in FR-3.5 geographic_compactness) produce semantically equivalent results across conforming C++17 toolchains (ADR-010 Decision 2). Bitwise identical results for transcendental function outputs are not required and not guaranteed.
+- Haversine distance computations (used in FR-3.5 geographic_compactness) produce semantically equivalent results across conforming C++20 toolchains (ADR-010 Decision 2). Bitwise identical results for transcendental function outputs are not required and not guaranteed.
 
 **Stochastic computation:** Feature extraction does not use any PRNG or stochastic algorithm. ADR-010's PRNG and distribution sampling requirements do not apply to feature extraction, which is purely deterministic arithmetic. The prohibitions in ADR-010 Decision 4 on prohibited entropy sources apply: no time, process ID, or OS random source may influence feature computation.
 

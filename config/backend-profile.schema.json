@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "backend-profile.schema.json",
+  "title": "Backend Capability Profile",
+  "description": "Complete backend descriptor consumed by the Scheduler registry at Worker startup (SPEC-003 FR-4, SPEC-011 FR-3/FR-4).",
+  "type": "object",
+  "required": [
+    "backend_id",
+    "display_name",
+    "backend_category",
+    "implementation_language",
+    "determinism_class",
+    "specification_version",
+    "supported_size_classes",
+    "supports_time_windows",
+    "supports_capacity_constraints",
+    "latency_profile",
+    "quality_profile",
+    "cost_profile",
+    "is_provisional",
+    "supported_contract_version"
+  ],
+  "properties": {
+    "backend_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Stable unique identifier in kebab-case (SPEC-011 FR-3)."
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable backend name for evidence report display."
+    },
+    "backend_category": {
+      "type": "string",
+      "enum": ["classical_deterministic", "quantum_inspired_stochastic", "quantum_hardware"],
+      "description": "Solver category per SPEC-011 FR-2.1."
+    },
+    "implementation_language": {
+      "type": "string",
+      "enum": ["C++", "Python"],
+      "description": "Primary implementation language."
+    },
+    "determinism_class": {
+      "type": "string",
+      "enum": ["Deterministic", "Stochastic (reproducible)", "Stochastic (non-reproducible)"],
+      "description": "Reproducibility classification per SPEC-011 FR-2.2."
+    },
+    "specification_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of the backend specification document."
+    },
+    "supported_size_classes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["Small", "Medium", "Large"]
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Set of problem size classes this backend supports (SPEC-003 FR-4)."
+    },
+    "supports_time_windows": {
+      "type": "boolean",
+      "description": "True if the backend incorporates time window constraints during route construction."
+    },
+    "supports_capacity_constraints": {
+      "type": "boolean",
+      "description": "True if the backend enforces per-vehicle capacity constraints."
+    },
+    "latency_profile": {
+      "type": "object",
+      "description": "Estimated execution latency in seconds per size class (SPEC-003 FR-4). Use the string 'TBD' when empirical measurement is not yet available.",
+      "properties": {
+        "Small": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {"type": "string", "const": "TBD"}
+          ]
+        },
+        "Medium": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {"type": "string", "const": "TBD"}
+          ]
+        },
+        "Large": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {"type": "string", "const": "TBD"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "quality_profile": {
+      "type": "string",
+      "enum": ["Baseline", "Competitive", "Near-Optimal"],
+      "description": "Solution quality tier relative to optimum (SPEC-003 FR-4)."
+    },
+    "cost_profile": {
+      "oneOf": [
+        {"type": "number", "exclusiveMinimum": 0},
+        {"type": "string", "const": "TBD"}
+      ],
+      "description": "Dimensionless relative cost unit used by Scheduler BudgetCapped filtering (SPEC-003 FR-5). Use 'TBD' when cost depends on provider pricing (e.g., quantum_hardware backends)."
+    },
+    "is_provisional": {
+      "type": "boolean",
+      "description": "True until empirical measurement validates latency_profile and quality_profile (SPEC-011 FR-4.2)."
+    },
+    "supported_contract_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "SolverContract version this backend targets (SPEC-004)."
+    }
+  },
+  "additionalProperties": false
+}

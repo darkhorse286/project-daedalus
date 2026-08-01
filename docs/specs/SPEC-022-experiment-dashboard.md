@@ -855,31 +855,19 @@ When the user navigates between FR-4 and FR-9 within the same session, the imple
 
 # Open Questions
 
-### OQ-1: Relationship to SPEC-021 Web UI
+### OQ-1: Relationship to SPEC-021 Web UI — RESOLVED (ADR-014)
 
-**Question:** Is the Experiment Dashboard implemented as a set of additional views within the SPEC-021 Web UI application, or as a separately deployed browser application?
+**Resolution:** The Experiment Dashboard is implemented as a set of additional views within the SPEC-021 Web UI application (Option 1). SPEC-021 and SPEC-022 share one build artifact, one Docker Compose `web-ui` service, one React application tree, and one TanStack Query API client instance. No additional CORS configuration is required. See ADR-014 Decision 1.
 
-**Why it matters:** The answer determines deployment unit boundaries (Docker Compose service, build pipeline), CORS configuration (same origin vs. separate), and whether a separate System Context node is added to architecture.md. It also determines whether the FR-2 experiment browser reuses FR-5 of SPEC-021 or stands alone.
-
-**Options under consideration:**
-1. **Part of SPEC-021:** Dashboard views are added to the Web UI application. Single deployment unit, same origin, shared technology stack. No additional CORS configuration.
-2. **Separate application:** Dashboard has its own deployment unit. Different origin from the Web UI; API CORS headers must permit both origins.
-
-**Owner:** Project Owner decision. The ADR governing SPEC-021 OQ-2 (technology stack) should address this relationship simultaneously. That ADR must explicitly enumerate SPEC-022 OQ-1 and OQ-2 as governed questions; if it does not, SPEC-022 requires a separate ADR for the deployment model decision.
-
-**Blocking:** Blocking for implementation planning. Not blocking for Draft status.
+**No further action required.**
 
 ---
 
-### OQ-2: Technology Stack and Serving Mechanism
+### OQ-2: Technology Stack and Serving Mechanism — RESOLVED (ADR-014)
 
-**Question:** What browser-side technology and serving mechanism are used for the Dashboard?
+**Resolution:** Same as SPEC-021 OQ-2 and OQ-3, by virtue of OQ-1 selecting Option 1. Dashboard views are implemented within the unified React/TypeScript/Vite application with shadcn/ui, TanStack Table, TanStack Query, and React Router, served by the shared `web-ui` Docker Compose container at `http://localhost:3000`. See ADR-014 Decisions 1, 2, 3, 4, and 5.
 
-**Why it matters:** If the Dashboard is part of the SPEC-021 Web UI (OQ-1 Option 1), this question is answered by SPEC-021 OQ-2. If implemented separately, an independent ADR is required.
-
-**Owner:** Resolved by the ADR governing SPEC-021 OQ-2 if OQ-1 selects Option 1; that ADR must explicitly enumerate SPEC-022 OQ-2 as a governed question for this resolution to apply. If it does not, or if OQ-1 selects Option 2, a separate ADR is required.
-
-**Blocking:** Not blocking for Draft status. Blocking for implementation.
+**No further action required.**
 
 ---
 
@@ -899,15 +887,11 @@ When the user navigates between FR-4 and FR-9 within the same session, the imple
 
 ---
 
-### OQ-4: API Base URL Discovery
+### OQ-4: API Base URL Discovery — RESOLVED (ADR-014)
 
-**Question:** How does the Dashboard browser application discover the Daedalus API base URL at runtime?
+**Resolution:** Same as SPEC-021 OQ-4, by virtue of OQ-1 selecting Option 1. Build-time environment variable `VITE_API_BASE_URL`, defaulting to `http://localhost:5000`. The Dashboard shares the same `import.meta.env.VITE_API_BASE_URL` value embedded in the unified build artifact. See ADR-014 Decision 6.
 
-**Why it matters:** Same as SPEC-021 OQ-4. If the Dashboard is implemented as part of the SPEC-021 Web UI (OQ-1 Option 1), this question is answered by SPEC-021 OQ-4. If implemented separately, the same options apply: build-time environment variable, runtime configuration file, or same-origin derivation.
-
-**Owner:** Resolved by SPEC-021 OQ-4 if OQ-1 selects Option 1; otherwise addressed by the same ADR governing OQ-2.
-
-**Blocking:** Not blocking for Draft status. Blocking for implementation.
+**No further action required.**
 
 ---
 

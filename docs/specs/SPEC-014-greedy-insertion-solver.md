@@ -315,9 +315,9 @@ The greedy insertion heuristic is a deterministic construction algorithm. It con
 
 **Execution seed usage:** The `execution_seed` field in the SolverRequest (SPEC-004 FR-2) is accepted without error, as required by SPEC-004 FR-11.5 for all backends regardless of classification. The field is not used in any computation. The algorithm's output is determined entirely by the routing problem's coordinates, demands, vehicle count, capacity per vehicle, and the four-level deterministic selection rule defined in FR-4.
 
-**Determinism within a conforming execution environment:** This backend produces identical route plans for identical routing problem inputs on every invocation within a given conforming C++17 execution environment, regardless of `execution_seed` value, invocation count, or process state.
+**Determinism within a conforming execution environment:** This backend produces identical route plans for identical routing problem inputs on every invocation within a given conforming C++20 execution environment, regardless of `execution_seed` value, invocation count, or process state.
 
-**Cross-platform reproducibility:** Route plans produced from identical inputs are semantically equivalent across conforming C++17 toolchains per ADR-010 Decision 2. Insertion cost computation uses transcendental functions (sin, cos, asin, sqrt) through Haversine distance. Per ADR-010 Decision 2, values derived from transcendental functions satisfy semantic equivalence within IEEE 754 double precision but are not required to be bitwise identical across platforms. The reproducibility guarantee for this backend follows ADR-010's semantic equivalence scope.
+**Cross-platform reproducibility:** Route plans produced from identical inputs are semantically equivalent across conforming C++20 toolchains per ADR-010 Decision 2. Insertion cost computation uses transcendental functions (sin, cos, asin, sqrt) through Haversine distance. Per ADR-010 Decision 2, values derived from transcendental functions satisfy semantic equivalence within IEEE 754 double precision but are not required to be bitwise identical across platforms. The reproducibility guarantee for this backend follows ADR-010's semantic equivalence scope.
 
 **Prohibited entropy sources:** No entropy source is used in any part of this backend's execution. System time, process ID, OS random sources (`/dev/urandom`, `getrandom(2)`, `std::random_device`), and hardware entropy are not consulted during route construction, candidate evaluation, insertion cost computation, tie-breaking, or any other algorithmic step.
 
@@ -823,8 +823,8 @@ Do not invent specific latency targets. The areas above require measurement duri
 **Backend-Specific Acceptance Criteria:**
 
 - [ ] The insertion cost formula is precisely defined for both empty and non-empty routes, including depot boundary handling at position 0 and position K
-- [ ] The four-level selection rule is sufficiently precise that two independent C++17 implementations produce identical selections for any candidate set
-- [ ] The algorithm definition is sufficiently precise that two independent implementations produce semantically equivalent route plans for identical inputs within a conforming C++17 execution environment
+- [ ] The four-level selection rule is sufficiently precise that two independent C++20 implementations produce identical selections for any candidate set
+- [ ] The algorithm definition is sufficiently precise that two independent implementations produce semantically equivalent route plans for identical inputs within a conforming C++20 execution environment
 - [ ] The degenerate no-feasible-insertion failure is distinguished from the nearest-neighbor degenerate case and its mid-construction occurrence is documented
 - [ ] `gi.insertion_evaluations` and `gi.capacity_rejections` counting rules are precisely distinguished from each other
 - [ ] The specification does not define any Scheduler, Worker, or Core behavior

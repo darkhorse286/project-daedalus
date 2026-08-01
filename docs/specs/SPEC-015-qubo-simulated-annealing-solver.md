@@ -612,7 +612,7 @@ SA's optimization capability scales with the iteration budget relative to the so
 
 5. The PCG64 stream constant `0xcbbb9d5dc90c2383` is independent from the stream constant used by SPEC-002 (the Synthetic Workload Generator). Independence prevents correlation between generated problem instances and solver PRNG sequences when the same problem seed drives both. OQ-1 has been resolved: at Proposed time, SPEC-002 has not yet frozen its stream constant, so no collision exists. PCG64's design guarantees independence between any two instances with distinct odd-valued stream constants; future PCG64-using components must select constants distinct from `0xcbbb9d5dc90c2383`.
 
-6. All MVP backends are executed within the same C++17 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
+6. All MVP backends are executed within the same C++20 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
 
 7. The PCG64 reference implementation (pcg-random.org or equivalent header-only library) is adoptable as a project dependency without licensing conflict, consistent with ADR-010 Assumptions.
 

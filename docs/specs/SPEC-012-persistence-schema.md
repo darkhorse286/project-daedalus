@@ -37,7 +37,7 @@ Without a persistence schema specification:
 - The `uint64` storage pattern for `seed` and `execution_seed` has no defined representation in PostgreSQL.
 - The two-phase write pattern for `decision_records` (pre-solver and post-quality-evaluation) has no authoritative description.
 - No specification defines the initial database schema required for development environment initialization.
-- The schema initialization requirement from ADR-004 (migration tooling deferred) creates an implicit dependency that SPEC-012 must bound.
+- The schema initialization requirement from ADR-004 creates an implicit dependency that SPEC-012 must bound. Migration tooling is now selected: DbUp with versioned SQL files per Phase 0 Decision 3.
 
 SPEC-012 resolves these gaps. It defines the authoritative physical persistence model, determines open questions about persistence scope, establishes read/write ownership per table, and provides the schema definition required for implementation to begin.
 
@@ -135,12 +135,12 @@ Backend capability profiles (SPEC-003 FR-4, SPEC-011 FR-4) describe backend algo
 
 **What is persisted instead:** The `backend_id` string appears in `decision_records.selected_backend_id`, `decision_records.candidate_scores` (JSONB), and `solver_run_records.backend_id`. These identifiers provide sufficient traceability to the backend specifications without requiring a separate capability profile table.
 
-**This determination does not resolve SPEC-003 OQ-2.** The registration mechanism (how capability profiles enter the Scheduler's runtime registry) remains unresolved and is not defined by SPEC-012. The determination here is narrow: PostgreSQL is not the registration store for capability profiles, regardless of which mechanism SPEC-003 OQ-2 selects.
+**This determination is consistent with the SPEC-003 OQ-2 resolution.** OQ-2 was resolved by Phase 0 Decision 5: capability profiles are stored as JSON files in `config/backends/`, loaded by the Worker at startup into an immutable in-memory registry. PostgreSQL is confirmed as not the registration store.
 
 **Acceptance Criteria:**
 - No `backend_capability_profiles` table appears in the SPEC-012 schema
 - Every required `backend_id` reference in evidence records is satisfiable through the tables defined in FR-4 through FR-11
-- SPEC-003 OQ-2 is explicitly not resolved by this determination
+- SPEC-003 OQ-2 resolution (JSON files, Phase 0 Decision 5) confirms this determination
 
 ---
 
@@ -293,7 +293,7 @@ CHECK (objective_mode IN (
 
 **FR-5.3: Default configuration seeding:**
 
-The default scheduler configuration (SPEC-003 FR-14: `Balanced` mode with equal weights) must be present in `scheduler_configs` before the API accepts its first request. It is inserted as part of schema initialization or API startup logic using ON CONFLICT DO NOTHING semantics to make the seed idempotent. See OQ-1 for the default config UUID stability mechanism.
+The default scheduler configuration (SPEC-003 FR-14: `Balanced` mode with equal weights) must be present in `scheduler_configs` before the API accepts its first request. It is inserted as part of schema initialization using ON CONFLICT DO NOTHING semantics to make the seed idempotent. The `scheduler_config_id` for the default configuration is the deterministic UUIDv5 value `2f5ce394-c4e4-5324-b842-f1ff47aafc68` (Phase 0 Decision 4 — OQ-1 resolved).
 
 **Immutability:** `scheduler_configs` rows are not updated or deleted after creation at MVP scope (SPEC-008 Non-Requirements).
 
@@ -871,7 +871,7 @@ The API may write `cancellation_requested = true` to the `jobs` table while the 
 ### FR-14: Schema Initialization
 
 **Description:**
-Defines the initial database schema required for MVP development environment startup. ADR-004 defers schema migration tooling selection; until that selection is made, schema initialization is a DDL-script-based procedure applied once at environment creation.
+Defines the initial database schema required for MVP development environment startup. Schema migrations are managed by DbUp with versioned SQL files in `infrastructure/postgres/migrations/` applied by a dedicated migration runner (Phase 0 Decision 3 — OQ-2 resolved). The initial schema initialization is a DDL-script-based procedure applied once at environment creation.
 
 **FR-14.1: Schema components:**
 
@@ -900,7 +900,7 @@ Tables must be created in dependency order to satisfy FK constraints:
 
 **FR-14.3: Schema version visibility:**
 
-SPEC-012 does not define a schema_versions table or migration tracking table. ADR-004 explicitly defers migration tooling. Schema version visibility at MVP scope is provided by this specification document as the authoritative schema source, and by the DDL script applied at initialization as an implementation planning artifact. A schema_versions table is deferred to the migration tooling selection (OQ-2).
+SPEC-012 does not define a schema_versions table. DbUp (Phase 0 Decision 3) maintains an applied-migrations journal table in PostgreSQL (`SchemaVersions` by default). Schema version visibility at MVP scope is provided by this specification document as the authoritative schema source, by the DDL initialization script, and by the DbUp journal table.
 
 **FR-14.4: Initialization idempotency:**
 
@@ -910,7 +910,7 @@ The schema initialization procedure must be safe to re-run. All CREATE TABLE sta
 - Tables are created in the dependency order defined in FR-14.2
 - The default scheduler configuration is present before the API accepts any request
 - The schema initialization procedure is idempotent
-- No migration tooling is selected or configured by this specification
+- Migration tooling (DbUp) is configured per Phase 0 Decision 3; the initial DDL script is the schema baseline
 
 ---
 
@@ -1468,14 +1468,14 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 - SPEC-012 does not define table partitioning, tablespace assignment, or sharding strategies
 - SPEC-012 does not define replication topology or standby configuration
 - SPEC-012 does not define backup or recovery procedures
-- SPEC-012 does not define migration tooling selection or schema evolution governance (ADR-004 defers this)
-- SPEC-012 does not define a schema versions table or migration tracking mechanism
+- SPEC-012 does not define DbUp configuration details or migration file content; those are implementation planning artifacts in `infrastructure/postgres/migrations/`
+- SPEC-012 does not define schema evolution beyond the initial DDL; all changes after initial creation are managed by DbUp versioned SQL files (Phase 0 Decision 3)
 - SPEC-012 does not define production operational runbooks or database administration procedures
 - SPEC-012 does not define the RabbitMQ queue message format (owned by SPEC-008 FR-5 and ADR-003)
 - SPEC-012 does not define the report volume directory structure beyond noting that `file_path` is the authoritative reference (SPEC-009 FR-7 owns that definition)
 - SPEC-012 does not define evidence record semantics; those remain owned by SPEC-006
 - SPEC-012 does not define retention or deletion semantics for `routing_problems`; that authority belongs exclusively to SPEC-001 (FR-16.4)
-- SPEC-012 does not resolve SPEC-003 OQ-2 (capability profile registration mechanism)
+- SPEC-012 does not define the capability profile registry; that is owned by the Worker per Phase 0 Decision 5 (SPEC-003 OQ-2 resolved)
 
 ---
 
@@ -1487,7 +1487,7 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 4. All UUID values are generated by the creating component (API or Worker) before persistence. PostgreSQL does not generate UUIDs; the application layer supplies them on every write.
 5. The Worker and API connect to the same PostgreSQL instance. No connection routing or read replica differentiation is applied at MVP scope.
 6. The report volume is filesystem storage mounted in the Worker and API containers. Its existence and path are infrastructure configuration. SPEC-012 references report file paths via `report_metadata_records.file_path`; it does not define the volume mount mechanism.
-7. SPEC-003 OQ-2 (capability profile registration mechanism) will be resolved before any backend is registered and before Worker implementation begins. SPEC-012 FR-2's determination (no PostgreSQL table for capability profiles) does not depend on which mechanism SPEC-003 OQ-2 selects.
+7. SPEC-003 OQ-2 (capability profile registration mechanism) is resolved: JSON files in `config/backends/` loaded by the Worker at startup (Phase 0 Decision 5). SPEC-012 FR-2's determination (no PostgreSQL table for capability profiles) is confirmed by this resolution.
 8. `stops` JSONB in `routing_problems` is not queried at the individual stop level at MVP scope. Future analytics requirements may require normalization into a `routing_problem_stops` table; that is post-MVP work.
 9. `problem_size_class` thresholds (SPEC-001 FR-7: Small = 1-25 stops, Medium = 26-75, Large = 76+) are stable within MVP scope. Changes to these thresholds do not require a SPEC-012 schema change; they affect feature computation (SPEC-010) and JSONB values stored in `workload_features_snapshot`.
 10. `routing_problems` rows are retained indefinitely with no deletion or archiving mechanism at MVP scope, per SPEC-001 Non-Requirements. SPEC-012 FR-16.1's evidence-retention deletion order does not include `routing_problems` on this basis.
@@ -1497,13 +1497,13 @@ Stores the benchmark summary artifact (SPEC-020 FR-14 Artifact 4) for each `benc
 # Constraints
 
 1. All persistence must use PostgreSQL per ADR-004. No additional durable stores are introduced.
-2. Schema must be initializable from a DDL script without migration tooling (ADR-004 migration tooling deferred).
+2. Schema must be initializable from a DDL script at initial environment creation. Subsequent changes use DbUp versioned SQL files (Phase 0 Decision 3).
 3. `execution_seed` must be stored only in `solver_run_records` and must never appear in log events, API responses, report content, or trace span attributes (SPEC-005 Security Considerations; SPEC-006 FR-6.4; ADR-010).
 4. All Worker-written tables must support `job_id`-keyed upsert for idempotency under at-least-once delivery (SPEC-006 FR-2.2, SPEC-005 FR-14).
 5. FK constraints must not use CASCADE DELETE; deletion must be explicit and ordered per FR-16.1.
 6. `uint64` values (`seed`, `execution_seed`) are stored as `bigint` using two's complement bit-identical representation per FR-4.3. This convention must be applied consistently by every component performing the conversion (the API and the Worker), regardless of which database client library each uses. Specific driver mechanisms are an implementation planning concern (FR-4.3 Implementation Planning Note).
 7. `stops` JSONB in `routing_problems` is the only denormalized stop representation at MVP scope (FR-4.4). Individual stop normalization is deferred to post-MVP.
-8. Backend capability profiles are not persisted in PostgreSQL (FR-2). If SPEC-003 OQ-2 resolves to a database-backed registry, SPEC-012 must be revised.
+8. Backend capability profiles are not persisted in PostgreSQL (FR-2). SPEC-003 OQ-2 resolved to a JSON file-based registry (Phase 0 Decision 5); no database table is required.
 9. Experiment tables (`benchmark_manifests`, `experiments`, `experiment_trials`, `experiment_artifacts`, `benchmark_summaries`) are written exclusively by the API. The Worker must not read or write any experiment table (ADR-012 Decision 4).
 10. The `jobs` table must not receive an `experiment_id` column. Experiment-to-job linkage is held in `experiment_trials.job_id` → `jobs`, not in the `jobs` record. This preserves Worker experiment-unawareness (ADR-012 Decision 4).
 
@@ -1757,7 +1757,7 @@ No specific latency targets are defined for persistence operations at this stage
 
 - **SPEC-011 `Blocks` field:** SPEC-011 metadata lists SPEC-012, SPEC-013, and SPEC-014 as the blocked individual backend solver specifications. SPEC-012 is now the Persistence Schema specification. SPEC-011's `Blocks` field should be updated to reference the correct spec IDs for the three backend solver specifications (to be determined when those specs are assigned IDs).
 
-- **ADR-004 (PostgreSQL Persistence):** ADR-004 defers schema migration tooling selection. SPEC-012 OQ-2 surfaces this as a blocking implementation planning item. ADR-004 should reference SPEC-012 as the specification that defines the schema requiring migration tooling.
+- **ADR-004 (PostgreSQL Persistence):** Schema migration tooling is resolved by Phase 0 Decision 3: DbUp with versioned SQL in `infrastructure/postgres/migrations/`. ADR-004 should reference SPEC-012 as the specification that defines the schema and Phase 0 Decision 3 as the migration tooling decision.
 
 - **docs/architecture.md:** The runtime flow description and required OTel spans list are consistent with the read/write ownership model defined in FR-15. No changes to architecture.md are required.
 
@@ -1775,32 +1775,17 @@ No specific latency targets are defined for persistence operations at this stage
 
 ### OQ-1: Default Scheduler Configuration UUID Stability
 
-**Question:** What mechanism ensures the default scheduler configuration's `scheduler_config_id` is stable across database re-creations, so that jobs referencing the default config remain resolvable after the development database is recreated?
+**Status: Resolved — Phase 0 Decision 4 (2026-08-01)**
 
-**Why it matters:** If the default configuration's UUID is generated randomly at seed time, recreating the database produces a different UUID. Any `jobs.scheduler_config_id` references to the prior UUID become orphaned. For a local development environment recreated frequently, this causes FK violations on re-initialization if prior job records are preserved.
-
-**Options:**
-1. Use a deterministic well-known UUID hardcoded in the seed script (simplest; safe for MVP)
-2. Perform a lookup at startup for an existing Balanced configuration with matching weights and reuse its UUID if found
-3. Accept that database re-creation invalidates all prior job records (appropriate if the development database is treated as ephemeral)
-
-**Classification:** Implementation Planning Decision.
-
-**Blocking:** Blocking for schema initialization implementation. Not blocking for SPEC-012 Draft status.
+**Resolution:** UUIDv5 with the DNS namespace (`6ba7b810-9dad-11d1-80b4-00c04fd430c8`) and logical name `daedalus/scheduler-config/default/v1`. The computed deterministic UUID is `2f5ce394-c4e4-5324-b842-f1ff47aafc68`. This value must be used verbatim in the seed script and any reference to the default scheduler configuration. Seed idempotency uses `INSERT ... ON CONFLICT DO NOTHING`.
 
 ---
 
 ### OQ-2: Schema Migration Tooling
 
-**Question:** What tooling is used to apply schema changes as SPEC-012 evolves during implementation and as additional requirements are discovered?
+**Status: Resolved — Phase 0 Decision 3 (2026-08-01)**
 
-**Why it matters:** ADR-004 explicitly defers migration tooling selection. SPEC-012 defines the initial schema as a DDL script. If any column is added, renamed, or typed differently during MVP implementation, a migration procedure is needed. Without selected tooling, schema changes risk being applied inconsistently across development environments.
-
-**Candidate approaches:** Flyway or Liquibase (established migration frameworks); manual versioned DDL scripts with a lightweight tracking table; EF Core migrations (if the API's C# ORM supports the schema); a minimal custom migration runner in the Docker Compose entrypoint.
-
-**Classification:** ADR Candidate. If migration tooling selection requires a meaningful architectural tradeoff (for example, EF Core ownership of schema vs. independent tooling), an ADR is the appropriate governance artifact.
-
-**Blocking:** Not blocking for Draft status. Blocking for implementation once the initial schema is declared stable.
+**Resolution:** DbUp manages PostgreSQL schema migrations. Versioned SQL files are stored in `infrastructure/postgres/migrations/` using the naming convention `{sequence}_{description}.sql`. A dedicated migration runner container applies pending migrations at deployment time. The API container must not apply migrations at startup. Seed scripts are stored in `infrastructure/postgres/seed/`. DbUp maintains an applied-migrations journal table in PostgreSQL.
 
 ---
 
@@ -1820,13 +1805,9 @@ No specific latency targets are defined for persistence operations at this stage
 
 ### OQ-4: Capability Profile Schema Contingency on SPEC-003 OQ-2
 
-**Question:** If SPEC-003 OQ-2 resolves to a database-backed capability profile registry, does SPEC-012 require revision to add a `backend_capability_profiles` table?
+**Status: Closed — SPEC-003 OQ-2 resolved (Phase 0 Decision 5, 2026-08-01)**
 
-**Current position:** SPEC-012 FR-2 determines that backend capability profiles are not persisted in PostgreSQL. This determination holds until SPEC-003 OQ-2 resolves. If the resolution selects database-backed registration, SPEC-012 must be revised to define a `backend_capability_profiles` table and its FK relationships to `decision_records` and `solver_run_records`.
-
-**Classification:** Contingent on SPEC-003 OQ-2 resolution. No action required until OQ-2 is resolved.
-
-**Blocking:** Not blocking. SPEC-012 FR-2 is the authoritative determination for the current scope.
+**Resolution:** SPEC-003 OQ-2 resolved to a JSON file-based registry (Worker-loaded at startup). No database-backed registry was selected. SPEC-012 requires no revision: no `backend_capability_profiles` table is needed. SPEC-012 FR-2's determination that backend capability profiles are not persisted in PostgreSQL is confirmed.
 
 ---
 
@@ -1858,8 +1839,8 @@ No specific latency targets are defined for persistence operations at this stage
 - [x] Security considerations address `execution_seed`, `violated_stop_ids`, raw problem data, `file_path`, and `extension_metadata`
 - [x] Performance considerations are documented
 - [x] Documentation updates are identified
-- [x] OQ-1 (default config UUID stability) classified as Implementation Planning Decision, blocking for implementation
-- [x] OQ-2 (schema migration tooling) classified as ADR Candidate, not blocking for Draft
+- [x] OQ-1 (default config UUID stability) resolved — Phase 0 Decision 4: UUIDv5 `2f5ce394-c4e4-5324-b842-f1ff47aafc68`
+- [x] OQ-2 (schema migration tooling) resolved — Phase 0 Decision 3: DbUp, versioned SQL in infrastructure/postgres/migrations/
 - [x] OQ-3 (Phase 2 incomplete write detection) classified as Implementation Planning Decision, not blocking
 - [x] OQ-4 (capability profile schema contingency) classified as contingent on SPEC-003 OQ-2, not blocking
 - [x] `benchmark_manifests` table is fully defined including text PK rationale and no-FK-to-experiments design (FR-19)
@@ -1889,8 +1870,8 @@ This feature is complete when:
 - All functional requirements (FR-1 through FR-23) are implemented and acceptance criteria pass
 - The thirteen-table schema is initialized in the development PostgreSQL instance from a validated DDL script applied in the dependency order defined in FR-14.2
 - The default scheduler configuration is seeded and retrievable via `GET /v1/scheduler-configs` (SPEC-008 FR-10)
-- OQ-1 (default config UUID stability) is resolved and the initialization script implements the chosen mechanism
-- OQ-2 (schema migration tooling) is resolved via ADR, and all schema changes after initial creation are applied using the selected tooling
+- OQ-1 (default config UUID stability) resolved by Phase 0 Decision 4: initialization script uses UUID `2f5ce394-c4e4-5324-b842-f1ff47aafc68`
+- OQ-2 (schema migration tooling) resolved by Phase 0 Decision 3: DbUp with versioned SQL in `infrastructure/postgres/migrations/`; all schema changes after initial creation use DbUp
 - All test contracts in the Testability section pass against the initialized schema
 - `execution_seed` does not appear in any log event, API response, span attribute, or report output, verified by integration test
 - The `worker.evidence.persist` span carries `artifacts_written` and `persistence_outcome` on every Worker execution

@@ -1,0 +1,18 @@
+{
+  "backend_id": "qaoa-qiskit",
+  "display_name": "QAOA (Qiskit Aer Simulator)",
+  "backend_category": "quantum_inspired_stochastic",
+  "implementation_language": "Python",
+  "determinism_class": "Stochastic (reproducible)",
+  "specification_version": 1,
+  "supported_size_classes": ["Small"],
+  "supports_time_windows": false,
+  "supports_capacity_constraints": true,
+  "latency_profile": {
+    "Small": 300.0
+  },
+  "quality_profile": "Baseline",
+  "cost_profile": 1,
+  "is_provisional": true,
+  "supported_contract_version": 1
+}

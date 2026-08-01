@@ -576,7 +576,7 @@ SPEC-011 does not define and must not be extended to include:
 
 4. Backend `latency_profile` and `quality_profile` values in capability profiles are derived from offline empirical measurement on representative benchmark problems of each supported size class before initial registration. Runtime dynamic adjustment of declared profiles is out of scope for MVP.
 
-5. All MVP backends are executed within the same C++17 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
+5. All MVP backends are executed within the same C++20 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
 
 6. The PCG64 reference implementation from pcg-random.org (or equivalent header-only library) will be adoptable as a project dependency without licensing conflict. This is confirmed as an implementation planning concern by ADR-010.
 

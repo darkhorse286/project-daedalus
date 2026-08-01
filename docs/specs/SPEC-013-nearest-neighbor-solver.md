@@ -221,9 +221,9 @@ The nearest-neighbor heuristic is a deterministic construction algorithm. It con
 
 **Execution seed usage:** The `execution_seed` field in the SolverRequest (SPEC-004 FR-2) is accepted without error, as required by SPEC-004 FR-11.5 for all backends regardless of classification. The field is not used in any computation. The algorithm's output is determined entirely by the routing problem's coordinates, demands, vehicle count, and capacity per vehicle.
 
-**Determinism within a conforming execution environment:** This backend produces identical route plans for identical routing problem inputs on every invocation within a given conforming C++17 execution environment, regardless of `execution_seed` value, invocation count, or process state. The tie-breaking rule (lowest stop_id when computed Haversine distances are equal as IEEE 754 double values) and the sequential vehicle ordering are the only sources of ordering in the algorithm, both of which are fully determined by the problem's stop identifiers and vehicle count.
+**Determinism within a conforming execution environment:** This backend produces identical route plans for identical routing problem inputs on every invocation within a given conforming C++20 execution environment, regardless of `execution_seed` value, invocation count, or process state. The tie-breaking rule (lowest stop_id when computed Haversine distances are equal as IEEE 754 double values) and the sequential vehicle ordering are the only sources of ordering in the algorithm, both of which are fully determined by the problem's stop identifiers and vehicle count.
 
-**Cross-platform reproducibility:** Route plans produced from identical inputs are semantically equivalent across conforming C++17 toolchains per ADR-010 Decision 2. Haversine distance computation uses transcendental functions (sin, cos, asin, sqrt). Per ADR-010 Decision 2, values derived from transcendental functions satisfy semantic equivalence within IEEE 754 double precision but are not required to be bitwise identical across platforms. The reproducibility guarantee for this backend follows ADR-010's semantic equivalence scope.
+**Cross-platform reproducibility:** Route plans produced from identical inputs are semantically equivalent across conforming C++20 toolchains per ADR-010 Decision 2. Haversine distance computation uses transcendental functions (sin, cos, asin, sqrt). Per ADR-010 Decision 2, values derived from transcendental functions satisfy semantic equivalence within IEEE 754 double precision but are not required to be bitwise identical across platforms. The reproducibility guarantee for this backend follows ADR-010's semantic equivalence scope.
 
 **Prohibited entropy sources:** No entropy source is used in any part of this backend's execution. System time, process ID, OS random sources, and hardware entropy are not consulted during route construction, candidate selection, tie-breaking, or any other algorithmic step.
 
@@ -740,7 +740,7 @@ The `backend_id` value appears in: the `solver.execute` span attribute, the evid
 
 **Backend-Specific Acceptance Criteria:**
 
-- [ ] The algorithm definition is sufficiently precise that two independent C++ implementations would produce semantically equivalent route plans for identical inputs within a conforming C++17 execution environment
+- [ ] The algorithm definition is sufficiently precise that two independent C++ implementations would produce semantically equivalent route plans for identical inputs within a conforming C++20 execution environment
 - [ ] The capability profile accurately reflects algorithm behavior (supports_time_windows = false, supports_capacity_constraints = true)
 - [ ] The degenerate capacity failure condition is explicitly defined
 - [ ] The extension metadata keys are defined with explicit counting semantics, and their absence on non-Succeeded outcomes is stated
