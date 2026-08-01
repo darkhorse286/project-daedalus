@@ -124,9 +124,9 @@
   the job record, requires SPEC-006 revision under ODR-6) is viable and does not block the critical execution path.
   This risk is contained and managed.
 
-  SPEC-003 OQ-2 (Capability profile registration mechanism): PostgreSQL is not the store. The mechanism — compiled-in
-  registry, configuration file, or another approach — must be resolved before Scheduler implementation. This is a
-  one-decision implementation planning item, not a re-architecture.
+  SPEC-003 OQ-2 (Capability profile registration mechanism): Resolved by Phase 0 Decision 5. JSON files in
+  `config/backends/` are loaded by the Worker at startup into an immutable in-memory registry. No architectural
+  blocker remains for Scheduler implementation.
 
   No architectural blockers require ADR-level resolution before implementation begins.
 
@@ -138,7 +138,7 @@
   ┌───────────────────────────────────────┬──────────┬───────────────────────────────────────────────────┐
   │             Specification              │  Status  │                       Notes                       │
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
-  │ SPEC-001 Routing Problem Model         │ Accepted │ Minor Assumptions amendment required (ADR-012)    │
+  │ SPEC-001 Routing Problem Model         │ Accepted │ Assumptions amendment applied at Phase 0 (ADR-012)│
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
   │ SPEC-002 Synthetic Workload Generator  │ Accepted │ OQ-1 resolved (ADR-010); OQ-2 resolved (SPEC-016) │
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
@@ -226,17 +226,12 @@
 
   Documentation Drift
 
-  Three consistency gaps exist:
+  Three consistency gaps were identified at initial review. All three were corrected at Phase 0 Closure (2026-08-01):
 
-  1. SPEC-001 Assumptions: The one-problem-one-job constraint prose has not been updated per ADR-012 Decision 3.
-  Implementation note: the SPEC-012 schema already supports the relaxed model; this is prose only.
-  2. SPEC-020 OQ-1 status: Body text says "Blocking"; acceptance checklist says resolved; SPEC-012 confirms resolution.
-  Minor administrative drift.
-  3. architecture.md: Missing browser client in both diagrams; specification/ADR count is stale (shows 20/13, should be
-  22/14). The Governing Specifications section timestamp is 2026-06-23, predating SPEC-021, SPEC-022, and ADR-014.
-
-  None of these gaps affect implementation. They should be corrected before the first implementation PR is opened to
-  establish a clean baseline.
+  1. SPEC-001 Assumptions: One-problem-one-job constraint prose updated per ADR-012 Decision 3. Applied.
+  2. SPEC-020 OQ-1 status: OQ-1 body updated from Blocking to Resolved, referencing SPEC-012 FR-19 through FR-23. Applied.
+  3. architecture.md: Browser client node added to System Context and Container Topology diagrams; specification/ADR
+  count updated to 22/14. Applied.
 
   Responsibility Ownership
 

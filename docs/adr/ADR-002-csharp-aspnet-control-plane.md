@@ -112,7 +112,7 @@ Two languages in the repository (C# and C++) increase toolchain diversity and on
 
 .NET version upgrades require periodic API layer maintenance.
 
-Data access library selection (Dapper vs. EF Core) has downstream consequences for schema migration strategy that are not resolved in this ADR.
+Data access library selection resolved by Phase 0 Decision 2: Dapper with Npgsql. Schema migration strategy resolved by Phase 0 Decision 3: DbUp with versioned SQL files.
 
 ---
 

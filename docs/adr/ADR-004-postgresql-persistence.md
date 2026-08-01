@@ -24,7 +24,7 @@ The API and Worker both write to the persistence layer concurrently. The persist
 
 PostgreSQL is the persistence technology for all durable storage in Project DAEDALUS.
 
-The specific data access approach (Dapper, Entity Framework Core, or raw SQL via libpqxx for the C++ Worker) and schema migration tooling have not been selected. These decisions are deferred to implementation planning.
+The specific data access approach and schema migration tooling were deferred to implementation planning. Phase 0 resolved both: Dapper with Npgsql for the .NET API, libpqxx for the C++ Worker, and DbUp for schema migration management (Phase 0 Decisions 2 and 3).
 
 ---
 
@@ -106,11 +106,11 @@ Well-understood operational characteristics.
 
 PostgreSQL is an infrastructure service requiring container configuration, credential management, and schema migration tooling.
 
-Schema migrations require explicit management tooling that has not yet been selected.
+Schema migrations are managed by DbUp with versioned SQL files in `infrastructure/postgres/migrations/` (Phase 0 Decision 3).
 
 ## Accepted Risks
 
-Schema migration tooling is not selected. This will be resolved during API implementation planning.
+Schema migration tooling is DbUp (Phase 0 Decision 3). Versioned SQL files are applied by a dedicated migration runner before API startup.
 
 No backup or recovery strategy is defined for the MVP. This is acceptable for a local development and demonstration environment.
 
@@ -153,7 +153,7 @@ Write throughput from the API and Worker does not require connection pool tuning
 
 # Limitations
 
-Schema migration tooling is not selected. This is a blocking dependency for API implementation.
+Schema migration tooling is selected: DbUp with versioned SQL in `infrastructure/postgres/migrations/` (Phase 0 Decision 3). Data access libraries are selected: Dapper with Npgsql for .NET API, libpqxx for C++ Worker (Phase 0 Decision 2).
 
 No backup or recovery strategy exists for the MVP.
 
@@ -190,7 +190,7 @@ Data volume exceeds practical single-node capacity.
 
 **Primary Benefit:** Referential integrity and mature driver ecosystem for relational evidence log associations.
 
-**Primary Cost:** Infrastructure service to operate; schema migration tooling selection is a pending dependency.
+**Primary Cost:** Infrastructure service to operate; requires schema migration management (resolved: DbUp, Phase 0 Decision 3).
 
 **Evidence Supporting the Decision:** Architecture document intent. No benchmark evidence at this stage.
 
