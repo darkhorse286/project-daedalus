@@ -1,7 +1,8 @@
   ---
   Project DAEDALUS — Implementation Readiness Review
 
-  Date: 2026-08-01
+  Date: 2026-07-30
+  Phase 0 Closure: 2026-08-01
   Scope: Full system — 14 ADRs, 22 Specifications, architecture.md, README.md
 
   ---
@@ -20,48 +21,47 @@
 
   The overall assessment: the specification phase has done its job. Implementation may begin.
 
+  Phase 0 Closure (2026-08-01): All six blocking implementation gaps identified in this review have been resolved.
+  Documentation drift has been corrected. The repository structure is established. ADR-001 is now Accepted (C++20,
+  CMake). All Phase 0 decisions are recorded in docs/implementation/phase-0-decisions.md. Implementation may begin
+  at Phase 1.
+
   ---
   1. Governance Readiness Assessment
 
   Acceptance State
 
-  ┌────────────────┬───────┬──────────┬──────────┬─────────┐
-  │ Artifact Type  │ Total │ Accepted │ Proposed │   Gap   │
-  ├────────────────┼───────┼──────────┼──────────┼─────────┤
-  │ Specifications │ 22    │ 22       │ 0        │ None    │
-  ├────────────────┼───────┼──────────┼──────────┼─────────┤
-  │ ADRs           │ 14    │ 13       │ 1        │ ADR-001 │
-  └────────────────┴───────┴──────────┴──────────┴─────────┘
+  ┌────────────────┬───────┬──────────┬──────────┬──────┐
+  │ Artifact Type  │ Total │ Accepted │ Proposed │ Gap  │
+  ├────────────────┼───────┼──────────┼──────────┼──────┤
+  │ Specifications │ 22    │ 22       │ 0        │ None │
+  ├────────────────┼───────┼──────────┼──────────┼──────┤
+  │ ADRs           │ 14    │ 14       │ 0        │ None │
+  └────────────────┴───────┴──────────┴──────────┴──────┘
 
-  ADR-001 (C++ as Runtime Language): ADR-001 is the only governance artifact not formally Accepted. The decision is
-  substantively settled — every other ADR, every specification, and the entire architecture references C++ as
-  established. The ADR's "Proposed" status is an administrative artifact; the decision itself is authoritative. ADR-001
-  explicitly defers the C++ standard version (C++17/20/23) and build system (CMake/Meson) to implementation planning.
-  These are the two implementation-blocking deferred items within ADR-001.
+  ADR-001 (C++ as Runtime Language): At initial review, ADR-001 was the only governance artifact not formally Accepted.
 
-  Required action: Promote ADR-001 to Accepted. Resolve the C++ standard and build system as part of the Phase 0
-  implementation planning checkpoint.
+  Resolution (Phase 0): ADR-001 promoted to Accepted. C++20 is the C++ standard. CMake is the build system. See
+  docs/implementation/phase-0-decisions.md Decision 1.
 
   Amendment Tracking
 
-  Three ADR-mandated amendments have not been fully applied to target artifacts:
+  Four ADR-mandated amendments were identified. All four have been applied at Phase 0 Closure.
 
-  1. SPEC-001 Assumptions (required by ADR-012 Decision 3):
-  SPEC-001 still states "A routing problem is created once and associated with exactly one job. No routing problem is
-  shared between jobs." ADR-012 Decision 3 explicitly relaxes this constraint for experiment context and names "SPEC-001
-  Assumptions Amendment (Required)" as a precondition for harness implementation. The amendment is minor (scoped
-  relaxation, not a model change) but must be applied before experiment harness implementation begins.
+  1. SPEC-001 Assumptions (required by ADR-012 Decision 3): Amended in place. The one-problem-one-job prose now
+  acknowledges the experiment-context relaxation per ADR-012 Decision 3. RESOLVED.
 
-  2. SPEC-020 OQ-1 (required by SPEC-012 Documentation Updates):
-  SPEC-020's OQ-1 section body still reads "Blocking." SPEC-012 documentation notes that "a separate SPEC-020 amendment
-  should update OQ-1 status from Blocking to Resolved." The acceptance checklist in SPEC-020 correctly marks OQ-1 as
-  resolved, creating an internal inconsistency. Administrative cleanup only.
+  2. SPEC-020 OQ-1 (required by SPEC-012 Documentation Updates): OQ-1 body updated from Blocking to Resolved,
+  referencing SPEC-012 FR-19 through FR-23. RESOLVED.
 
-  3. architecture.md (required by ADR-014 Documentation Updates):
-  ADR-014 requires adding a browser client node to the System Context diagram and a web-ui service to the Container
-  Topology diagram. Neither has been applied. The document also states "20 specifications accepted, 13 architectural
-  decisions accepted" as of 2026-06-23; the current state is 22 specifications, 14 ADRs. These are documentation
-  consistency issues, not functional blockers.
+  3. architecture.md (required by ADR-014 Documentation Updates): Browser client node added to System Context diagram;
+  web-ui container added to Container Topology; specification/ADR counts updated to 22/14; Browser Client section added
+  to Major Components. RESOLVED.
+
+  4. SPEC-008 CORS constraint (required by SPEC-021 Architectural Impact and ADR-014 Decision 5): Constraint 10 added to
+  SPEC-008 Constraints section; ADR-014 entry added to SPEC-008 Documentation Updates Required. RESOLVED.
+
+  SPEC-021 OQ-2, OQ-3, OQ-4 and SPEC-022 OQ-1, OQ-2, OQ-4 have been resolved in-place per ADR-014. RESOLVED.
 
   Ownership Boundaries
 
@@ -124,9 +124,9 @@
   the job record, requires SPEC-006 revision under ODR-6) is viable and does not block the critical execution path.
   This risk is contained and managed.
 
-  SPEC-003 OQ-2 (Capability profile registration mechanism): PostgreSQL is not the store. The mechanism — compiled-in
-  registry, configuration file, or another approach — must be resolved before Scheduler implementation. This is a
-  one-decision implementation planning item, not a re-architecture.
+  SPEC-003 OQ-2 (Capability profile registration mechanism): Resolved by Phase 0 Decision 5. JSON files in
+  `config/backends/` are loaded by the Worker at startup into an immutable in-memory registry. No architectural
+  blocker remains for Scheduler implementation.
 
   No architectural blockers require ADR-level resolution before implementation begins.
 
@@ -138,11 +138,11 @@
   ┌───────────────────────────────────────┬──────────┬───────────────────────────────────────────────────┐
   │             Specification              │  Status  │                       Notes                       │
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
-  │ SPEC-001 Routing Problem Model         │ Accepted │ Minor Assumptions amendment required (ADR-012)    │
+  │ SPEC-001 Routing Problem Model         │ Accepted │ Assumptions amendment applied at Phase 0 (ADR-012)│
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
   │ SPEC-002 Synthetic Workload Generator  │ Accepted │ OQ-1 resolved (ADR-010); OQ-2 resolved (SPEC-016) │
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
-  │ SPEC-003 Scheduler Policy Engine       │ Accepted │ OQ-2, OQ-4 deferred to implementation planning    │
+  │ SPEC-003 Scheduler Policy Engine       │ Accepted │ OQ-2 resolved (Phase 0 Decision 5); OQ-4 resolved (Phase 0 Decision 6) │
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
   │ SPEC-004 Solver Contract               │ Accepted │ Python transport OQ resolved (ADR-005/SPEC-017)   │
   ├────────────────────────────────────────┼──────────┼───────────────────────────────────────────────────┤
@@ -226,17 +226,12 @@
 
   Documentation Drift
 
-  Three consistency gaps exist:
+  Three consistency gaps were identified at initial review. All three were corrected at Phase 0 Closure (2026-08-01):
 
-  1. SPEC-001 Assumptions: The one-problem-one-job constraint prose has not been updated per ADR-012 Decision 3.
-  Implementation note: the SPEC-012 schema already supports the relaxed model; this is prose only.
-  2. SPEC-020 OQ-1 status: Body text says "Blocking"; acceptance checklist says resolved; SPEC-012 confirms resolution.
-  Minor administrative drift.
-  3. architecture.md: Missing browser client in both diagrams; specification/ADR count is stale (shows 20/13, should be
-  22/14). The Governing Specifications section timestamp is 2026-06-23, predating SPEC-021, SPEC-022, and ADR-014.
-
-  None of these gaps affect implementation. They should be corrected before the first implementation PR is opened to
-  establish a clean baseline.
+  1. SPEC-001 Assumptions: One-problem-one-job constraint prose updated per ADR-012 Decision 3. Applied.
+  2. SPEC-020 OQ-1 status: OQ-1 body updated from Blocking to Resolved, referencing SPEC-012 FR-19 through FR-23. Applied.
+  3. architecture.md: Browser client node added to System Context and Container Topology diagrams; specification/ADR
+  count updated to 22/14. Applied.
 
   Responsibility Ownership
 
@@ -326,10 +321,12 @@
   ---
   6. Comprehensive Gap Analysis
 
-  Blocking Gaps
+  Blocking Gaps — All Resolved at Phase 0 Closure
 
-  BG-1: ADR-001 Not Accepted; C++ Standard and Build System Not Selected
-  - Description: ADR-001 is "Proposed." C++ standard version (C++17/20/23) and build system (CMake/Meson/Bazel) are
+  BG-1: ADR-001 Not Accepted; C++ Standard and Build System Not Selected — RESOLVED
+  Resolution: ADR-001 promoted to Accepted. C++20 standard; CMake build system. See Phase 0 Decision 1.
+
+  (Original) Description: ADR-001 is "Proposed." C++ standard version (C++17/20/23) and build system (CMake/Meson/Bazel) are
   explicitly deferred. The PCG64 implementation library (ADR-010) is also not selected.
   - Impact: Worker and Core cannot be set up without a toolchain. PCG64 reproducibility requirements cannot be
   implemented.
@@ -337,15 +334,15 @@
   - Disposition: Implementation planning decision. Recommend C++20 for range support and concepts, CMake for ecosystem
   compatibility, the pcg-random.org header-only reference implementation for PCG64.
 
-  BG-2: .NET Version and Data Access Approach Not Selected
+  BG-2: .NET Version and Data Access Approach Not Selected — RESOLVED (Phase 0 Decision 2: .NET 10 LTS; Dapper; Npgsql; DbUp)
   - Description: ADR-002 defers .NET version (8 LTS vs. 9+) and data access approach (Dapper vs. EF Core). The data
   access choice affects schema migration strategy.
   - Impact: API project cannot be initialized.
   - Priority: Critical — first pre-implementation decision for API track
-  - Disposition: Implementation planning decision. Recommend .NET 8 LTS for stability. Data access choice drives the
+  - Disposition: Implementation planning decision. Recommend .NET 10 LTS for stability. Data access choice drives the
   SPEC-012 OQ-2 migration tooling answer.
 
-  BG-3: SPEC-003 OQ-2 — Capability Profile Registration Mechanism
+  BG-3: SPEC-003 OQ-2 — Capability Profile Registration Mechanism — RESOLVED (Phase 0 Decision 5: JSON files in config/backends/)
   - Description: How backend capability profiles enter the Scheduler's runtime registry at startup is unresolved.
   PostgreSQL is explicitly not the store (SPEC-012 FR-2). Options: compiled-in registry, configuration file (YAML/JSON),
   or another approach.
@@ -354,7 +351,7 @@
   - Disposition: Implementation planning decision. Recommend a compiled-in registry initialized at startup — profiles
   are stable at MVP scale and a configuration file adds a deployment artifact without benefit.
 
-  BG-4: SPEC-003 OQ-4 — Scoring Formula Per Objective Mode
+  BG-4: SPEC-003 OQ-4 — Scoring Formula Per Objective Mode — RESOLVED (Phase 0 Decision 6: normalized-penalty scoring)
   - Description: The scoring formula for each objective mode (CheapestValid, FastestValid, Balanced, BestQuality,
   DeadlineAware, BudgetCapped, ExperimentalExecution) is deferred. Constraints are well-defined (deterministic,
   capability-only, backend-neutral). The specific formula is not.
@@ -363,7 +360,7 @@
   - Disposition: Implementation planning decision. The scoring inputs (capability profiles, workload features, scheduler
   config weights) and constraints are fully specified. The formula follows from these; no ADR is required.
 
-  BG-5: SPEC-012 OQ-1 — Default Scheduler Configuration UUID Stability
+  BG-5: SPEC-012 OQ-1 — Default Scheduler Configuration UUID Stability — RESOLVED (Phase 0 Decision 4: 2f5ce394-c4e4-5324-b842-f1ff47aafc68)
   - Description: The default scheduler configuration must be present before the API accepts its first request. Its UUID
   must be stable across deployments for reproducibility. The mechanism for ensuring UUID stability (hardcoded UUID,
   deterministic generation, seed-based) is unresolved.
@@ -372,7 +369,7 @@
   - Disposition: Implementation planning decision. Recommend a hardcoded UUID with a well-known value documented in
   SPEC-012 and embedded in the schema seed script.
 
-  BG-6: SPEC-012 OQ-2 — Schema Migration Tooling
+  BG-6: SPEC-012 OQ-2 — Schema Migration Tooling — RESOLVED (Phase 0 Decision 3: DbUp with versioned SQL in infrastructure/postgres/migrations/)
   - Description: ADR-004 explicitly defers migration tooling. SPEC-012 requires migration tooling once the schema is
   declared stable. Options for the .NET ecosystem: Flyway, Liquibase, EF Core migrations, raw versioned SQL scripts.
   - Impact: Schema changes after initial creation have no governance mechanism.
@@ -380,27 +377,27 @@
   - Disposition: This is the joint answer with BG-2's data access choice. If EF Core is chosen, its migrations are the
   natural answer. If Dapper, a SQL-script-based tool (Flyway) is appropriate.
 
-  Recommended Pre-Implementation Improvements
+  Pre-Implementation Improvements — All Complete (Phase 0 Closure)
 
-  PI-1: Amend SPEC-001 Assumptions (ADR-012 Required)
+  PI-1: Amend SPEC-001 Assumptions — DONE. Applied at Phase 0 Closure.
   - Description: Remove the "exactly one job" prose and add the experiment-context relaxation per ADR-012 Decision 3.
   - Impact: Documentation accuracy; avoids confusion during experiment harness implementation.
   - Priority: Medium — complete before harness phase begins
   - Disposition: Minor in-place amendment. No functional change; schema already supports this.
 
-  PI-2: Update architecture.md (ADR-014 Required)
+  PI-2: Update architecture.md — DONE. Applied at Phase 0 Closure.
   - Description: Add browser client node to System Context and Container Topology diagrams; update counts to 22 specs/14
   ADRs.
   - Impact: Document coherence; onboarding accuracy.
   - Priority: Low — administrative
   - Disposition: Direct edit before first implementation commit.
 
-  PI-3: Update SPEC-020 OQ-1 Status Text
+  PI-3: Update SPEC-020 OQ-1 Status Text — DONE. Applied at Phase 0 Closure.
   - Description: Update OQ-1 body from "Blocking" to "Resolved — SPEC-012 FR-19 through FR-23."
   - Priority: Low — administrative
   - Disposition: Direct edit.
 
-  PI-4: Promote ADR-001 to Accepted
+  PI-4: Promote ADR-001 to Accepted — DONE. Applied at Phase 0 Closure.
   - Description: Acceptance ceremony for an already-established decision.
   - Priority: Medium — governance hygiene before implementation
   - Disposition: Status change only; update to record selected C++ standard and build system.
@@ -441,24 +438,10 @@
   ---
   7. Proposed Implementation Phasing
 
-  Phase 0: Implementation Planning Checkpoint (1–2 weeks)
+  Phase 0: Implementation Planning Checkpoint — COMPLETE (2026-08-01)
 
-  Objective: Resolve all pre-implementation decisions before any code is written.
-
-  Participating ADRs: ADR-001, ADR-002, ADR-003, ADR-004, ADR-006, ADR-010
-
-  Major Tasks:
-  - Promote ADR-001 to Accepted; select C++20 and CMake; select PCG64 library
-  - Select .NET version (8 LTS recommended) and data access approach
-  - Resolve SPEC-003 OQ-2 (backend registry mechanism)
-  - Resolve SPEC-003 OQ-4 (scoring formula — document in implementation planning notes)
-  - Resolve SPEC-012 OQ-1 (default config UUID) and OQ-2 (migration tooling)
-  - Apply SPEC-001 Assumptions amendment
-  - Update architecture.md and SPEC-020 OQ-1 status text
-
-  Deliverables: All blocking gaps resolved; clean documentation baseline; toolchain decisions documented
-
-  Completion Criteria: All BG-1 through BG-6 items have a stated resolution; architecture.md and SPEC-001 are amended
+  All six blocking gaps (BG-1 through BG-6) resolved. All documentation drift corrected. Repository structure
+  established. Decisions recorded in docs/implementation/phase-0-decisions.md.
 
   ---
   Phase 1: Infrastructure Foundation (parallel, 1–2 weeks)
@@ -680,14 +663,14 @@
   - Backend solvers (SPEC-013, 014, 015, 017, 018): algorithm specification, PRNG usage, draw ordering, outcome types
 
   Moderate clarity (requires implementation planning resolution):
-  - Scheduler scoring (SPEC-003 OQ-4): constraints and inputs defined; formula not specified
-  - Backend registry initialization (SPEC-003 OQ-2): location and format not specified
+  - Scheduler scoring (SPEC-003 OQ-4): resolved by Phase 0 Decision 6 (normalized-penalty scoring formula)
+  - Backend registry initialization (SPEC-003 OQ-2): resolved by Phase 0 Decision 5 (JSON files in config/backends/)
   - OTel AMQP carrier (ADR-011 OQ-1): approach not specified; experimentation required
 
   Lower clarity (human judgment required):
-  - SPEC-003 OQ-4 formula — must be authored before Scheduler implementation
-  - SPEC-012 OQ-2 migration tooling — architectural choice, not implementation detail
-  - SPEC-012 OQ-1 UUID mechanism — must be specified and documented
+  - SPEC-003 OQ-4 formula — resolved by Phase 0 Decision 6
+  - SPEC-012 OQ-2 migration tooling — resolved by Phase 0 Decision 3 (DbUp)
+  - SPEC-012 OQ-1 UUID mechanism — resolved by Phase 0 Decision 4 (UUIDv5)
 
   Ownership Ambiguity
 
@@ -712,8 +695,8 @@
 
   The following require human review before autonomous coding agents proceed:
 
-  1. Scheduling formula (SPEC-003 OQ-4) — must be authored by a human or reviewed before the Scheduler scoring
-  implementation is considered correct
+  1. Scheduling formula (SPEC-003 OQ-4) — resolved by Phase 0 Decision 6 (normalized-penalty scoring). Implementation
+  should be reviewed for formula correctness before the Scheduler scoring implementation merges
   2. ADR-011 OQ-1 resolution — if AMQP carrier approach requires a custom C++ implementation, it should be reviewed for
   correctness before merging
   3. Phase 2 → Phase 3 boundary — the solver contract interface (SPEC-004 C++ abstract type) is the shared dependency
@@ -728,7 +711,7 @@
 
   Current State
 
-  Project DAEDALUS has completed 22 accepted specifications and 13 accepted ADRs governing a complete hybrid
+  Project DAEDALUS has completed 22 accepted specifications and 14 accepted ADRs governing a complete hybrid
   optimization runtime. The architecture phase is finished. The system is fully designed: routing problem model,
   synthetic workload generation, feature extraction, scheduler policy engine, classical and quantum-adjacent solver
   backends, worker execution lifecycle, evidence log, quality evaluation, persistence schema, API control plane, report
@@ -806,9 +789,9 @@
   viable, but the primary approach must be confirmed experimentally. This is Phase 4's principal technical uncertainty.
   2. Multi-language toolchain complexity — Four languages (C++, C#, Python, TypeScript), multiple build systems, and
   Docker Compose integration. The toolchain setup (Phase 0/Phase 1) is the highest integration risk of the project.
-  3. SPEC-003 OQ-4 formula — The scoring formula drives the Scheduler's decisions. An incorrect formula produces
-  incorrect backend selection decisions, which undermines the thesis demonstration. The formula must be carefully
-  designed.
+  3. SPEC-003 OQ-4 formula — Resolved by Phase 0 Decision 6 (normalized-penalty scoring). The implementation
+  must match the formula precisely; coefficient values (including risk_weight=0.1, provisional) should be reviewed
+  against benchmark results during Phase 3.
 
   Expected complexity: High for Phase 2 (C++ Core with PCG64 reproducibility at specification level) and Phase 4 (Worker
   with cross-process OTel tracing). Moderate for API, CLI, and Python Adapter. Low for individual solver backends
@@ -820,16 +803,13 @@
   ---
   Overall Readiness Recommendation
 
-  Ready with minor prerequisites.
+  Ready. Phase 0 Complete.
 
-  The project is implementation-ready pending resolution of six implementation-planning decisions (BG-1 through BG-6)
-  that were explicitly deferred from the specification phase. These decisions are rapid — toolchain selection, registry
-  mechanism, scoring formula, UUID strategy, migration tooling — and do not require ADR-level governance. They should be
-  resolved in a one-to-two week planning checkpoint before the first implementation branch is opened.
+  At initial review (2026-07-30), the project was ready with minor prerequisites: six implementation-planning decisions
+  (BG-1 through BG-6) deferred from the specification phase, and three documentation inconsistencies requiring correction.
 
-  Three minor documentation inconsistencies (SPEC-001 Assumptions, architecture.md diagrams, SPEC-020 OQ-1 status text)
-  should be corrected at the same time to establish a clean implementation baseline.
+  Phase 0 Closure (2026-08-01): All six blocking gaps are resolved. All four documentation inconsistencies are corrected.
+  The repository structure is established. All Phase 0 decisions are recorded in docs/implementation/phase-0-decisions.md.
 
-  Once those prerequisites are complete, Phase 1 infrastructure work can begin on all four tracks simultaneously. The
-  architecture is well-governed, the contracts are precise, and the component boundaries are unambiguous. The project is
-  ready to build.
+  Phase 1 infrastructure work may begin immediately. The architecture is well-governed, the contracts are precise, the
+  component boundaries are unambiguous, and the toolchain is decided. The project is ready to build.

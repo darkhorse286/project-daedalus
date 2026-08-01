@@ -47,9 +47,9 @@ The Permuted Congruential Generator (PCG64) is the standard PRNG for all reprodu
 
 **Rationale:** PCG64's algorithm is specified using only 64-bit and 128-bit integer arithmetic. Its output sequence is platform-independent on any conforming C++ implementation supporting standard integer types. It does not depend on the C++ standard library's `<random>` distribution implementations, which are permitted by the C++ standard to vary across implementations. PCG64 passes the TestU01 BigCrush battery, providing sufficient statistical quality for scientific simulation at MVP scale. Its seeding procedure is explicit: state is the problem seed, stream is a documented component-level constant.
 
-## Decision 2: Cross-Platform Reproducibility Scope — Semantic Equivalence Across Conforming C++17 Toolchains
+## Decision 2: Cross-Platform Reproducibility Scope — Semantic Equivalence Across Conforming C++20 Toolchains
 
-The reproducibility guarantee for Project DAEDALUS is **semantic equivalence**: given the same problem seed and configuration, the same component produces output whose field values are identical when parsed as IEEE 754 double precision, regardless of which conforming C++17 toolchain compiled the component.
+The reproducibility guarantee for Project DAEDALUS is **semantic equivalence**: given the same problem seed and configuration, the same component produces output whose field values are identical when parsed as IEEE 754 double precision, regardless of which conforming C++20 toolchain compiled the component.
 
 Semantic equivalence means all parsed field values — coordinates, demands, time windows, fleet parameters, seeds — are identical. It does not require bit-identical byte sequences in serialized output, because JSON serializer formatting is not required to be platform-invariant.
 
@@ -291,7 +291,7 @@ Box-Muller uses transcendental functions whose results may differ by at most 1 U
 - docs/architecture.md: "Reproducibility: Every generated scenario, solver run, scheduler decision, and report must be reproducible from persisted input, configuration, and random seed."
 - SPEC-001 FR-6: Problem seed is a 64-bit non-negative integer field on the routing problem. The seed is part of canonical problem identity.
 - SPEC-002 OQ-1: Generator PRNG algorithm, distribution sampling algorithm, cross-platform scope, and floating-point determinism flagged as cross-cutting questions that exceed generator specification scope; elevated to ADR.
-- ADR-001: C++ is the runtime language for Core and Worker. The PRNG choice must be implementable in C++17.
+- ADR-001: C++ is the runtime language for Core and Worker. The PRNG choice must be implementable in C++20.
 - ADR-007: QUBO simulated annealing is in MVP scope. The annealing process is stochastic and requires a PRNG policy.
 - O'Neill, M. E. (2014). PCG: A Family of Simple Fast Space-Efficient Statistically Good Algorithms for Random Number Generation. Harvey Mudd College. pcg-random.org. Establishes the PCG family algorithm specification.
 - Lemire, D. (2019). Fast Random Integer Generation in an Interval. ACM Transactions on Modeling and Computer Simulation, 29(1). Establishes the bias-free bounded integer sampling algorithm.
@@ -302,11 +302,11 @@ No benchmark evidence exists at this stage. This is a pre-implementation archite
 
 # Assumptions
 
-The MVP runs under a C++17-conforming toolchain on a Linux target (Docker Compose). IEEE 754 double precision is the native floating-point type on this target.
+The MVP runs under a C++20-conforming toolchain on a Linux target (Docker Compose). IEEE 754 double precision is the native floating-point type on this target.
 
 PCG64 can be adopted as a header-only C++ dependency without licensing conflicts. This is an assumption; implementation planning must confirm the dependency decision.
 
-Box-Muller's transcendental function results are semantically equivalent within 1 ULP across C++17 toolchains on IEEE 754 platforms. This is consistent with the IEEE 754 standard's behavior for correctly-implemented transcendental functions.
+Box-Muller's transcendental function results are semantically equivalent within 1 ULP across C++20 toolchains on IEEE 754 platforms. This is consistent with the IEEE 754 standard's behavior for correctly-implemented transcendental functions.
 
 Solver stochastic operations consume PRNG draws in a fixed or explicitly documented pattern, enabling reproducibility verification. This is an assumption on solver architecture that must be confirmed during solver specification.
 
@@ -359,7 +359,7 @@ A breaking change to the PRNG algorithm, seeding procedure, or approved distribu
 
 # Decision Summary
 
-**Decision:** PCG64 is the standard PRNG for all reproducibility-critical stochastic computation. Semantic equivalence across conforming C++17 toolchains is the reproducibility scope. Box-Muller transform and bias-free integer algorithms are the approved distribution sampling methods. The problem seed is the exclusive entropy source. Algorithm changes are system-level breaking changes with an explicit procedure.
+**Decision:** PCG64 is the standard PRNG for all reproducibility-critical stochastic computation. Semantic equivalence across conforming C++20 toolchains is the reproducibility scope. Box-Muller transform and bias-free integer algorithms are the approved distribution sampling methods. The problem seed is the exclusive entropy source. Algorithm changes are system-level breaking changes with an explicit procedure.
 
 **Primary Benefit:** The architecture.md reproducibility principle has concrete, cross-component implementation requirements. SPEC-002 OQ-1 is resolved. The QUBO annealing backend has a clear policy to reference. System-level breaking changes are explicitly defined.
 

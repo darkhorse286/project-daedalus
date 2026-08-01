@@ -392,7 +392,7 @@ The determinism invariant applies to all computed fields in `QualityEvaluationRe
 1. **No stochastic operations:** Core quality evaluation must not use any PRNG, system time, process ID, or OS random source in its computation path. The evaluation algorithm is purely deterministic arithmetic.
 2. **No external state:** Core quality evaluation must not read configuration, database state, or any external resource during evaluation. All inputs are passed as parameters.
 3. **Floating-point determinism:** All floating-point computations must use IEEE 754 double precision (ADR-010 Decision 6). Extended precision is prohibited in the evaluation path.
-4. **Haversine consistency:** The Haversine computation in route simulation (FR-5) must use the same implementation as the routing problem model (SPEC-001 FR-5). Both computations produce semantically equivalent results across conforming C++17 toolchains (ADR-010 Decision 2).
+4. **Haversine consistency:** The Haversine computation in route simulation (FR-5) must use the same implementation as the routing problem model (SPEC-001 FR-5). Both computations produce semantically equivalent results across conforming C++20 toolchains (ADR-010 Decision 2).
 5. **Evaluation schema version:** The evaluation result is tied to the evaluation schema version (FR-11). A given schema version produces identical outputs for identical inputs. Changing the evaluation formula increments the schema version.
 
 **Consequence for idempotency:**

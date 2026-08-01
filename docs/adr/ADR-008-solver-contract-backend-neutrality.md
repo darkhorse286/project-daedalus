@@ -141,15 +141,15 @@ No benchmark evidence exists at this stage. This is a pre-implementation decisio
 
 All MVP solver backends (nearest-neighbor, greedy insertion, QUBO simulated annealing) can produce a route plan and quality metrics in a normalized format without requiring backend-specific evaluation logic.
 
-A shared quality metric meaningful for comparison across classical and QUBO backends can be defined. The definition of this metric is an open question for SPEC-001 and solver implementation planning.
+A shared quality metric meaningful for comparison across classical and QUBO backends can be defined. The quality evaluation model is defined by SPEC-007 (Accepted), which establishes hindsight quality, regret calculation, and route simulation as the cross-backend comparison metrics.
 
 ---
 
 # Limitations
 
-The concrete solver contract interface is not defined here. It is a blocking dependency for all solver implementations and will be defined during SPEC-001 and solver specification.
+The concrete solver contract interface is defined by SPEC-004 (Accepted). SPEC-004 establishes the SolverRequest and SolverResponse types, all outcome variants, structural validity requirements, and the wire format for Python backends via SPEC-017.
 
-Backend-specific metadata (for example, QUBO annealing energy data) may require an evidence extension mechanism that is not yet defined.
+Backend-specific metadata (for example, QUBO annealing energy data) is accommodated by the `extension_metadata` JSONB field in SolverResponse (SPEC-004) and the corresponding evidence record field (SPEC-006 FR-8.3).
 
 ---
 

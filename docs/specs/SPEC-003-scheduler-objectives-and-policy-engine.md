@@ -168,11 +168,11 @@ A capability profile must include:
 | `supports_capacity_constraints` | bool | Whether the backend can handle capacity constraints |
 | `latency_profile` | map\<SizeClass, seconds\> | Estimated execution latency per supported size class. Must contain one entry for each size class in `supported_size_classes`. Values are positive numbers (seconds). For `DeadlineAware` filtering (FR-5 Phase 2), the Scheduler reads `latency_profile[problem_size_class]`. |
 | `quality_profile` | enum | Relative solution quality. Valid values (ordered ascending): `Baseline` \< `Competitive` \< `Near-Optimal`. No other values are valid. A capability profile declaring an unrecognized `quality_profile` value is malformed. |
-| `cost_profile` | positive number | Per-execution cost estimate. Dimensionless unit; units are defined relative to a common scale established by the backend registration contract (OQ-2). For `BudgetCapped` filtering (FR-5 Phase 2), the Scheduler reads `cost_profile` directly. |
+| `cost_profile` | positive number | Per-execution cost estimate. Dimensionless unit; units are defined relative to a common scale established by the backend capability profile (Phase 0 Decision 5). For `BudgetCapped` filtering (FR-5 Phase 2), the Scheduler reads `cost_profile` directly. |
 | `is_provisional` | bool | Whether this backend is under evaluation rather than in production use. Provisional backends (`is_provisional = true`) are excluded from selection under all objective modes except `Experimental` via the `ProvisionalBackendExcluded` condition in FR-5 Phase 2. |
 | `supported_contract_version` | uint32 | The SolverContract version this backend implements (SPEC-004 FR-14). The Worker reads this field before dispatch and validates that the version it intends to send matches the declared value. A pre-dispatch mismatch is a Worker configuration error; a post-dispatch mismatch detected by the backend produces `ContractVersionMismatch` (SPEC-004 FR-8). Current value: 1. |
 
-The mechanism by which capability profiles are registered with the Scheduler is an open question (OQ-2). The OQ-2 resolution is responsible for validating capability profile internal consistency at registration time.
+The mechanism by which capability profiles are registered with the Scheduler is resolved by Phase 0 Decision 5 (OQ-2): JSON files in `config/backends/` validated against `config/backend-profile.schema.json` at Worker startup. The Worker validates capability profile internal consistency against the schema before entering the profile into the registry.
 
 **Acceptance Criteria:**
 - Every registered backend has a capability profile present at Scheduler invocation time
@@ -275,7 +275,7 @@ Scoring constraints:
 - Scores are computed exclusively from declared capability profiles (FR-4), workload features (FR-3), and the active objective configuration (FR-6)
 - No backend receives a score bonus or penalty based on its `backend_id`
 - Scoring logic does not access the routing problem's raw properties directly; it operates only on the derived workload features
-- The specific scoring formula for each objective mode is deferred to implementation planning (OQ-4)
+- The specific scoring formula for each objective mode is resolved by Phase 0 Decision 6 (OQ-4): normalized-penalty scoring with cost, latency, quality, and risk dimensions. See docs/implementation/phase-0-decisions.md Decision 6 for the full formula, dimension weights per mode, and provisional coefficient values.
 
 **Confidence score:** The scoring step must retain the top two scores among eligible candidates in order to compute `confidence_score`. The `confidence_score` for a given invocation equals (score of the selected backend) − (score of the next-best eligible backend). When only one backend passes all filter phases, `confidence_score` is 0.0.
 
@@ -699,29 +699,21 @@ Lexicographically smallest `backend_id`. Applied uniformly under all objective m
 
 ---
 
-## Open (Non-Blocking)
+## Open Questions — All Resolved
 
 ### OQ-2: Backend Capability Registration Mechanism
 
-**Question:** How are backend capability profiles registered with the Scheduler? Options include: static configuration file, startup-time code registration, compile-time capability table, or runtime service registration.
+**Status: Resolved — Phase 0 Decision 5 (2026-08-01)**
 
-**Why it matters:** Affects testability, the process for adding a new backend, and whether the registry can change at runtime.
-
-**Blocking:** Not blocking SPEC-003 acceptance if the capability profile fields (FR-4) are accepted as specified. Blocking for implementation planning.
-
-**Capability profile consistency note:** The OQ-2 resolution must address internal consistency validation for capability profiles at registration time. Minimum consistency rules: `latency_profile` must contain one entry per size class in `supported_size_classes`; `quality_profile` must be a value from the FR-4 enumeration; `is_provisional` must be present. The Scheduler trusts registered profiles as internally consistent at invocation time and does not re-validate them (ADR-008 Backend Neutrality).
+**Resolution:** Backend capability profiles are stored as JSON files in `config/backends/`, one file per backend named `{backend_id}.json`. The Worker validates all files against `config/backend-profile.schema.json` at startup and loads them into an immutable in-memory registry. A profile that fails validation causes Worker startup failure. The Scheduler receives the pre-built registry at invocation time; it does not discover or load profiles. Internal consistency validation (latency_profile entries matching supported_size_classes, valid quality_profile enum value, is_provisional present) is enforced by the JSON Schema at load time.
 
 ---
 
 ### OQ-4: Scoring Formula Per Objective Mode
 
-**Question:** What is the numeric scoring formula for each objective mode?
+**Status: Resolved — Phase 0 Decision 6 (2026-08-01)**
 
-**Why it matters:** Scoring must be deterministic and fully specified to be testable. An underspecified formula enables inconsistent implementations.
-
-**Note:** `confidence_score` is resolved: it equals (selected backend score) − (next-best eligible backend score); 0.0 when only one backend passes all filter phases. See FR-7 and FR-10. This question covers only the numeric scoring formula for each objective mode.
-
-**Blocking:** Not blocking SPEC-003 acceptance if the scoring constraints (deterministic, capability-only, backend-neutral) are accepted. Blocking for implementation planning.
+**Resolution:** Normalized-penalty scoring. Each eligible backend is assigned a total penalty (lower is better) composed of cost_penalty, latency_penalty, quality_penalty, and risk_penalty dimensions. All dimensions are normalized to [0, 1] across the eligible candidate set before weighting. Dimension weights per objective mode and provisional coefficient values are defined in docs/implementation/phase-0-decisions.md Decision 6. The risk_penalty dimension (weight 0.1, provisional) applies only under Experimental mode; it is 0.0 in all other modes. No quantum-specific scoring exists; backends compete on declared capability profile values only.
 
 ---
 
@@ -736,9 +728,9 @@ Lexicographically smallest `backend_id`. Applied uniformly under all objective m
 - [x] Security considerations exist
 - [x] Documentation updates are identified
 - [x] OQ-1 resolved — workload feature computation formulas (ODR-1, ODR-2, ODR-3)
-- [ ] OQ-2 resolved — backend capability registration mechanism (non-blocking for acceptance; implementation planning)
+- [x] OQ-2 resolved — backend capability registration mechanism (Phase 0 Decision 5: JSON files in config/backends/)
 - [x] OQ-3 resolved — objective mode parameter structures (ODR-4, ODR-5)
-- [ ] OQ-4 resolved — scoring formula per objective mode (non-blocking for acceptance; implementation planning)
+- [x] OQ-4 resolved — scoring formula per objective mode (Phase 0 Decision 6: normalized-penalty scoring)
 - [x] OQ-5 resolved — tiebreaker rule (ROQ-2)
 - [x] OQ-6 resolved — default scheduler configuration (ODR-6, ROQ-3)
 
@@ -749,7 +741,8 @@ Lexicographically smallest `backend_id`. Applied uniformly under all objective m
 This feature is complete when:
 
 - All blocking open questions (OQ-1, OQ-3, OQ-5, OQ-6) are resolved and incorporated in this specification (complete as of 2026-06-08)
-- OQ-2 (registration mechanism) and OQ-4 (scoring formula) are resolved during implementation planning
+- OQ-2 (registration mechanism) resolved by Phase 0 Decision 5 (2026-08-01)
+- OQ-4 (scoring formula) resolved by Phase 0 Decision 6 (2026-08-01)
 - All functional requirements (FR-1 through FR-15) are implemented and acceptance criteria pass
 - Unit and integration tests covering FR-1 through FR-15 pass
 - `scheduler.score_solvers` OTel span is emitted and verifiable in the test environment

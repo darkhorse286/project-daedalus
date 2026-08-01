@@ -233,7 +233,7 @@ Each individual solver specification must state the basis for its declared `late
 
 **3.4.3 Capability profile registration:**
 
-The mechanism by which capability profiles are registered at runtime (static configuration file, startup registration code, compile-time registration, or runtime service) is an open question in SPEC-003 OQ-2 and is not resolved by SPEC-011. Each individual solver specification must document its complete capability profile field values. The registration mechanism is SPEC-003's responsibility to resolve before any backend capability profile is registered (Prerequisite 7 from FR-10.1).
+The mechanism by which capability profiles are registered at runtime is resolved by Phase 0 Decision 5 (SPEC-003 OQ-2): JSON files in `config/backends/` are validated against `config/backend-profile.schema.json` and loaded by the Worker at startup into an immutable in-memory registry. Each individual solver specification must document its complete capability profile field values. The five initial profile files are committed to the repository and all declare `is_provisional = true`.
 
 **Acceptance Criteria:**
 - Every individual solver specification contains a capability profile table with all nine fields from FR-4.1
@@ -570,13 +570,13 @@ SPEC-011 does not define and must not be extended to include:
 
 1. All MVP backends are implemented in C++ and accessed through the SolverContract C++ interface directly. No adapter transport layer is required for MVP in-process backends. The Python adapter backend (ADR-005) is deferred past MVP.
 
-2. The Scheduler capability profile registration mechanism (SPEC-003 OQ-2) will be resolved before any backend capability profile is registered (Prerequisite 7 from FR-10.1). SPEC-011 FR-4 documents the capability profile values that must be declared; how they enter the system is SPEC-003's responsibility.
+2. The Scheduler capability profile registration mechanism (SPEC-003 OQ-2) is resolved by Phase 0 Decision 5: JSON files in `config/backends/` loaded by the Worker at startup. SPEC-011 FR-4 documents the capability profile values that must be declared; the five initial profile files are committed to the repository.
 
 3. No MVP backend requires proving infeasibility. The problem sizes and structure in scope for MVP are addressable by construction and stochastic heuristics.
 
 4. Backend `latency_profile` and `quality_profile` values in capability profiles are derived from offline empirical measurement on representative benchmark problems of each supported size class before initial registration. Runtime dynamic adjustment of declared profiles is out of scope for MVP.
 
-5. All MVP backends are executed within the same C++17 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
+5. All MVP backends are executed within the same C++20 toolchain and Docker Compose Linux environment established by ADR-001. The IEEE 754 double precision and PCG64 cross-platform reproducibility guarantees of ADR-010 apply in this environment.
 
 6. The PCG64 reference implementation from pcg-random.org (or equivalent header-only library) will be adoptable as a project dependency without licensing conflict. This is confirmed as an implementation planning concern by ADR-010.
 

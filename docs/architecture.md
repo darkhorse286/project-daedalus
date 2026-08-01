@@ -50,6 +50,7 @@ The scheduler supports different meanings of "best," including cheapest valid, f
 flowchart LR
     User[User / Developer]
     CLI[Daedalus CLI]
+    WebUI[Web Browser Client]
     API[Daedalus API]
     DB[(PostgreSQL)]
     Queue[(RabbitMQ)]
@@ -61,8 +62,9 @@ flowchart LR
     OTel[OpenTelemetry Collector]
 
     User --> CLI
-    User --> API
+    User --> WebUI
     CLI --> API
+    WebUI --> API
     API --> DB
     API --> Queue
     Queue --> Worker
@@ -262,6 +264,28 @@ Non-responsibilities:
 * Automatic experiment resumption after CLI interruption — deferred post-MVP (ADR-012)
 * OTel span emission
 
+### Browser Client
+
+The browser-hosted interface for job submission, job monitoring, experiment observation, and evidence visualization (SPEC-021, SPEC-022, ADR-014).
+
+SPEC-021 (Web UI) and SPEC-022 (Experiment Dashboard) are implemented as feature areas within a single React/TypeScript/Vite SPA (ADR-014 Decision 1). The application is served by a dedicated `web-ui` Docker Compose container running Nginx at `http://localhost:3000`.
+
+Responsibilities:
+
+* Present job submission form and validate structural input (not domain validation — ADR-009)
+* Display job status via polling; render evidence report links
+* Provide experiment status views: trial matrix, solver comparison tables, execution metadata
+* Display `request_id` from API error responses for operator correlation with API-side OTel spans (ADR-014 Decision 7)
+
+Non-responsibilities:
+
+* Domain validation, quality statistics computation, scheduling decisions — all API and Control Plane authority
+* OTel span emission — the browser client does not inject `traceparent` or `tracestate` headers; API requests arrive as trace roots (ADR-014 Decision 7)
+* Direct communication with Scheduler, Worker, or any infrastructure component — all interaction is through the SPEC-008 API (ADR-014 Browser Client Responsibilities)
+* Experiment orchestration — the CLI is the orchestration executor (ADR-012 Decision 1); the browser client is a passive observer
+
+**Browser client boundary:** The browser client presents API-sourced data and orchestrates user interaction only. No business rules, domain validation, evidence computation, or scheduling logic executes in the browser. This boundary is an architectural invariant enforced by ADR-014.
+
 ### Python Solver Adapter
 
 The bridge to Python-native optimization ecosystems (SPEC-017, ADR-005).
@@ -419,7 +443,8 @@ Detailed reproducibility requirements, approved algorithms, semantic equivalence
 ```mermaid
 flowchart TB
     subgraph DockerCompose[Docker Compose MVP Environment]
-        API[api: ASP.NET Core]
+        API[api: ASP.NET Core :5000]
+        WebUI[web-ui: Nginx + React SPA :3000]
         Worker[worker: C++ Runtime Worker]
         Adapter[python-adapter]
         DB[(postgres)]
@@ -430,6 +455,7 @@ flowchart TB
         Reports[(report volume)]
     end
 
+    WebUI -.->|CORS| API
     API --> DB
     API --> MQ
     Worker --> MQ
@@ -443,16 +469,16 @@ flowchart TB
     Prom --> Graf
 ```
 
-The CLI runs on the developer workstation outside the Docker Compose environment, accessing the API through the published port (`http://localhost:5000` by default). The Python Solver Adapter is a long-running container; the Worker dispatches Python-backend invocations to it via HTTP POST to port 8080 of the internal Docker network. The `python-adapter` container is not launched by the Worker; it is started by Docker Compose and runs continuously alongside the other services.
+The CLI runs on the developer workstation outside the Docker Compose environment, accessing the API through the published port (`http://localhost:5000` by default). The browser client (`web-ui`) runs as a dedicated Docker Compose container at `http://localhost:3000`, serving the React SPA via Nginx; the browser issues API calls directly to `http://localhost:5000` (cross-origin, requiring CORS headers on the API per ADR-014 Decision 5). The Python Solver Adapter is a long-running container; the Worker dispatches Python-backend invocations to it via HTTP POST to port 8080 of the internal Docker network. The `python-adapter` container is not launched by the Worker; it is started by Docker Compose and runs continuously alongside the other services.
 
 ## Governing Specifications
 
 The architecture described in this document is governed by the accepted specifications under `docs/specs/` and the accepted architectural decisions under `docs/adr/`.
 
-As of 2026-06-23:
+As of 2026-08-01:
 
-- 20 specifications accepted.
-- 13 architectural decisions accepted.
+- 22 specifications accepted.
+- 14 architectural decisions accepted.
 
 Detailed behavioral, persistence, API, and implementation requirements are defined by the individual specifications and ADRs. This document provides the architectural view of the system and the relationships between its major components.
 
@@ -466,7 +492,7 @@ These questions do not block the MVP but must be assessed during implementation 
 
 **ADR-011 OQ-1: C++ OpenTelemetry SDK integration for AMQP metadata.** The concrete approach for extracting W3C TraceContext from AMQP `application_headers` in the C++ Worker has not been confirmed. The OTel C++ SDK does not provide a built-in AMQP integration. If no viable carrier implementation exists, the designated fallback is to persist trace context in the PostgreSQL job record (requires a SPEC-006 revision under ODR-6). Tracing is not on the critical execution path; the fallback is viable for MVP.
 
-**SPEC-003 OQ-2: Backend capability profile registration mechanism.** How backend capability profiles enter the Scheduler's runtime registry at startup is not resolved. PostgreSQL is not the registration store. The specific mechanism — configuration file, compiled-in registry, or another approach — is an implementation planning decision and does not affect the behavioral contract.
+**SPEC-003 OQ-2: Backend capability profile registration mechanism — RESOLVED (Phase 0 Decision 5).** Backend capability profiles are stored as JSON files in `config/backends/` and validated against `config/backend-profile.schema.json`. The Worker loads and validates all profile files at startup into an immutable in-memory registry. Profile mutation requires a Worker restart. Five initial profile files are committed to the repository.
 
 ### Future Capability Dependencies
 

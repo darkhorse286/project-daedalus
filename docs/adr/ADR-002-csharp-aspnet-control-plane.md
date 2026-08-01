@@ -26,7 +26,7 @@ C# with ASP.NET Core is the implementation language and framework for Daedalus A
 
 ASP.NET Core provides a mature, strongly-typed web framework with built-in support for dependency injection, structured serialization, middleware pipelines, and OpenAPI generation. These capabilities are well-matched to the I/O-bound control plane requirements.
 
-The specific .NET version (8 LTS or 9/10) and data access approach (Dapper or Entity Framework Core) are not selected in this ADR. These decisions are deferred to implementation planning.
+The specific .NET version and data access approach were deferred to implementation planning. Phase 0 resolved both: .NET 10 LTS is the runtime, Dapper is the data access library, and Npgsql is the PostgreSQL driver (Phase 0 Decision 2).
 
 ---
 
@@ -112,7 +112,7 @@ Two languages in the repository (C# and C++) increase toolchain diversity and on
 
 .NET version upgrades require periodic API layer maintenance.
 
-Data access library selection (Dapper vs. EF Core) has downstream consequences for schema migration strategy that are not resolved in this ADR.
+Data access library selection resolved by Phase 0 Decision 2: Dapper with Npgsql. Schema migration strategy resolved by Phase 0 Decision 3: DbUp with versioned SQL files.
 
 ---
 
@@ -146,15 +146,13 @@ No benchmark evidence exists at this stage. This is a pre-implementation decisio
 
 The API layer will not become a compute bottleneck requiring native performance optimization.
 
-.NET 8 LTS or later is available in the target container runtime environment.
+.NET 10 LTS is available in the target container runtime environment.
 
 ---
 
 # Limitations
 
-The .NET version has not been selected. .NET 8 LTS and .NET 9 are candidates.
-
-The data access approach (Dapper vs. Entity Framework Core) has not been selected. This decision affects schema migration strategy.
+Phase 0 resolved the deferred decisions: .NET 10 LTS is the runtime version. Dapper is the data access library. Npgsql is the PostgreSQL driver. DbUp is the schema migration tool. See docs/implementation/phase-0-decisions.md Decision 2 and Decision 3.
 
 ---
 

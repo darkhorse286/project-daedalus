@@ -515,7 +515,7 @@ The fixed draw sequence is defined in FR-3. Any reordering of PRNG draws, or any
 - The PRNG is seeded once per invocation from the `seed` value only.
 - No external entropy sources are consumed.
 - Reproducibility holds across process restarts.
-- Reproducibility holds across any conforming C++17 toolchain with IEEE 754 double precision support. The standard is semantic equivalence: all parsed field values — coordinates, demands, time windows, fleet parameters, and seed — are identical. This is guaranteed by PCG64's platform-independent integer arithmetic and the approved distribution sampling algorithms, per ADR-010 Decision 2.
+- Reproducibility holds across any conforming C++20 toolchain with IEEE 754 double precision support. The standard is semantic equivalence: all parsed field values — coordinates, demands, time windows, fleet parameters, and seed — are identical. This is guaranteed by PCG64's platform-independent integer arithmetic and the approved distribution sampling algorithms, per ADR-010 Decision 2.
 - The PRNG algorithm is PCG64, per ADR-010 Decision 1.
 
 ---
@@ -886,7 +886,7 @@ Do not invent specific latency targets. These require measurement.
 | Sub-question | Resolution | ADR-010 Reference |
 | --- | --- | --- |
 | PRNG algorithm | PCG64 | Decision 1 |
-| Cross-platform reproducibility scope | Semantic equivalence across conforming C++17 toolchains with IEEE 754 support | Decision 2 |
+| Cross-platform reproducibility scope | Semantic equivalence across conforming C++20 toolchains with IEEE 754 support | Decision 2 |
 | Normal distribution sampling algorithm | Box-Muller transform (two-output form; z0 = latitude offset, z1 = longitude offset per stop) | Decision 3 |
 | Bounded integer sampling algorithm | Bias-free integer arithmetic algorithm (Lemire's method or bounded rejection sampling); `std::uniform_int_distribution` prohibited | Decision 3 |
 | Variable-draw-count algorithms | Prohibited in fixed-draw-sequence contexts; Marsaglia polar method not selected | Decision 3 |
@@ -977,7 +977,7 @@ This feature is complete when:
 - Fleet generation conforms to FR-6.
 - Difficulty tier assignment conforms to FR-7, reading configured size class thresholds.
 - All outputs conform to the output contract in FR-8 (routing problem document and generation manifest).
-- Reproducibility is proven per FR-9, including semantic equivalence across conforming C++17 toolchains per ADR-010 Decision 2.
+- Reproducibility is proven per FR-9, including semantic equivalence across conforming C++20 toolchains per ADR-010 Decision 2.
 - All testability behaviors in the Testability section are proven.
 - All failure modes produce structured errors before any invalid output is emitted.
 - The routing problem document is submitted to the API and receives HTTP 202, confirming SPEC-001 conformance.

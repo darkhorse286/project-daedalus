@@ -1073,15 +1073,11 @@ Do not invent specific latency targets. These areas require measurement during i
 
 # Open Questions
 
-## OQ-1 (Blocking): Experiment Persistence Schema
+## OQ-1 (Resolved): Experiment Persistence Schema
 
-What is the persistence schema for experiment manifests, trial records, and experiment artifacts?
+**Resolution:** SPEC-012 FR-19 through FR-23 define the experiment persistence schema. Experiment manifests, trial records, trial evidence, experiment summaries, and benchmark summaries are stored in the existing PostgreSQL instance (ADR-004) under five new table definitions owned by SPEC-012. The SPEC-008 amendment (FR-18 through FR-25) provides the API contract for all experiment and benchmark endpoints. No separate schema specification is required.
 
-The experiment harness introduces new persistence requirements not covered by the existing Evidence Log schema (SPEC-006) or the routing problem schema (SPEC-012). SPEC-012 is the project persistence authority (per ADR-004: single PostgreSQL instance for MVP). Extension of SPEC-012 to cover experiment manifests, trial records, and artifact storage is the expected resolution path. A new schema specification is an alternative if the experiment schema warrants a separate governance lifecycle.
-
-This blocks implementation. The harness cannot be built without a defined persistence layer.
-
-**Classification:** Blocking
+**No further action required.**
 
 ---
 

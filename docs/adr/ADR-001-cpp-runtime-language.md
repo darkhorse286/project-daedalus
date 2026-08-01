@@ -2,9 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted
 
 **Date:** 2026-06-07
+
+**Accepted:** 2026-08-01
 
 **Related Feature(s):** Daedalus Core, Daedalus Worker
 
@@ -22,11 +24,13 @@ The Worker enforces solver timeouts, executes solver algorithms, evaluates resul
 
 # Decision
 
-C++ is the implementation language for Daedalus Core and Daedalus Worker.
+C++ is the implementation language for Daedalus Core, Daedalus Worker, and the CLI.
 
 C++ provides direct memory management, deterministic execution profiles, and access to high-performance mathematical and optimization libraries without managed runtime overhead.
 
-The C++ standard version (C++17, C++20, or C++23) and the build system (CMake, Meson, or equivalent) have not been selected. These decisions are deferred to implementation planning. This ADR records the language selection only.
+**C++ Standard: C++20.** C++20 provides ranges, concepts, designated initializers, `std::span`, `std::format`, `std::jthread`, and the structured bindings, `std::optional`, `std::variant`, `std::string_view`, `if constexpr`, and filesystem library features from C++17. All compiler versions targeted by the Docker Compose build environment support C++20 conformance. C++20 ranges and concepts support generic programming patterns used in the solver contract and capability profile registry.
+
+**Build System: CMake.** CMake is the build system for all C++ components. The required solver library ecosystem and the OpenTelemetry C++ SDK provide CMake integration via FetchContent or find_package. CMake out-of-source builds are compatible with Docker multi-stage build images.
 
 ---
 
@@ -112,8 +116,6 @@ Manual memory management introduces a class of defects that managed runtimes eli
 
 ## Accepted Risks
 
-Build system and C++ standard version are deferred. A short-term ambiguity exists that will be resolved during implementation planning.
-
 Memory safety vulnerabilities are a known risk of C++ that must be mitigated through testing, tooling (sanitizers), and code review discipline.
 
 ---
@@ -156,11 +158,7 @@ The development environment has access to a suitable C++ build system.
 
 # Limitations
 
-The build system is not selected. CMake, Meson, and Bazel are candidates. This will be resolved during implementation planning.
-
-The C++ standard version is not selected.
-
-Cross-platform compilation requirements are not defined for the MVP.
+Cross-platform compilation requirements beyond Docker Compose Linux containers are not defined for the MVP. The C++20 standard and CMake build system are the committed baseline for all MVP development.
 
 ---
 

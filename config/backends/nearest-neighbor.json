@@ -1,0 +1,20 @@
+{
+  "backend_id": "nearest-neighbor",
+  "display_name": "Nearest Neighbor Heuristic",
+  "backend_category": "classical_deterministic",
+  "implementation_language": "C++",
+  "determinism_class": "Deterministic",
+  "specification_version": 1,
+  "supported_size_classes": ["Small", "Medium", "Large"],
+  "supports_time_windows": false,
+  "supports_capacity_constraints": true,
+  "latency_profile": {
+    "Small": 0.001,
+    "Medium": 0.005,
+    "Large": 0.050
+  },
+  "quality_profile": "Baseline",
+  "cost_profile": 1,
+  "is_provisional": true,
+  "supported_contract_version": 1
+}

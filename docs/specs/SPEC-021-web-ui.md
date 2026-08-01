@@ -875,49 +875,27 @@ HTML report file sizes are bounded by SPEC-009 report content. Reports are serve
 
 ---
 
-### OQ-2: Web UI Technology Stack
+### OQ-2: Web UI Technology Stack — RESOLVED (ADR-014)
 
-**Question:** What browser-side technology (framework, build toolchain) is used to implement the Web UI?
+**Resolution:** React with TypeScript, built with Vite. UI components sourced from shadcn/ui (Radix UI headless primitives + Tailwind CSS utility styling). TanStack Table for the data-heavy tabular views in FR-8.2. TanStack Query for server state, caching, and polling. React Router for client-side navigation. See ADR-014 Decisions 2, 3, and 4.
 
-**Why it matters:** The technology choice affects the build pipeline, static asset serving, and the Docker Compose service definition. ADR-001 (C++) and ADR-002 (C#) established technology choices for the runtime and API respectively. A parallel decision record for the Web UI is appropriate.
-
-**Owner:** An ADR is required before implementation begins. Criteria: employer-signaling value of the chosen stack, compatibility with the Docker Compose development environment, and alignment with the project's portfolio thesis.
-
-**Blocking:** Blocking for Web UI implementation. Not blocking for Draft or Proposed spec status.
+**No further action required.**
 
 ---
 
-### OQ-3: Web UI Serving Mechanism and Docker Compose Integration
+### OQ-3: Web UI Serving Mechanism and Docker Compose Integration — RESOLVED (ADR-014)
 
-**Question:** How is the Web UI served within the Docker Compose environment, and what origin does it run from for CORS purposes?
+**Resolution:** Dedicated `web-ui` Docker Compose container (Option 1). The container runs Nginx serving the Vite static build output (HTML, JS, CSS) at `http://localhost:3000`. The Dockerfile is a multi-stage build: a Node.js build stage runs `vite build`; the runtime stage copies static output into an Nginx base image. Nginx applies the HTML5 History API fallback (`try_files $uri /index.html`) required for React Router. The API must emit CORS headers permitting requests from `http://localhost:3000` (SPEC-008 Constraint 10; ADR-014 Decision 5).
 
-**Options under consideration:**
-1. **Separate `web-ui` container:** A dedicated container (e.g., Nginx serving static build output) added to Docker Compose. The container serves the Web UI at a distinct port (e.g., `http://localhost:3000`). The API must emit CORS headers for this origin.
-2. **Served from the API container:** Static Web UI assets are served from the existing `api` container at a sub-path (e.g., `http://localhost:5000/ui`). No CORS configuration is required (same origin). This couples the Web UI build artifact to the API container build.
-3. **Developer-served (outside Docker Compose):** The Web UI is run with a development server on the developer machine (e.g., `http://localhost:3000`) outside Docker Compose, similar to the CLI. The API must emit CORS headers for this origin. The Web UI is not deployed as a container.
-
-**Why it matters:** The serving mechanism determines the CORS origin that the API must permit, the Docker Compose topology change, and whether the Web UI has its own container lifecycle.
-
-**Owner:** Project Owner decision. Resolution required before API CORS configuration can be specified and before the Docker Compose topology can be updated in architecture.md.
-
-**Blocking:** Blocking for Docker Compose topology finalization and API CORS configuration. Not blocking for Draft or Proposed spec status.
+**No further action required.**
 
 ---
 
-### OQ-4: API Base URL Discovery
+### OQ-4: API Base URL Discovery — RESOLVED (ADR-014)
 
-**Question:** How does the Web UI browser application discover the Daedalus API base URL at runtime?
+**Resolution:** Build-time environment variable `VITE_API_BASE_URL` (Option 1). The API base URL is embedded in the static build artifact by Vite during `vite build`. The default value is `http://localhost:5000`. The Docker Compose `web-ui` service definition passes `VITE_API_BASE_URL` as a build argument to the Node.js build stage; Vite embeds it via `import.meta.env.VITE_API_BASE_URL`. Changing the API base URL requires rebuilding the `web-ui` Docker image. See ADR-014 Decision 6.
 
-**Why it matters:** The Web UI must know the API base URL to issue any API request. Assumption 1 states the default is `http://localhost:5000`, but defines no mechanism by which this URL is communicated to the browser application. For a browser-hosted application, the URL cannot be read from environment variables at runtime as a CLI would; it must be embedded at build time, fetched from a well-known location, or derived from the current origin. The correct mechanism depends on the serving approach resolved in OQ-3: if the Web UI is served from the API container at a sub-path (OQ-3 Option 2), the API URL is the same origin and no external configuration is required; if the Web UI is served separately (OQ-3 Options 1 or 3), the API URL must be communicated to the browser application through a defined channel.
-
-**Options under consideration:**
-1. Build-time environment variable (e.g., `VITE_API_BASE_URL` or equivalent): the API URL is baked into the static build artifact at build time. Simple; requires a rebuild to change the URL.
-2. Runtime configuration file: a `config.json` served alongside the static assets at a fixed relative path; the browser fetches it on startup before issuing API calls. Allows URL reconfiguration without a rebuild.
-3. Same-origin derivation: the Web UI derives the API URL from `window.location.origin`. Only applicable under OQ-3 Option 2 (serving from the API container).
-
-**Owner:** Resolution is a dependency of OQ-3. The correct mechanism cannot be selected until the serving approach is known. The selection may be addressed within the same ADR that resolves OQ-3.
-
-**Blocking:** Not blocking for Draft or Proposed spec status. Blocking for Web UI implementation.
+**No further action required.**
 
 ---
 

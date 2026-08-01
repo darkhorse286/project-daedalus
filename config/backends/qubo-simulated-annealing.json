@@ -1,0 +1,20 @@
+{
+  "backend_id": "qubo-simulated-annealing",
+  "display_name": "QUBO Simulated Annealing",
+  "backend_category": "quantum_inspired_stochastic",
+  "implementation_language": "C++",
+  "determinism_class": "Stochastic (reproducible)",
+  "specification_version": 1,
+  "supported_size_classes": ["Small", "Medium", "Large"],
+  "supports_time_windows": false,
+  "supports_capacity_constraints": true,
+  "latency_profile": {
+    "Small": 1.0,
+    "Medium": 10.0,
+    "Large": 60.0
+  },
+  "quality_profile": "Competitive",
+  "cost_profile": 1,
+  "is_provisional": true,
+  "supported_contract_version": 1
+}
