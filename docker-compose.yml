@@ -1,0 +1,126 @@
+services:
+
+  postgres:
+    # postgres:16 — PostgreSQL 16.x LTS; local implementation choice per P1-OBJ-001 authority
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-p", "5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - daedalus-net
+
+  rabbitmq:
+    # rabbitmq:3.13-management — stable RabbitMQ 3.13 with management plugin; local implementation choice
+    # Queue topology (routing-jobs + routing-jobs-dead-letter) loaded from definitions.json at startup;
+    # approach: rabbitmq.conf sets management.load_definitions pointing to the mounted definitions file.
+    # This satisfies ADR-003 without application-side initialization code.
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./config/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - daedalus-net
+
+  otel-collector:
+    # otel/opentelemetry-collector-contrib:0.104.0 — stable contrib release; local implementation choice
+    # HEALTH CHECK NOTE: The standard release image uses gcr.io/distroless/static:nonroot as its base
+    # and contains no shell (/bin/sh) or HTTP utilities (wget, curl). The CMD-SHELL health check below
+    # requires wget and will fail on the standard distroless image.
+    # RESOLUTION REQUIRED (HRP): Use the debug variant tag (e.g., :0.104.0-debug) which includes
+    # busybox tooling, or replace with a community image that includes shell utilities.
+    # The health_check extension itself (port 13133) is present in the contrib release;
+    # only the probe mechanism is affected.
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    command: ["--config=/etc/otelcol/otel-collector.yaml"]
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otelcol/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+      - "8889:8889"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:13133/ 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - daedalus-net
+
+  prometheus:
+    # prom/prometheus:v2.53.0 — stable Prometheus release; local implementation choice
+    image: prom/prometheus:v2.53.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./config/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/healthy 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - daedalus-net
+
+  grafana:
+    # grafana/grafana:11.1.0 — stable Grafana release; local implementation choice
+    # Host port 3001 chosen per ADR-014 Decision 5 (port 3000 reserved for web-ui service).
+    # Grafana listens internally on its default port 3000; the host mapping is 3001:3000.
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - daedalus-net
+
+volumes:
+  postgres-data:
+  grafana-data:
+  # reports: declared here per P1-OBJ-001 scope; no service mounts it in Phase 1.
+  # The Worker and API services will mount this volume in later phases.
+  reports:
+
+networks:
+  daedalus-net:
+    driver: bridge

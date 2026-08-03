@@ -1,0 +1,21 @@
+{
+  "queues": [
+    {
+      "name": "routing-jobs",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "",
+        "x-dead-letter-routing-key": "routing-jobs-dead-letter"
+      }
+    },
+    {
+      "name": "routing-jobs-dead-letter",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {}
+    }
+  ]
+}
