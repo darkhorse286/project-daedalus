@@ -1,4 +1,23 @@
 {
+  "vhosts": [{"name": "/"}],
+  "users": [
+    {
+      "name": "daedalus",
+      "password_hash": "5WYtBu6YvopY1aOFFbZDpBT/oqEMRm4RjsQSUC1bdwdmquQP",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"],
+      "limits": {}
+    }
+  ],
+  "permissions": [
+    {
+      "user": "daedalus",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
   "queues": [
     {
       "name": "routing-jobs",

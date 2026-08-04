@@ -25,10 +25,13 @@ services:
     # Queue topology (routing-jobs + routing-jobs-dead-letter) loaded from definitions.json at startup;
     # approach: rabbitmq.conf sets management.load_definitions pointing to the mounted definitions file.
     # This satisfies ADR-003 without application-side initialization code.
+    # NOTE: RabbitMQ 3.13 skips RABBITMQ_DEFAULT_USER/PASS seeding when management.load_definitions
+    # is configured. The daedalus user is therefore declared in definitions.json with a pre-computed
+    # SHA-256 hash. Changing the management API password requires regenerating the hash in
+    # config/rabbitmq/definitions.json. See .env.example for the corresponding password variable.
     image: rabbitmq:3.13-management
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
       - ./config/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - ./config/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
@@ -45,15 +48,14 @@ services:
       - daedalus-net
 
   otel-collector:
-    # otel/opentelemetry-collector-contrib:0.104.0 — stable contrib release; local implementation choice
-    # HEALTH CHECK NOTE: The standard release image uses gcr.io/distroless/static:nonroot as its base
-    # and contains no shell (/bin/sh) or HTTP utilities (wget, curl). The CMD-SHELL health check below
-    # requires wget and will fail on the standard distroless image.
-    # RESOLUTION REQUIRED (HRP): Use the debug variant tag (e.g., :0.104.0-debug) which includes
-    # busybox tooling, or replace with a community image that includes shell utilities.
-    # The health_check extension itself (port 13133) is present in the contrib release;
-    # only the probe mechanism is affected.
-    image: otel/opentelemetry-collector-contrib:0.104.0
+    # otel/opentelemetry-collector-contrib:0.104.0 — stable contrib release; local implementation choice.
+    # Built via config/otel-collector/Dockerfile: the official pinned Collector binary is extracted from
+    # the standard distroless image and re-packaged in Alpine, which provides /bin/sh and wget for the
+    # CMD-SHELL health check below. The Collector binary itself is unchanged.
+    # Work package amendment (2026-08-03) authorizes config/otel-collector/Dockerfile.
+    build:
+      context: ./config/otel-collector
+      dockerfile: Dockerfile
     command: ["--config=/etc/otelcol/otel-collector.yaml"]
     volumes:
       - ./config/otel-collector.yaml:/etc/otelcol/otel-collector.yaml:ro
@@ -103,6 +105,10 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
     volumes:
       - grafana-data:/var/lib/grafana
+      # reports: mounted here so Docker Compose v5 creates the volume on `docker compose up`.
+      # Docker Compose v5 only creates top-level volumes that are referenced by at least one service.
+      # No write access is required by Grafana; this mount forces volume creation for later phases.
+      - reports:/var/reports:ro
     ports:
       - "${GRAFANA_PORT:-3001}:3000"
     healthcheck:
@@ -117,8 +123,9 @@ services:
 volumes:
   postgres-data:
   grafana-data:
-  # reports: declared here per P1-OBJ-001 scope; no service mounts it in Phase 1.
-  # The Worker and API services will mount this volume in later phases.
+  # reports: mounted read-only by grafana so Docker Compose v5 creates the volume on `docker compose up`.
+  # Docker Compose v5.1.4 does not create top-level volumes unless at least one service references them.
+  # The Worker and API services will mount this volume read-write in later phases.
   reports:
 
 networks:

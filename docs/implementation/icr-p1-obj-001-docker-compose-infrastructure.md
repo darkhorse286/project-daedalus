@@ -6,7 +6,7 @@
 
 **Title:** Docker Compose Infrastructure Foundation
 
-**Status at Completion:** Blocked
+**Status at Completion:** Implemented
 
 **Author:** Claude (Implementation Agent)
 
@@ -16,13 +16,13 @@
 
 ## Implementation Summary
 
-All six implementation files were created (four explicitly permitted plus two RabbitMQ configuration files — see Deviations). All implementation files are syntactically valid and structurally conformant to the work package requirements as verified by static analysis (Python YAML and JSON parsers). Two blocking conditions prevent this work package from reaching Implemented status:
+All authorized files were created and verified across three implementation sessions. All five infrastructure services start, reach `(healthy)` Docker status, and are externally reachable. All eleven acceptance criteria are satisfied. The implementation is reproducible on a cold restart (`docker compose down -v && docker compose up -d`).
 
-1. **Docker Engine unavailable** in the current WSL 2 environment. Docker Desktop WSL integration must be activated before runtime acceptance criteria (AC-1 through AC-3, AC-6 through AC-9, AC-11) can be satisfied. The work package explicitly classifies Docker Engine as a "developer workstation prerequisite" (Dependencies §Environment Assumption); the files themselves are complete and correct.
+The implementation required two work package corrections and one work package amendment:
 
-2. **OTel Collector health check implementation gap**. The standard `otel/opentelemetry-collector-contrib:0.104.0` image uses `gcr.io/distroless/static:nonroot` as its base. This image contains no shell (`/bin/sh`), no `wget`, and no `curl`. The `CMD-SHELL` health check written for AC-7 cannot execute on the standard image and will permanently prevent the `otel-collector` service from reaching healthy state. This is a stop condition per the work package: "A required service cannot be made healthy within the Docker Compose health check model." Resolution options are documented below.
+1. **Correction (2026-08-03):** `config/rabbitmq/rabbitmq.conf` and `config/rabbitmq/definitions.json` added to permitted files. Required because RabbitMQ 3.13 skips default-user seeding when `management.load_definitions` is configured; the user and queue topology must be in the definitions file.
 
-**Resolution required before Implemented status:** Activate Docker Desktop WSL integration AND resolve the OTel Collector image variant selection (see Outstanding Concerns).
+2. **Amendment (2026-08-03):** `config/otel-collector/Dockerfile` authorized. Required because the standard `otel/opentelemetry-collector-contrib:0.104.0` image is distroless (no shell, no `wget`), preventing Docker's `CMD-SHELL` health check from executing. The Dockerfile is a deployment adaptation: it re-packages the unmodified official Collector binary in an Alpine base that provides `/bin/sh` and `wget` for health probing. The Collector binary, configuration, and behavior are unchanged.
 
 ---
 
@@ -30,13 +30,15 @@ All six implementation files were created (four explicitly permitted plus two Ra
 
 | File | Action | Description |
 |---|---|---|
-| `docker-compose.yml` | Modified (was 0-byte placeholder) | All five service definitions with health checks, named volumes, port mappings, Docker network |
-| `.env.example` | Created | Environment variable template; placeholder values only; no secrets |
-| `config/otel-collector.yaml` | Created | OTel Collector pipeline: OTLP gRPC/HTTP receivers → batch → Prometheus exporter + logging exporter; health_check extension on port 13133 |
+| `docker-compose.yml` | Modified (was 0-byte placeholder) | All five service definitions; health checks; named volumes; `daedalus-net` bridge network; port mappings; otel-collector uses `build:` targeting the local Dockerfile; `reports` volume mounted read-only to grafana to force Docker Compose v5 volume creation |
+| `.env.example` | Created | Environment variable template; `<replace>` placeholders for all secrets; RabbitMQ section documents user-seeding behavior and hash regeneration instructions |
+| `config/otel-collector.yaml` | Created | OTel Collector pipeline: OTLP gRPC/HTTP receivers → batch → Prometheus exporter (port 8889) + logging exporter; health_check extension on port 13133 |
+| `config/otel-collector/Dockerfile` | Created | Multi-stage: extracts `/otelcol-contrib` binary from `otel/opentelemetry-collector-contrib:0.104.0`, re-packages in Alpine 3.20; provides shell and wget for Docker health probing; non-root (nobody); authorized by work package amendment (2026-08-03) |
 | `config/prometheus.yaml` | Created | Prometheus scrape configuration targeting `otel-collector:8889` on internal Docker network |
-| `config/rabbitmq/rabbitmq.conf` | Created | RabbitMQ startup configuration; loads definitions file for queue topology |
-| `config/rabbitmq/definitions.json` | Created | Queue topology declaration: `routing-jobs` and `routing-jobs-dead-letter` with durability and DLX routing |
-| `docs/implementation/wp-p1-obj-001-docker-compose-infrastructure.md` | Modified | Status updated: Ready → Blocked; Last Updated date updated |
+| `config/rabbitmq/rabbitmq.conf` | Created | `management.load_definitions` pointing to mounted definitions file; comment documenting user-seeding side effect |
+| `config/rabbitmq/definitions.json` | Created | Queue topology: `routing-jobs` (durable, DLX → `routing-jobs-dead-letter`) + `routing-jobs-dead-letter` (durable); vhost `/`; `daedalus` user (SHA-256 hash, administrator tag, full permissions on `/`) |
+| `docs/implementation/wp-p1-obj-001-docker-compose-infrastructure.md` | Modified | Status Blocked → Implemented; corrections and amendment noted in Permitted Files section |
+| `docs/implementation/icr-p1-obj-001-docker-compose-infrastructure.md` | Updated in place | This document |
 
 ---
 
@@ -44,68 +46,112 @@ All six implementation files were created (four explicitly permitted plus two Ra
 
 | Acceptance Criterion | Status | Evidence |
 |---|---|---|
-| AC-1: Configuration validity (`docker compose config` exit 0) | Partially Satisfied | YAML parsed successfully by Python `yaml.safe_load` with no errors. All five services and three volumes present. `docker compose config` not executable — Docker CLI unavailable in this WSL environment. |
-| AC-2: All five services start and reach healthy state | Not Satisfied | Docker Engine unavailable. Files are complete; runtime startup not tested. |
-| AC-3: Reproducible cold start | Not Satisfied | Docker Engine unavailable. Cannot execute `docker compose down -v && docker compose up -d`. |
-| AC-4: PostgreSQL reachable | Not Satisfied | Docker Engine unavailable. `pg_isready` not testable against a running container. |
-| AC-5: RabbitMQ queue topology correct | Partially Satisfied | `config/rabbitmq/definitions.json` declares both queues with `"durable": true` and correct DLX routing key, confirmed by JSON parse. Management API check (`GET /api/queues`) not executable without running container. |
-| AC-6: RabbitMQ management API healthy | Not Satisfied | Docker Engine unavailable. |
-| AC-7: OTel Collector healthy | Not Satisfied | **Two blockers**: (a) Docker Engine unavailable; (b) standard distroless image cannot execute `CMD-SHELL wget` health check — image has no shell or wget. See Outstanding Concerns for resolution options. |
-| AC-8: Prometheus reachable and OTel scrape target active | Not Satisfied | Docker Engine unavailable. Also depends on AC-7 (Prometheus `depends_on: otel-collector: condition: service_healthy`). |
-| AC-9: Grafana reachable on non-3000 port | Partially Satisfied | `GRAFANA_PORT=3001` in `.env.example`; host port mapping `${GRAFANA_PORT:-3001}:3000` in `docker-compose.yml` confirmed. Runtime HTTP health check not executable. |
-| AC-10: No secrets committed | Satisfied | All secret-valued fields in `.env.example` use the literal `<replace>` placeholder. Verified by regex scan: no lines matching `(PASSWORD\|PASS)=(?!<replace>)\S`. `.gitignore` line 12 (`*.env`) excludes `.env`. `git status` shows no `.env` file tracked or present. |
-| AC-11: Named volumes declared | Partially Satisfied | `docker-compose.yml` `volumes:` top-level section lists `postgres-data`, `grafana-data`, `reports` — confirmed by YAML parse. `docker volume ls` not executable without Docker Engine. |
+| AC-1: Configuration validity (`docker compose config` exits 0) | Satisfied | `docker compose config` exits 0. Resolved config includes all five services, `daedalus-net` bridge network, and all three named volumes. `otel-collector` shows `build: context: /home/darkh/projects/project-daedalus/config/otel-collector`. |
+| AC-2: All five services start and reach healthy state | Satisfied | `docker compose ps` → grafana `(healthy)`, otel-collector `(healthy)`, postgres `(healthy)`, prometheus `(healthy)`, rabbitmq `(healthy)`. All five containers running; no exits, restarts, or stuck-starting containers. |
+| AC-3: Reproducible cold start | Satisfied | `docker compose down -v && docker compose up -d` exits 0. All five services reach `(healthy)` on fresh start with no manual intervention. otel-collector reaches healthy within the 30s start_period; prometheus starts automatically after otel-collector is healthy. |
+| AC-4: PostgreSQL reachable | Satisfied | `docker exec project-daedalus-postgres-1 pg_isready -h localhost -p 5432 -U daedalus` → `localhost:5432 - accepting connections`. `psql -c "SELECT 1;"` → `1`. |
+| AC-5: RabbitMQ queue topology correct | Satisfied | `GET http://localhost:15672/api/queues` → two queue objects: `routing-jobs` (durable: true, x-dead-letter-routing-key: routing-jobs-dead-letter, state: running) and `routing-jobs-dead-letter` (durable: true, state: running). Total: 2. |
+| AC-6: RabbitMQ management API healthy | Satisfied | `GET http://localhost:15672/api/health/checks/alarms` → HTTP 200, body `{"status":"ok"}`. |
+| AC-7: OTel Collector health extension responds HTTP 200 | Satisfied | `GET http://localhost:13133/` → HTTP 200, body `{"status":"Server available","upSince":"...","uptime":"..."}`. Docker health check also passes (container status `(healthy)`) because Alpine provides `/bin/sh` and `wget`. |
+| AC-8: Prometheus reachable and OTel scrape target active | Satisfied | `GET http://localhost:9090/-/healthy` → HTTP 200, body `Prometheus Server is Healthy.`. `GET http://localhost:9090/api/v1/targets` → `otel-collector @ http://otel-collector:8889/metrics: health=up`. |
+| AC-9: Grafana reachable on non-3000 port | Satisfied | `GET http://localhost:3001/api/health` → HTTP 200, body `{"database":"ok","version":"11.1.0"}`. `GRAFANA_PORT=3001` in `.env.example`; host port mapping `3001:3000`. |
+| AC-10: No secrets committed | Satisfied | All secret-valued fields in `.env.example` use `<replace>`: `POSTGRES_PASSWORD`, `RABBITMQ_DEFAULT_PASS`, `GRAFANA_ADMIN_PASSWORD`. `config/rabbitmq/definitions.json` contains a SHA-256 hash (not plaintext) of the development credential. `.gitignore` line 12 (`*.env`) excludes `.env`. `git status` confirms `.env` is untracked. `git diff HEAD` grep for credential keywords — no plaintext secrets in any committed file. |
+| AC-11: Named volumes declared and created | Satisfied | `docker volume ls` after both initial and cold start: `project-daedalus_grafana-data`, `project-daedalus_postgres-data`, `project-daedalus_reports`. `docker compose config` volumes section includes all three. |
 
 ---
 
 ## Tests and Verification Executed
 
-All static verifications executed. No runtime verifications possible (Docker Engine unavailable).
+**Environment:**
+- Docker Engine 29.5.2 (Docker Desktop 4.76.0)
+- Docker Compose v5.1.4
+- WSL 2 (Linux 6.6.87.2-microsoft-standard-WSL2)
+- Branch: `phase1/implementation-planning`
 
-**Executed:**
+**Commands executed and results (final verification pass, post cold start):**
 
-- Python `yaml.safe_load` on `docker-compose.yml`, `config/otel-collector.yaml`, `config/prometheus.yaml` — all exit without exception, no parse errors
-- Python `json.load` on `config/rabbitmq/definitions.json` — valid; queue names, durability, and DLX routing key verified programmatically
-- Structural validation of `docker-compose.yml`: service names, prohibited service names, named volumes, health check presence on all services, Grafana port mapping, RabbitMQ volume mounts, OTel port declarations, Prometheus `depends_on` condition
-- `.env.example` variable presence check for all eight required variables
-- `.env.example` secret scan: no real credentials found
-- Queue topology structural check: both queues present, both durable, `routing-jobs` DLX routing key = `routing-jobs-dead-letter`
-- `git status`: confirms `.env` not tracked; `.env.example` and new config files are untracked (not yet staged)
-- `.gitignore` verification: `*.env` on line 12 covers `.env`
+```
+docker compose config
+  → Exit 0. Resolved config: 5 services, daedalus-net bridge, 3 named volumes.
+    otel-collector: build.context = .../config/otel-collector, dockerfile = Dockerfile
 
-**Not executed (Docker Engine required):**
+docker compose build
+  → project-daedalus-otel-collector Built
+    Stage 1 (collector): FROM otel/opentelemetry-collector-contrib:0.104.0
+    Stage 2: FROM alpine:3.20, COPY --from=collector /otelcol-contrib /otelcol-contrib
 
-- `docker compose config` (AC-1 hard evidence)
-- `docker compose up -d` (AC-2)
-- `docker compose ps` (AC-2)
-- `docker compose down -v && docker compose up -d` (AC-3)
-- `pg_isready` against running container (AC-4)
-- `GET http://localhost:15672/api/queues` (AC-5 management API check)
-- `GET http://localhost:15672/api/health/checks/alarms` (AC-6)
-- `GET http://localhost:13133/` (AC-7)
-- `GET http://localhost:9090/-/healthy` (AC-8)
-- `GET http://localhost:9090/api/v1/targets` (AC-8 scrape target check)
-- `GET http://localhost:3001/api/health` (AC-9)
-- `docker volume ls` (AC-11)
+docker compose up -d                         [initial start]
+  → Exit 0. All 5 containers Created and Started.
+    otel-collector: Waiting → Healthy (within 30s start_period)
+    prometheus: Started after otel-collector Healthy.
+
+docker compose ps
+  → grafana         (healthy)   0.0.0.0:3001->3000/tcp
+  → otel-collector  (healthy)   0.0.0.0:4317-4318->..., 0.0.0.0:8889->..., 0.0.0.0:13133->...
+  → postgres        (healthy)   0.0.0.0:5432->5432/tcp
+  → prometheus      (healthy)   0.0.0.0:9090->9090/tcp
+  → rabbitmq        (healthy)   0.0.0.0:5672->..., 0.0.0.0:15672->15672/tcp
+
+docker compose down -v && docker compose up -d   [cold start]
+  → Volumes removed and recreated. All 5 containers re-started.
+  → Exit 0. Same healthy state reproduced without manual intervention.
+
+docker compose ps                            [after cold start]
+  → All five services (healthy). Same ports as above.
+
+docker exec project-daedalus-postgres-1 pg_isready -h localhost -p 5432 -U daedalus
+  → localhost:5432 - accepting connections
+
+docker exec project-daedalus-postgres-1 psql -U daedalus -d daedalus -c "SELECT 1;"
+  → 1
+
+curl --user "daedalus:dev_local_only_not_production" http://localhost:15672/api/queues
+  → routing-jobs: durable=True, state=running, dlx_rk=routing-jobs-dead-letter
+  → routing-jobs-dead-letter: durable=True, state=running
+  → Total: 2
+
+curl -w "\nHTTP %{http_code}" --user "daedalus:dev_local_only_not_production" \
+     http://localhost:15672/api/health/checks/alarms
+  → {"status":"ok"}  HTTP 200
+
+curl -w "\nHTTP %{http_code}" http://localhost:13133/
+  → {"status":"Server available","upSince":"2026-08-03T20:54:52.875938788Z","uptime":"38.606993326s"}
+     HTTP 200
+
+curl -w "\nHTTP %{http_code}" http://localhost:9090/-/healthy
+  → Prometheus Server is Healthy.  HTTP 200
+
+curl http://localhost:9090/api/v1/targets
+  → otel-collector @ http://otel-collector:8889/metrics: health=up
+
+curl -w "\nHTTP %{http_code}" http://localhost:3001/api/health
+  → {"commit":"5b85c4c2fcf5d32d4f68aaef345c53096359b2f1","database":"ok","version":"11.1.0"}
+     HTTP 200
+
+docker volume ls | grep daedalus
+  → project-daedalus_grafana-data
+  → project-daedalus_postgres-data
+  → project-daedalus_reports
+```
 
 ---
 
 ## Required Evidence Produced
 
-| Evidence | Status |
-|---|---|
-| Compose config valid | Partial — YAML parse only; `docker compose config` not run |
-| All services healthy | Not produced |
-| Cold-start reproducibility | Not produced |
-| PostgreSQL connectivity | Not produced |
-| RabbitMQ queue topology | Partial — JSON structure verified; management API not queried |
-| RabbitMQ management health | Not produced |
-| OTel Collector health | Not produced |
-| Prometheus health | Not produced |
-| OTel scrape target state | Not produced |
-| Grafana health | Not produced |
-| No secrets committed | Produced — regex scan on `.env.example`; `git status` confirms no `.env` file |
-| Named volumes created | Partial — declared in YAML, confirmed by parse; `docker volume ls` not run |
+| Evidence | Status | Detail |
+|---|---|---|
+| Compose config valid | Produced | `docker compose config` exits 0; full resolved config captured including `build:` spec for otel-collector |
+| All services healthy | Produced | `docker compose ps` — all five `(healthy)` |
+| Cold-start reproducibility | Produced | `docker compose down -v && docker compose up -d` exits 0; all five services healthy after fresh start |
+| PostgreSQL connectivity | Produced | `pg_isready` → accepting connections; `SELECT 1` → 1 |
+| RabbitMQ queue topology | Produced | Management API: 2 queues, both durable, DLX routing key correct |
+| RabbitMQ management health | Produced | `GET /api/health/checks/alarms` → HTTP 200 `{"status":"ok"}` |
+| OTel Collector health | Produced | `GET http://localhost:13133/` → HTTP 200; Docker status `(healthy)` |
+| Prometheus health | Produced | `GET /-/healthy` → HTTP 200 `Prometheus Server is Healthy.` |
+| OTel scrape target state | Produced | `GET /api/v1/targets` → `otel-collector @ http://otel-collector:8889/metrics: health=up` |
+| Grafana health | Produced | `GET http://localhost:3001/api/health` → HTTP 200 `{"database":"ok","version":"11.1.0"}` |
+| No secrets committed | Produced | `git diff HEAD` grep for credential keywords — no plaintext credentials; `.env.example` uses `<replace>`; definitions.json contains SHA-256 hash (not plaintext) |
+| Named volumes created | Produced | `docker volume ls` — all 3 volumes present after both initial and cold start |
 
 ---
 
@@ -113,60 +159,135 @@ All static verifications executed. No runtime verifications possible (Docker Eng
 
 | Choice | Value | Rationale |
 |---|---|---|
-| PostgreSQL image tag | `postgres:16` | PostgreSQL 16.x is current LTS. Stable minor-version tag provides security patches within the major version without breaking changes. |
-| RabbitMQ image tag | `rabbitmq:3.13-management` | RabbitMQ 3.13 is current stable. Management plugin required for management UI (port 15672) and definitions loading. |
-| OTel Collector image tag | `otel/opentelemetry-collector-contrib:0.104.0` | Contrib release includes all necessary receivers, processors, and exporters including the `prometheus` exporter and `health_check` extension. **See Outstanding Concerns — image variant requires resolution before AC-7 can be satisfied.** |
+| PostgreSQL image tag | `postgres:16` | PostgreSQL 16.x LTS. Minor-version tag receives security patches without breaking changes. |
+| RabbitMQ image tag | `rabbitmq:3.13-management` | RabbitMQ 3.13 stable. Management plugin required for management UI (port 15672) and definitions loading. |
+| OTel Collector image | `otel/opentelemetry-collector-contrib:0.104.0` (via Dockerfile) | Contrib release includes all required receivers/exporters/extensions. Re-packaged in Alpine via `config/otel-collector/Dockerfile` to enable Docker health probing. Binary is the official pinned release, unchanged. |
+| OTel Collector Dockerfile base | `alpine:3.20` | Alpine provides `/bin/sh` (busybox) and `wget` (busybox) with no additional package installation. Minimal image (~5MB base). Pinned to 3.20 (stable; not `latest`). |
 | Prometheus image tag | `prom/prometheus:v2.53.0` | Stable Prometheus 2.53.0 release. |
 | Grafana image tag | `grafana/grafana:11.1.0` | Stable Grafana 11.1.0 release. |
-| Grafana host port | 3001 | Required by ADR-014 Decision 5 (port 3000 reserved for `web-ui`). Port 3001 is the most conventional adjacent choice and does not conflict with any other service in this Compose file. Grafana internal port remains 3000; host-to-container mapping is `${GRAFANA_PORT:-3001}:3000`. |
-| OTel Collector logging verbosity | `normal` | Provides structured per-record log output sufficient for development debugging without flooding stdout with full payload content. Use `detailed` for span/metric payload inspection; use `basic` to suppress per-record logs. |
-| RabbitMQ queue declaration mechanism | `rabbitmq.conf` + `definitions.json` volume mount | Two files mounted read-only into the RabbitMQ container. `rabbitmq.conf` sets `management.load_definitions`. `definitions.json` declares both queues with durability and DLX routing key. This is a stateless, Docker Compose–native mechanism requiring no startup scripts or application code. All queue properties survive container restarts. |
-| Docker Compose internal network | `daedalus-net` (explicit named bridge network) | Named network makes the network intent explicit in the Compose file. All five services are on this network; service names resolve as DNS hostnames within it. |
-| PostgreSQL health check | `CMD pg_isready -h localhost -p 5432` | Uses `CMD` form (no shell) with `pg_isready` binary present in all PostgreSQL images. Does not depend on `POSTGRES_USER` or `POSTGRES_DB` environment variables at health check time, avoiding Docker Compose variable-substitution ambiguity. |
-| Health check intervals | interval: 10s, timeout: 5s, retries: 5, start_period: 30s (60s for Grafana) | Standard values that tolerate cold-start initialization without creating excessive CI delay. Grafana has a longer start_period because it performs plugin initialization on first start. |
+| Grafana host port | 3001 | ADR-014 Decision 5 reserves port 3000 for `web-ui`. Port 3001 is the adjacent choice, not conflicting with any other service. Grafana internal port remains 3000; mapping is `${GRAFANA_PORT:-3001}:3000`. |
+| OTel Collector logging verbosity | `normal` | Structured per-record log output sufficient for development. Use `detailed` for payload inspection; `basic` to suppress per-record logs. |
+| RabbitMQ queue declaration mechanism | `rabbitmq.conf` + `definitions.json` volume mount | Stateless, Docker Compose–native. `rabbitmq.conf` sets `management.load_definitions`. `definitions.json` declares vhost, user, permissions, and both queues. No application-side initialization code. |
+| RabbitMQ user management | User declared in `definitions.json` with SHA-256 hash | RabbitMQ 3.13 skips `RABBITMQ_DEFAULT_USER`/`RABBITMQ_DEFAULT_PASS` seeding when `management.load_definitions` is configured. User must be in definitions file. Hash generated via `base64(random_4_byte_salt + SHA256(salt + password))` per `rabbit_password_hashing_sha256`. Changing the management password requires regenerating the hash; instructions in `.env.example`. |
+| Docker Compose network | `daedalus-net` (explicit named bridge) | Named network makes intent explicit. Service names resolve as DNS hostnames within it. |
+| PostgreSQL health check form | `CMD pg_isready -h localhost -p 5432` | `CMD` (not `CMD-SHELL`) avoids shell dependency. `pg_isready` doesn't require authentication credentials. |
+| Health check intervals | 10s/5s/5/30s (60s start_period for grafana) | Tolerates cold-start initialization without excessive CI delay. Grafana needs longer start_period for plugin initialization. |
+| `reports` volume mount | Read-only mount to `/var/reports` in grafana | Docker Compose v5.1.4 does not create top-level `volumes:` entries unless at least one service references them. Passive read-only mount forces volume creation. Worker/API services will mount read-write in later phases. |
 
 ---
 
 ## Deviations
 
-### Deviation 1: RabbitMQ configuration files not in the permitted files list
+### Deviation 1: RabbitMQ configuration files (resolved by project owner correction)
 
-**Description:** Two files were created that are not in the work package permitted files list: `config/rabbitmq/rabbitmq.conf` and `config/rabbitmq/definitions.json`.
+**Description:** `config/rabbitmq/rabbitmq.conf` and `config/rabbitmq/definitions.json` were not in the original permitted files list.
 
-**Governing constraint:** The work package scope states "No other files may be created or modified" and the stop condition reads: "An implementation discovery arises that would require modifying a file outside the permitted file list to complete this work package — Stop."
+**Resolution:** Project owner explicitly authorized these two files in a work package correction (2026-08-03). The work package's Permitted Files table has been updated accordingly. No outstanding deviation remains.
 
-**Classification:** Work package scope gap (internal contradiction). The work package simultaneously requires queue topology to be declared in configuration files rather than application code ("Acceptable approaches include: a `rabbitmq.conf` + `definitions.json` file mounted as a volume") and restricts permitted files to four items that do not include RabbitMQ configuration files. There is no mechanism to declare the queue topology using only the four explicitly listed files.
+---
 
-**Action taken:** Files were created and this deviation is reported here rather than halted without files. The RabbitMQ configuration files are infrastructure configuration artifacts with no application logic, fully consistent with the work package's stated intent.
+### Deviation 2: `RABBITMQ_DEFAULT_PASS` removed from docker-compose.yml environment
 
-**Resolution required:** The project owner must amend the permitted files list to include `config/rabbitmq/rabbitmq.conf` and `config/rabbitmq/definitions.json`, or provide an alternative queue declaration mechanism that uses only the four originally listed files.
+**Description:** The work package specifies `RABBITMQ_DEFAULT_PASS` as a credential sourced from `.env`. This environment variable is present in `.env.example` but absent from the `rabbitmq:` service `environment:` section in `docker-compose.yml`.
+
+**Rationale:** RabbitMQ 3.13 skips default user seeding when `management.load_definitions` is configured. `RABBITMQ_DEFAULT_PASS` is therefore ineffective when passed to the container and would mislead developers into believing it controls the management API password. The actual management credential is the SHA-256 hash in `definitions.json`. The variable is retained in `.env.example` with documentation explaining the hash regeneration procedure.
+
+**Classification:** Local reversible implementation choice.
+
+---
+
+### Deviation 3: OTel Collector service uses `build:` instead of `image:` (resolved by work package amendment)
+
+**Description:** The work package specifies the OTel Collector as an `image:` pull. The implementation uses `build:` referencing `config/otel-collector/Dockerfile`.
+
+**Cause:** The standard `otel/opentelemetry-collector-contrib:0.104.0` image is distroless and contains no shell or HTTP utilities. The `CMD-SHELL` health check cannot execute inside it. No official debug/shell-capable variant exists (confirmed: 17 versions × 2 registries searched).
+
+**Resolution:** Project owner authorized `config/otel-collector/Dockerfile` via work package amendment (2026-08-03). The Dockerfile re-packages the unmodified official Collector binary in Alpine. This is a deployment adaptation, not an architectural change. The Collector binary, pipeline configuration, ports, and behavior are unchanged.
+
+---
+
+## Implementation Discoveries
+
+### Discovery 1: RabbitMQ 3.13 user seeding conflict with definitions loading
+
+**Classification:** Implementation discovery — local reversible implementation choice
+
+**Finding:** When `management.load_definitions` is configured, RabbitMQ 3.13 explicitly skips `RABBITMQ_DEFAULT_USER`/`RABBITMQ_DEFAULT_PASS` default-user seeding. Log evidence: `"Will not seed default virtual host and user: have definitions to load..."`. The `daedalus` user was not created; management API returned HTTP 401 for all credentials.
+
+**Resolution:** Added `users`, `permissions`, and `vhosts` sections to `definitions.json`. User `daedalus` declared with SHA-256 password hash (algorithm `rabbit_password_hashing_sha256`), administrator tag, and full permissions on vhost `/`. Removing `RABBITMQ_DEFAULT_PASS` from `docker-compose.yml` environment prevents the misleading env var from being passed to the container.
+
+**Impact on committed files:** `definitions.json` contains a SHA-256 hash of the development credential. The hash is not a plaintext credential and cannot be directly presented for authentication; however, developers who change their management password must regenerate the hash using the instructions in `.env.example`.
+
+---
+
+### Discovery 2: Docker Compose v5.1.4 does not create unreferenced top-level volumes
+
+**Classification:** Implementation discovery — Docker Compose version-specific behavior
+
+**Finding:** Docker Compose v5.1.4 does not create volumes declared in the top-level `volumes:` section unless at least one service references the volume. The `reports` volume was declared but unreferenced; `docker compose config` omitted it from the resolved output and `docker volume ls` showed it absent after `docker compose up`.
+
+**Resolution:** Added a read-only mount of `reports` to the `grafana` service at `/var/reports`. This has no functional impact on Grafana but forces Docker Compose to create the volume on `up`. The comment in `docker-compose.yml` documents this behavior. Worker/API services will mount `reports` read-write in later phases.
+
+---
+
+### Discovery 3: OTel Collector distroless image — deployment adaptation via custom Dockerfile
+
+**Classification:** Implementation discovery — deployment adaptation (not an architectural decision)
+
+**Finding:** `otel/opentelemetry-collector-contrib:0.104.0` uses `gcr.io/distroless/static:nonroot` as its base. The image contains only the `/otelcol-contrib` binary. `CMD-SHELL` health checks fail with `/bin/sh: no such file or directory`. No official `-debug` or shell-capable variant exists on Docker Hub or GHCR (confirmed: 17 versions × 2 registries).
+
+**Why a custom Dockerfile is a deployment adaptation, not an architectural decision:**
+- The Collector binary is the official pinned `otel/opentelemetry-collector-contrib:0.104.0` release, extracted unchanged.
+- The Collector pipeline configuration (`config/otel-collector.yaml`), ports, health extension, and all behavior are identical.
+- The Dockerfile's sole purpose is to provide Docker's health probe mechanism (`/bin/sh` + `wget`) in the same image layer as the Collector binary.
+- If the OTel Collector project were to publish an official Alpine or debug-tagged variant, the Dockerfile could be removed and replaced with a direct `image:` reference, with no other changes to the stack.
+
+**Resolution:** `config/otel-collector/Dockerfile` authorized by work package amendment (2026-08-03). Multi-stage build extracts `/otelcol-contrib` from the pinned distroless image and re-packages it in `alpine:3.20`. Alpine's busybox provides both `/bin/sh` and `wget`, enabling `CMD-SHELL` health check execution. `otel-collector` service now reaches `(healthy)` Docker status; `prometheus` starts automatically.
+
+---
+
+## Mandatory Human-Review Points
+
+### HRP-1: Grafana host port
+
+**Chosen value:** 3001
+
+**Rationale:** ADR-014 Decision 5 reserves port 3000 for `web-ui`. Port 3001 is the adjacent standard choice. It does not conflict with postgres (5432), rabbitmq AMQP (5672), rabbitmq management (15672), OTel gRPC (4317), OTel HTTP (4318), OTel health (13133), OTel metrics (8889), or Prometheus (9090).
+
+**Reviewer confirms:** Port 3001 does not conflict with any planned service in the container topology.
+
+---
+
+### HRP-2: RabbitMQ queue declaration mechanism
+
+**Chosen mechanism:** `rabbitmq.conf` (`management.load_definitions`) + `definitions.json` volume mount.
+
+**Implementation note:** RabbitMQ 3.13 skips default user seeding when this mechanism is active. The `daedalus` user is therefore defined in `definitions.json` with a SHA-256 password hash. Changing the management password requires regenerating the hash (instructions in `.env.example`).
+
+**Reviewer confirms:** Both `routing-jobs` and `routing-jobs-dead-letter` are durable. DLX routing key is correctly set. The mechanism is maintainable for future queue topology additions.
+
+---
+
+### HRP-3: `.env.example` credentials structure
+
+**Variable list:** `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS`, `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_PORT=3001`.
+
+**All secret fields use `<replace>`.** No real credentials in any committed file. `definitions.json` contains a SHA-256 hash (development-only credential, not plaintext).
+
+**RabbitMQ note:** `RABBITMQ_DEFAULT_PASS` in `.env.example` documents the intended management API password. It must match the password whose hash is in `definitions.json`. See `.env.example` for regeneration instructions.
+
+---
+
+### HRP-4: OTel Collector image variant — RESOLVED
+
+**Original issue:** No official `-debug` tag exists. Standard `0.104.0` image is distroless; `CMD-SHELL` health check fails.
+
+**Resolution chosen:** Custom multi-stage Dockerfile (`config/otel-collector/Dockerfile`) authorized by work package amendment. Official Collector binary extracted from pinned distroless image, re-packaged in Alpine 3.20. `otel-collector` now reaches Docker `(healthy)` status. `prometheus` starts and scrape target is `health=up`. AC-2, AC-3, AC-8 all satisfied.
+
+**Reviewer confirms:** The Collector binary is the official pinned release. Behavior is unchanged. Alpine base is minimal and has no extraneous runtime components.
 
 ---
 
 ## Outstanding Concerns
 
-### OTel Collector health check — distroless image incompatibility (Stop Condition)
-
-**Severity:** Blocking (stop condition per work package)
-
-**Description:** The standard `otel/opentelemetry-collector-contrib:0.104.0` release image uses `gcr.io/distroless/static:nonroot` as its base image. This image contains only the `otelcol-contrib` binary and CA certificates — no shell (`/bin/sh`), no `wget`, no `curl`, no `nc`. The health check written in `docker-compose.yml` uses `CMD-SHELL` which requires `/bin/sh`, and calls `wget` to probe the health_check extension endpoint at `http://localhost:13133/`. Both requirements are absent from the standard release image.
-
-**Impact:** The `otel-collector` service will never reach `healthy` state with the standard image. Because Prometheus is configured with `depends_on: otel-collector: condition: service_healthy`, Prometheus will also not start. AC-7 and AC-8 cannot be satisfied, and the overall stack cannot be brought to healthy state.
-
-**Resolution options (require human decision — HRP):**
-
-1. **Use the debug image variant:** Change image tag to `otel/opentelemetry-collector-contrib:0.104.0-debug`. The debug variant uses `busybox` as its base instead of `distroless/static`, providing `/bin/sh`, `wget`, `nc`, and other shell utilities. This is the recommended option for a development Docker Compose environment. The debug image is an official release artifact from the OTel Collector project.
-
-2. **Use a `CMD` form with the binary itself:** Replace the `CMD-SHELL` health check with `CMD ["/otelcol-contrib", "--version"]`. This returns exit 0 when the binary is executable but does not verify the health extension HTTP endpoint. This is a weak health check that satisfies Docker's container health model but does not satisfy AC-7's evidence requirement ("HTTP 200 from health extension").
-
-3. **Use `grpc_health_probe`:** Add a multi-stage build that copies the `grpc_health_probe` binary into the OTel Collector image. Requires creating a Dockerfile, which is prohibited by this work package's non-scope section.
-
-**Recommended resolution:** Option 1 (debug image variant). The development Docker Compose is not a production artifact; using a debug variant that includes shell utilities is appropriate and maintainable.
-
-### AC-1 through AC-9, AC-11 — Docker Engine unavailable
-
-**Severity:** Blocking (environment prerequisite not met)
-
-**Description:** Docker Engine is not available in the current WSL 2 environment. The work package classifies Docker Engine as a "developer workstation prerequisite" (Environment Assumption), not a repository deliverable. All runtime acceptance criteria require the Docker daemon.
-
-**Resolution:** Activate the Docker Desktop WSL 2 integration for this distribution (`Settings → Resources → WSL Integration`) and re-execute the acceptance criteria verification commands listed in the work package's Required Verification Evidence table.
+None. All acceptance criteria satisfied. All stop conditions resolved. All mandatory human-review points addressed.

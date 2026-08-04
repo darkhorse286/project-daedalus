@@ -9,7 +9,7 @@
 
 **Title:** Docker Compose Infrastructure Foundation
 
-**Status:** Blocked
+**Status:** Implemented
 
 **Author:** Darkhorse286
 
@@ -61,6 +61,13 @@ The implementation agent is authorized to create the following files. No other f
 | `.env.example` | Create | Template for all required environment variables; placeholder values only; no secrets |
 | `config/otel-collector.yaml` | Create | OTel Collector pipeline: OTLP/gRPC receiver → Prometheus exporter + logging exporter |
 | `config/prometheus.yaml` | Create | Prometheus scrape configuration targeting the OTel Collector metrics endpoint |
+| `config/rabbitmq/rabbitmq.conf` | Create | RabbitMQ startup configuration; declares definitions file load path |
+| `config/rabbitmq/definitions.json` | Create | Queue topology declaration: `routing-jobs` and `routing-jobs-dead-letter` with durability and DLX routing |
+| `config/otel-collector/Dockerfile` | Create | Multi-stage image: extracts the pinned official Collector binary from `otel/opentelemetry-collector-contrib:0.104.0` and re-packages it in Alpine to provide `/bin/sh` and `wget` for Docker health check probing. Does not rebuild or modify the Collector binary. Does not change Collector behavior. Does not introduce additional runtime components. Exists solely to satisfy Docker Compose health-check semantics. Authorized by amendment (2026-08-03). |
+
+**Correction note (2026-08-03):** The original permitted files list omitted the RabbitMQ configuration files required to implement the ADR-003 queue topology constraint without application-side code. These two files are explicitly authorized by project owner correction. Both files are part of the same independently reviewable pull request.
+
+**Amendment note (2026-08-03):** The `otel/opentelemetry-collector-contrib:0.104.0` standard image is distroless and contains no shell or HTTP utilities, preventing the Docker Compose `CMD-SHELL` health check from executing inside the container. This caused a stop condition (HRP-4). The Project Owner has authorized `config/otel-collector/Dockerfile` to resolve this blocker. The Dockerfile packages the unmodified official Collector binary in an Alpine base solely to provide the probe tools Docker's health check model requires. It does not rebuild the Collector, does not modify Collector behavior, does not introduce additional runtime components, and is a deployment adaptation rather than an architectural decision.
 
 ### Service Requirements
 
